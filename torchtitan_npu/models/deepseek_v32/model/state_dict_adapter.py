@@ -4,17 +4,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import Any
 
 from torch.distributed.checkpoint.hf_storage import HuggingFaceStorageReader
 
 from torchtitan.models.deepseek_v3 import DeepSeekV3StateDictAdapter
 
-from torchtitan_npu.tools.weight_utils import (
-    _split_w13_for_mapping,
-    convert_expert_format,
-    detect_input_format_by_path,
-)
+from torchtitan_npu.tools.weight_utils import detect_input_format_by_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,36 +41,6 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
             from torch.distributed.checkpoint import FileSystemReader
 
             return FileSystemReader(path)
-
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Create a load plan/ Convert to HF format"""
-        if self._input_format == "dcp":
-            return state_dict
-
-        has_w13 = any(".moe.experts.w13" in k for k in state_dict.keys())
-        if has_w13:
-            # split w13 -> w1, w3 for load plan
-            working_state = _split_w13_for_mapping(state_dict)
-            return super().to_hf(working_state)
-        else:
-            return super().to_hf(state_dict)
-
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert loaded data to runtime format"""
-        filtered = {
-            k: v
-            for k, v in hf_state_dict.items()
-            if not k.endswith(".weight_scale_inv")
-        }
-
-        if self._input_format == "hf":
-            state_dict = super().from_hf(filtered)
-        else:
-            state_dict = filtered
-        target = "gmm" if self.use_gmm else "standard"
-        state_dict = convert_expert_format(state_dict, target)
-
-        return state_dict
 
     def _setup_checkpoint_patch(self, model_args):
         """setup checkpoint save patch"""

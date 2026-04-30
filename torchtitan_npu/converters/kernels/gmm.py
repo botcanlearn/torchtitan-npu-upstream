@@ -9,12 +9,26 @@ from typing import Any
 import torch
 
 import torch_npu
-from torch import nn
-from torch.distributed.tensor import DTensor
+from torch import nn, Tensor
+from torch.distributed._functional_collectives import (
+    all_to_all_single,
+    all_to_all_single_autograd,
+)
+from torch.distributed.tensor import DeviceMesh, DTensor
+from torch.distributed.tensor.parallel.style import ParallelStyle
 
-from ..base_converter import BaseConverter
-from ..convert_utils import replace_functions, replace_methods
-from ..registry import register_npu_converter
+from torchtitan.distributed.expert_parallel import ExpertParallel
+from torchtitan.models.moe.moe import GroupedExperts
+
+from torchtitan_npu.converters.kernels.permutation import NPUMoeTokenUnpermute
+from torchtitan_npu.converters.model_custom_interface import (
+    ModelCustomConfig,
+    ModelCustomConverter,
+    ParallelizePlanUpdater,
+    StateDictUpdater,
+)
+from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.tools.weight_utils import _split_w13_for_mapping, fuse_experts
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +94,6 @@ def npu_grouped_mm(x, weight, group_list):
 def _run_experts_grouped_mm(
     w13: torch.Tensor,
     w2: torch.Tensor,
-    _w3: torch.Tensor,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
     swiglu_limit: float | None = None,
@@ -99,142 +112,215 @@ def _run_experts_grouped_mm(
     return out
 
 
-def npu_grouped_experts_forward(
-    self,
-    x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
-) -> torch.Tensor:
-    if isinstance(self.w2, DTensor):
+class NpuGroupedExperts(GroupedExperts):
+    def __init__(
+        self,
+        parent: GroupedExperts,
+    ):
+        self.__dict__.update(parent.__dict__)
+        self.use_grouped_mm = True
+        if self.w1 is not None and self.w3 is not None:
+            # pyrefly: ignore [no-matching-overload]
+            w13_data = torch.empty(
+                self.num_experts,
+                self.w2.shape[2] * 2,
+                self.w2.shape[1],
+                dtype=self.w1.dtype,
+                device=self.w1.device,
+            )
+            self.w13 = nn.Parameter(w13_data)
+            # pyrefly: ignore [bad-assignment]
+            self.w1 = None
+            # pyrefly: ignore [bad-assignment]
+            self.w3 = None
+            # pyrefly: ignore [bad-assignment]
+            parent.w1 = None
+            # pyrefly: ignore [bad-assignment]
+            parent.w3 = None
+            logger.info(f"  NpuGroupedExperts: Created w13 [{w13_data.shape}]")
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
         # Convert parameters from DTensors to plain Tensors, to work with
         # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-        w2 = self.w2.to_local()
-        w13 = self.w13.to_local() if self.w13 is not None else None
-    else:
-        w2 = self.w2
-        w13 = self.w13
-
-    # NOTE: If EP is not used, we need to pad the indices
-    #       to prepare for grouped_mm;
-    #       otherwise, EP will handle the padding.
-    if (
-        not isinstance(self.w2, DTensor)
-        # pyrefly: ignore [not-iterable]
-        or "ep" not in self.w2.device_mesh.mesh_dim_names
-    ):
-        group_size_params["expert_model_parallel_size"] = 1
-    else:
+        is_dtensor = isinstance(self.w2, DTensor)
         # pyrefly: ignore [missing-attribute]
-        ep_dim_index = self.w2.device_mesh.mesh_dim_names.index("ep")
-        group_size_params["expert_model_parallel_size"] = self.w2.device_mesh.shape[
-            ep_dim_index
-        ]
-    run_experts_fn = _run_experts_grouped_mm
+        w2 = self.w2.to_local() if is_dtensor else self.w2
+        # pyrefly: ignore [missing-attribute]
+        w13 = self.w13.to_local() if is_dtensor and self.w13 is not None else self.w13
 
-    if group_size_params["g_size"] is None:
-        group_size_params["num_experts"] = self.num_experts
-        group_size_params["g_size"] = (
-            # pyrefly: ignore [unsupported-operation]
-            group_size_params["num_experts"]
-            // group_size_params["expert_model_parallel_size"]
-        )
+        # NOTE: If EP is not used, we need to pad the indices
+        #       to prepare for grouped_mm;
+        #       otherwise, EP will handle the padding.
+        if (
+            not is_dtensor
+            # pyrefly: ignore [not-iterable]
+            or "ep"
+            not in self.w2.device_mesh.mesh_dim_names  # pyrefly: ignore [missing-attribute]
+        ):
+            group_size_params["expert_model_parallel_size"] = 1
+        else:
+            # pyrefly: ignore [missing-attribute]
+            ep_dim_index = self.w2.device_mesh.mesh_dim_names.index("ep")
+            # pyrefly: ignore [missing-attribute]
+            group_size_params["expert_model_parallel_size"] = self.w2.device_mesh.shape[
+                ep_dim_index
+            ]
 
-    # XXX: Refactor this, only DSv4 inject this attribute to its experts.
-    swiglu_limit = getattr(self, "swiglu_limit", None)
+        if group_size_params["g_size"] is None:
+            group_size_params["num_experts"] = self.num_experts
+            group_size_params["g_size"] = (
+                # pyrefly: ignore [unsupported-operation]
+                group_size_params["num_experts"]
+                // group_size_params["expert_model_parallel_size"]
+            )
 
-    # pyrefly: ignore [bad-argument-type]
-    return run_experts_fn(w13, w2, None, x, num_tokens_per_expert, swiglu_limit)
+        # Refactor this, only DSv4 inject this attribute to its experts.
+        swiglu_limit = getattr(self, "swiglu_limit", None)
+
+        # pyrefly: ignore [bad-argument-type]
+        return _run_experts_grouped_mm(w13, w2, x, num_tokens_per_expert, swiglu_limit)
+
+    def init_weights(self, init_std: float):
+        for w in [self.w2, self.w13]:
+            if w is not None:
+                nn.init.normal_(w, mean=0.0, std=init_std)
 
 
-def npu_grouped_experts_init_weights(self, init_std: float):
-    for w in [self.w2, self.w13]:
-        if w is not None:
-            nn.init.normal_(w, mean=0.0, std=init_std)
-
-
-@register_npu_converter("npu_gmm")
-class GMMKernel(BaseConverter):
-
-    TARGET_PACKAGE = "torchtitan.models.moe"
-    TARGET_CLASS = "GroupedExperts"
-
-    @classmethod
-    def apply(cls, model: nn.Module, model_name: str, **kwargs) -> int:
-
-        replacement_counts = 0
-
-        # 1. Replacing GroupedExperts methods
-        replacement_counts += replace_methods(
-            class_name=cls.TARGET_CLASS,
-            method_name="forward",
-            new_method=npu_grouped_experts_forward,
-            package=cls.TARGET_PACKAGE,
-        )
-
-        replacement_counts += replace_methods(
-            class_name=cls.TARGET_CLASS,
-            method_name="init_weights",
-            new_method=npu_grouped_experts_init_weights,
-            package=cls.TARGET_PACKAGE,
-        )
-
-        # 2. Replacing module function _run_experts_grouped_mm
-        func_replacements = replace_functions(
-            func_name="_run_experts_grouped_mm",
-            new_func=_run_experts_grouped_mm,
-            package=cls.TARGET_PACKAGE,
-        )
-        replacement_counts += func_replacements
-
-        # Initialize w13
-        cls._change_existing_instances(model)
-
-        return replacement_counts
-
-    @classmethod
-    def _change_existing_instances(cls, model: nn.Module):
-        """Traverse the model and convert w1+w3 of the existing GroupedExperts into w13."""
+class NpuGroupedExpertConverter(ModelCustomConverter):
+    def convert(self, model: nn.Module):
         for name, module in model.named_modules():
-            class_name = type(module).__name__
-            if (
-                "GroupedExperts" not in class_name
-                and cls.TARGET_CLASS not in class_name
-            ):
+            if not isinstance(module, GroupedExperts):
                 continue
-            w1 = getattr(module, "w1", None)
-            w3 = getattr(module, "w3", None)
+            splits = name.split(".")
+            # parent module name
+            parent_module_name = ".".join(splits[:-1])
+            module_name = splits[-1]
+            parent_module = model
+            if parent_module_name:
+                parent_module = model.get_submodule(parent_module_name)
+            setattr(parent_module, module_name, NpuGroupedExperts(module))
 
-            if w1 is not None and w3 is not None:
-                try:
-                    cls._create_w13_from_w1_w3(module, name)
-                except Exception as e:
-                    logger.warning(f"Failed to convert {name}: {e}")
-            else:
-                logger.warning(f"  {name}: Missing w1/w3, skipping")
-        return
+
+class GMMExpertParallel(ExpertParallel):
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+        ep_degree = device_mesh.shape[0]
+        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
+
+        # perform all-to-all
+        routed_input = all_to_all_single_autograd(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout
+        indices = (
+            torch.arange(
+                num_local_experts,
+                dtype=torch.int64,
+                device=routed_input.device,
+            )
+            .repeat(ep_degree)
+            .repeat_interleave(
+                num_tokens_per_expert_group.view(-1),
+                output_size=sum(self.output_splits),
+            )
+        )
+
+        routed_input, self.permuted_indices = torch_npu.npu_moe_token_permute(
+            routed_input, indices
+        )
+
+        num_tokens_per_expert_group = num_tokens_per_expert_group.view(
+            ep_degree, -1
+        ).sum(0)
+
+        return routed_input, num_tokens_per_expert_group
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        # Using NPUMoeTokenUnpermute.apply and npu_moe_token_unpermute is equivalent here,
+        # and avoid storing tensor routed_output during backpropagation.
+        routed_output = NPUMoeTokenUnpermute.apply(
+            routed_output, self.permuted_indices, routed_output.shape
+        )
+        routed_output = all_to_all_single_autograd(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+        )
+        return routed_output
+
+
+class GMMParallelizePlanUpdater(ParallelizePlanUpdater):
+    @classmethod
+    def update(
+        cls, parallelize_plan: ParallelStyle | dict[str, ParallelStyle] | None
+    ) -> ParallelStyle | dict[str, ParallelStyle] | None:
+        """Update the layer plan"""
+        if isinstance(parallelize_plan, ExpertParallel):
+            return GMMExpertParallel()
+        return parallelize_plan
+
+
+class GMMStateDictUpdater(StateDictUpdater):
+    @classmethod
+    def to_hf(cls, state_dict):
+        has_w13 = any(".moe.experts.w13" in k for k in state_dict.keys())
+        if has_w13:
+            state_dict = _split_w13_for_mapping(state_dict)
+        return state_dict
 
     @classmethod
-    def _create_w13_from_w1_w3(cls, module: nn.Module, module_name: str):
-        """Create parameter w13 from w1"""
-        w1 = module.w1
+    def from_hf(cls, state_dict):
+        filtered = {
+            k: v for k, v in state_dict.items() if not k.endswith(".weight_scale_inv")
+        }
 
-        # pyrefly: ignore [bad-index]
-        num_experts = w1.shape[0]
-        # pyrefly: ignore [bad-index]
-        hidden_dim = w1.shape[1]
-        # pyrefly: ignore [bad-index]
-        dim = w1.shape[2]
+        return fuse_experts(filtered)
 
-        # pyrefly: ignore [no-matching-overload]
-        w13_data = torch.empty(
-            num_experts, hidden_dim * 2, dim, dtype=w1.dtype, device=w1.device
-        )
-        module.register_parameter("w13", nn.Parameter(w13_data))
-        # pyrefly: ignore [bad-argument-type]
-        module.use_grouped_mm = True
 
-        # pyrefly: ignore [bad-argument-type]
-        module.w1 = None
-        # pyrefly: ignore [bad-argument-type]
-        module.w3 = None
-
-        logger.info(f"  {module_name}: Created w13 [{w13_data.shape}]")
+@register_model_converter("npu_gmm")
+class GMMModelConfig(ModelCustomConfig):
+    model_converter = NpuGroupedExpertConverter
+    parallelize_plan_updater = GMMParallelizePlanUpdater
+    state_dict_updater = GMMStateDictUpdater

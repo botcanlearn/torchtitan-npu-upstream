@@ -351,21 +351,3 @@ def patch_llama4_checkpoint_support():
         return spec
 
     llama4_module.get_train_spec = patch_llama4_spec
-
-
-def patch_dsv3_checkpoint_support():
-    import torchtitan.models.deepseek_v3 as deepseek_v3_module
-    from torchtitan.protocols.train_spec import TrainSpec
-
-    from torchtitan_npu.models.deepseek_v3.model.state_dict_adapter import (
-        DeepSeekV3StateDictAdapterNpu,
-    )
-
-    original = deepseek_v3_module.get_train_spec
-
-    def patch_deepseek_v3_spec() -> TrainSpec:
-        spec = original()
-        spec.state_dict_adapter = DeepSeekV3StateDictAdapterNpu
-        return spec
-
-    deepseek_v3_module.get_train_spec = patch_deepseek_v3_spec

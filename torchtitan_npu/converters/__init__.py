@@ -5,10 +5,14 @@
 
 __all__ = [
     "registry",
+    "register_model_converter",
     "register_npu_converter",
     "ConverterRegistry",
     "BaseConverter",
     "NPUConverter",
+    "ParallelizePlanUpdater",
+    "StateDictUpdater",
+    "ModelCustomConfig",
 ]
 
 import importlib
@@ -16,7 +20,13 @@ import pkgutil
 from pathlib import Path
 
 from .base_converter import BaseConverter
+from .model_custom_interface import (
+    ModelCustomConfig,
+    ParallelizePlanUpdater,
+    StateDictUpdater,
+)
 from .npu_converter import NPUConverter
+from .npu_registry import register_model_converter
 
 from .registry import ConverterRegistry, register_npu_converter, registry
 

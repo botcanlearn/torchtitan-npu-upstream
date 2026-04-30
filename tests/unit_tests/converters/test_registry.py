@@ -74,7 +74,7 @@ def test_get_returns_none_for_unknown_patch():
 
 
 def test_core_converter_registrations_exist():
-    for name in ["npu_dsa", "npu_rms_norm", "npu_rope", "npu_gmm"]:
+    for name in ["npu_dsa", "npu_rms_norm", "npu_rope"]:
         patch_info = registry.get(name)
         assert patch_info is not None, f"{name} should be registered"
         assert patch_info.name == name
