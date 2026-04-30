@@ -26,7 +26,10 @@ original_run_cmd = _run_cmd
 
 def modify_final_cmd(original_cmd):
 
-    modified_cmd = re.sub(r"LOG_RANK=[^\s]+", "LOG_RANK=0", original_cmd)
+    # Replace "./run_train.sh" with "bash ./scripts/run_train.sh"
+    modified_cmd = original_cmd.replace("./run_train.sh", "bash ./scripts/run_train.sh")
+
+    modified_cmd = re.sub(r"LOG_RANK=[^\s]+", "LOG_RANK=0", modified_cmd)
 
     dump_match = re.search(r"--job.dump_folder\s+(\S+)", original_cmd)
     if dump_match:
@@ -53,7 +56,6 @@ def _base_tests() -> List[OverrideDefinitions]:
             [["--model.name deepseek_v32", "--model.flavor tinymodel"]],
             "DeepSeek V32 BASE",
             "deepseek_v32_base",
-            ngpu=2,
         ),
         # Model MTP Test Case for DeepSeek V32
         OverrideDefinitions(
@@ -67,12 +69,11 @@ def _base_tests() -> List[OverrideDefinitions]:
             ],
             "DeepSeek V32 MTP",
             "deepseek_v32_mtp",
-            ngpu=2,
         ),
     ]
 
 
-def _cp_dsa_tests() -> List[OverrideDefinitions]:
+def _cp_tests() -> List[OverrideDefinitions]:
     return [
         OverrideDefinitions(
             [
@@ -80,49 +81,30 @@ def _cp_dsa_tests() -> List[OverrideDefinitions]:
                     "--model.name deepseek_v32",
                     "--model.flavor tinymodel",
                     "--model.converters npu_dsa",
+                    "--activation_checkpoint.mode full",
                     "--parallelism.context_parallel_degree 2",
                 ]
             ],
             "DeepSeek V32 CP DSA",
             "deepseek_v32_cp_dsa",
-            ngpu=2,
         ),
-    ]
-
-
-def _cp_ulysses_tests() -> List[OverrideDefinitions]:
-    return [
         OverrideDefinitions(
             [
                 [
                     "--model.name deepseek_v3",
                     "--model.flavor 671B_debug",
                     "--parallelism.context_parallel_degree 2",
-                    "--parallelism.enable_custom_context_parallel true",
+                    "--parallelism.enable_custom_context_parallel",
                 ]
             ],
             "DeepSeek V3 CP Ulysses",
             "deepseek_v3_cp_ulysses",
-            ngpu=2,
         ),
     ]
 
 
 def generate_smoke_tests() -> List[OverrideDefinitions]:
-    """
-    Generate a list of test configurations for model parallelism.
-    This suite is designed to test the model parallelism features of the system,
-    covering various model parallelism patterns and supported models.
-
-    Returns:
-        A list of OverrideDefinitions objects representing different test scenarios.
-    """
-    return _base_tests() + _cp_dsa_tests() + _cp_ulysses_tests()
-
-
-_TEST_SUITES_FUNCTION = {
-    "models": generate_smoke_tests(),
-}
+    return _base_tests() + _cp_tests()
 
 
 def main():
@@ -133,7 +115,6 @@ def main():
     parser.add_argument(
         "--test_suite",
         default="models",
-        choices=["models"],
         help="Which test suite to run. If not specified, torchtitan composability tests will be run",
     )
     parser.add_argument(
@@ -153,10 +134,6 @@ def main():
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
-
-    assert (
-        args.test_suite in _TEST_SUITES_FUNCTION
-    ), f"Unknown test suite {args.test_suite}"
 
     test_list = generate_smoke_tests()
     run_tests(args, test_list)
