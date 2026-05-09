@@ -130,7 +130,7 @@ def npu_quant_grouped_mm_converter(self, model: nn.Module):
 
     grouped_quantize_(model, config=self.config, filter_fn=moe_module_filter_fn)
     logger.info(
-        f"Converted MoE layers matching FQNs {self.moe_fqns} "
+        f"Converted all MoE grouped MM layers "
         f"to use dynamic {self.recipe_name} quantization with scaled grouped GEMMs"
     )
 

@@ -57,7 +57,7 @@
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `recipe_name` | str | "mxfp8" | 量化方式。可选值：`"mxfp8"`、`"hif8"`。 |
-| `fqns` | list[str] | [] | 需要进行低精度替换的 MoE 模块名称列表。匹配规则为子字符串包含，如 `"experts"` 将匹配所有全限定名（Fully Qualified Name, FQN）中包含 "experts" 的模块。 |
+| `fqns` | list[str] | [] | 需要进行低精度替换的 MoE 模块名称列表。保留字段，暂不生效；目前对所有 MoE 专家层的GMM执行全量低精度替换。 |
 
 ### 配置示例
 
@@ -93,7 +93,6 @@ filter_fqns = ["output", "router.gate"]
 
 [quantize.grouped_mm.mx]
 recipe_name = "mxfp8"                     # 可选 "mxfp8" 或 "hif8"
-fqns = ["experts"]
 ```
 
 ## 验证清单
@@ -104,5 +103,5 @@ fqns = ["experts"]
 2. **确认模块替换数量**：日志中 `Replaced <N> NPU GMM methods/functions` 的数量应与预期的 MoE 专家模块数一致；线性层可通过 `model.named_modules()` 检查 `MXLinear` 类型的模块数量。
 3. **常见未生效场景排查**：
    - `converters` 顺序错误：`"npu_gmm"` 未放在 `"quantize.grouped_mm.mx"` 之前，导致 MoE 专家层替换失败
-   - `filter_fqns` / `fqns` 匹配不到目标模块：检查模块的 FQN 是否包含配置的子字符串（注意大小写敏感）
+   - `filter_fqns` 匹配不到目标模块：检查模块的 FQN 是否包含配置的子字符串（注意大小写敏感）
    - 硬件不满足要求：日志报错 `[MXFP8/Hif8] is only supported on Ascend950 or higher architecture`
