@@ -298,7 +298,12 @@ def hc_post_bmm2_forward(
     _, _, _, C = x.shape
 
     GROUP = 1
-    BLOCK_C = C
+    if C > 4096 and C % 2 != 0:
+        raise ValueError(
+            f"Channel dimension C must be even to split into two equal blocks, but got {C}"
+        )
+
+    BLOCK_C = C // 2 if C > 4096 else C
     BS = B * S
 
     # Ensure expected layouts
@@ -345,7 +350,12 @@ def hc_post_bmm2_backward(H_res: torch.Tensor, x: torch.Tensor, dY: torch.Tensor
     # dX (unchanged)
     dX_fp32 = torch.empty((BS, N, C), device=x.device, dtype=torch.float32)
     GROUP = 1
-    BLOCK_C = C
+    if C > 4096 and C % 2 != 0:
+        raise ValueError(
+            f"Channel dimension C must be even to split into two equal blocks, but got {C}"
+        )
+
+    BLOCK_C = C // 2 if C > 4096 else C
     grid_dx = (triton.cdiv(BS, GROUP), triton.cdiv(C, BLOCK_C))
     _triton_hc_post_bmm2_bwd_dx_kernel[grid_dx](
         H,
@@ -368,7 +378,9 @@ def hc_post_bmm2_backward(H_res: torch.Tensor, x: torch.Tensor, dY: torch.Tensor
     # dH (NO MASK loop)
     dH = torch.empty((BS, N, N), device=x.device, dtype=torch.float32)
 
-    BLOCK_C_R = C / 2 if C > 4096 else C
+    if C > 8192:
+        raise ValueError(f"Channel dimension C must not exceed 8192, but got {C}")
+    BLOCK_C_R = C // 4 if C > 4096 else C
 
     grid_dh = (BS,)
     _triton_hc_post_bmm2_bwd_dh_kernel[grid_dh](
