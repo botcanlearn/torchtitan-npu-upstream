@@ -14,6 +14,10 @@ validate basic model and parallelism availability.
 Usage:
     python tests/smoke_tests/integration_test.py ./outputs
     python tests/smoke_tests/integration_test.py ./outputs --test_name deepseek_v3_base
+    python tests/smoke_tests/integration_test.py ./outputs --test_name deepseek_v4_base
+    python tests/smoke_tests/integration_test.py ./outputs --test_name deepseek_v3_tp
+    python tests/smoke_tests/integration_test.py ./outputs --test_name deepseek_v4_tp
+    python tests/smoke_tests/integration_test.py ./outputs --test_name deepseek_v4_fsdp_ep
     python tests/smoke_tests/integration_test.py ./outputs --ngpu 4
 """
 
@@ -51,9 +55,11 @@ class OverrideDefinitions:
 # Runner
 # ============================================================================
 
-# NPU training entry module
-_NPU_MODULE = "torchtitan_npu.models.deepseek_v3"
-_NPU_CONFIG = "deepseek_v3_smoketest"
+# NPU training entry modules
+_DEEPSEEK_V3_MODULE = "torchtitan_npu.models.deepseek_v3"
+_DEEPSEEK_V3_CONFIG = "deepseek_v3_smoketest"
+_DEEPSEEK_V4_MODULE = "torchtitan_npu.models.deepseek_v4"
+_DEEPSEEK_V4_CONFIG = "deepseek_v4_smoketest"
 _NPU_TRAIN_FILE = "torchtitan_npu.entry"
 
 
@@ -173,17 +179,28 @@ def run_tests(args, test_list: List[OverrideDefinitions]):
 
 
 def _base_tests() -> List[OverrideDefinitions]:
-    """Base functionality test: DeepSeek V3 small-model training."""
+    """Base functionality tests: small-model training."""
     return [
         OverrideDefinitions(
             [
                 [
-                    f"--module {_NPU_MODULE}",
-                    f"--config {_NPU_CONFIG}",
+                    f"--module {_DEEPSEEK_V3_MODULE}",
+                    f"--config {_DEEPSEEK_V3_CONFIG}",
                 ]
             ],
             "DeepSeek V3 BASE",
             "deepseek_v3_base",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    f"--module {_DEEPSEEK_V4_MODULE}",
+                    f"--config {_DEEPSEEK_V4_CONFIG}",
+                ]
+            ],
+            "DeepSeek V4 BASE",
+            "deepseek_v4_base",
             ngpu=2,
         ),
     ]
@@ -195,8 +212,8 @@ def _cp_tests() -> List[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    f"--module {_NPU_MODULE}",
-                    f"--config {_NPU_CONFIG}",
+                    f"--module {_DEEPSEEK_V3_MODULE}",
+                    f"--config {_DEEPSEEK_V3_CONFIG}",
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.enable_custom_context_parallel",
                 ]
@@ -208,14 +225,44 @@ def _cp_tests() -> List[OverrideDefinitions]:
     ]
 
 
+def _tp_tests() -> List[OverrideDefinitions]:
+    """Tensor Parallel test."""
+    return [
+        OverrideDefinitions(
+            [
+                [
+                    f"--module {_DEEPSEEK_V3_MODULE}",
+                    f"--config {_DEEPSEEK_V3_CONFIG}",
+                    "--parallelism.tensor_parallel_degree 2",
+                ]
+            ],
+            "DeepSeek V3 TP",
+            "deepseek_v3_tp",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    f"--module {_DEEPSEEK_V4_MODULE}",
+                    f"--config {_DEEPSEEK_V4_CONFIG}",
+                    "--parallelism.tensor_parallel_degree 2",
+                ]
+            ],
+            "DeepSeek V4 TP",
+            "deepseek_v4_tp",
+            ngpu=2,
+        ),
+    ]
+
+
 def _ep_tests() -> List[OverrideDefinitions]:
     """Expert Parallel test."""
     return [
         OverrideDefinitions(
             [
                 [
-                    f"--module {_NPU_MODULE}",
-                    f"--config {_NPU_CONFIG}",
+                    f"--module {_DEEPSEEK_V3_MODULE}",
+                    f"--config {_DEEPSEEK_V3_CONFIG}",
                     "--parallelism.expert_parallel_degree 2",
                 ]
             ],
@@ -223,11 +270,23 @@ def _ep_tests() -> List[OverrideDefinitions]:
             "deepseek_v3_fsdp_ep",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    f"--module {_DEEPSEEK_V4_MODULE}",
+                    f"--config {_DEEPSEEK_V4_CONFIG}",
+                    "--parallelism.expert_parallel_degree 2",
+                ]
+            ],
+            "DeepSeek V4 FSDP+EP",
+            "deepseek_v4_fsdp_ep",
+            ngpu=2,
+        ),
     ]
 
 
 def generate_smoke_tests() -> List[OverrideDefinitions]:
-    return _base_tests() + _ep_tests()
+    return _base_tests() + _tp_tests() + _ep_tests()
 
 
 # ============================================================================
@@ -243,7 +302,7 @@ def main():
     parser.add_argument(
         "--test_name",
         default="all",
-        help="Test name to run (for example, 'deepseek_v3_base'). Use 'all' to run every test.",
+        help="Test name to run (for example, 'deepseek_v4_tp'). Use 'all' to run every test.",
     )
     parser.add_argument(
         "--ngpu", default=2, type=int, help="Maximum available GPU count"

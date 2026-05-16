@@ -13,9 +13,19 @@ import torchtitan.distributed.activation_checkpoint as activation_checkpoint_mod
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
 
+import torchtitan_npu  # noqa: F401
+
 from torchtitan_npu.patches.torchtitan.activation_checkpoint import (
     _patched_apply_full_ac,
 )
+
+os.environ["CLOSE_MATMUL_K_SHIFT"] = "1"
+try:
+    from msprobe.pytorch import seed_all
+
+    seed_all(seed=1234, mode=True)
+except ImportError:
+    pass
 
 
 def main() -> None:
@@ -51,52 +61,63 @@ def main() -> None:
         )
 
     if config.compile.enable:
-        if model_name == "deepseek_v3":
-            try:
-                # pyrefly: ignore [missing-import]
-                from torch_npu.op_plugin.meta._meta_registrations import (
-                    npu_fusion_attention_forward as original_meta_func,
-                )
-            except ImportError:
-                logger.info(
-                    "torch_npu meta registrations not available, skipping compile patch"
-                )
-            else:
-                from torchtitan_npu.patches.torch_npu._meta_registrations import (
-                    npu_fusion_attention_forward,
-                )
+        converter_names = []
+        if config.model_converters and hasattr(config.model_converters, "converters"):
+            converter_names = [
+                c if isinstance(c, str) else type(c).__name__
+                for c in config.model_converters.converters
+            ]
 
-                original_meta_func.__code__ = npu_fusion_attention_forward.__code__
+        if model_name in ("deepseek_v3", "deepseek_v4"):
+            if model_name == "deepseek_v3":
+                # MLA performs shape inference according to the value tensor;
+                # patch the meta registration so dynamo traces the right shapes.
+                try:
+                    # pyrefly: ignore [missing-import]
+                    from torch_npu.op_plugin.meta._meta_registrations import (
+                        npu_fusion_attention_forward as original_meta_func,
+                    )
+                except ImportError:
+                    logger.info(
+                        "torch_npu meta registrations not available, skipping compile patch"
+                    )
+                else:
+                    from torchtitan_npu.patches.torch_npu._meta_registrations import (
+                        npu_fusion_attention_forward,
+                    )
+
+                    original_meta_func.__code__ = npu_fusion_attention_forward.__code__
 
             try:
                 # pyrefly: ignore [missing-import]
                 import inductor_npu_ext  # noqa: F401
-            except ImportError as e:
+            except Exception as e:
                 raise RuntimeError(
-                    "compile.enable is True for deepseek_v3 model but inductor_npu_ext is not available. "
+                    f"compile.enable is True for {model_name} model but inductor_npu_ext is not available. "
                     "Please install inductor_npu_ext before enabling compile. "
                     "See docs/torch_compile.md for installation instructions."
                 ) from e
 
-            converter_names = []
-            if config.model_converters and hasattr(
-                config.model_converters, "converters"
-            ):
-                converter_names = [
-                    c if isinstance(c, str) else type(c).__name__
-                    for c in config.model_converters.converters
-                ]
             if "npu_bypass_triton_codegen" in converter_names:
                 raise RuntimeError(
-                    "deepseek_v3 model with compile.enable=True should not use npu_bypass_triton_codegen. "
+                    f"{model_name} model with compile.enable=True should not use npu_bypass_triton_codegen. "
                     "Please remove 'npu_bypass_triton_codegen' from model.converters in your config."
+                )
+        else:
+            if "npu_bypass_triton_codegen" not in converter_names:
+                raise RuntimeError(
+                    f"{model_name} model with compile.enable=True requires npu_bypass_triton_codegen. "
+                    "Please add 'npu_bypass_triton_codegen' to model.converters in your config."
                 )
 
     if model_name == "deepseek_v32":
-        logger.warning(
-            "deepseek_v32 patches are temporarily disabled due to config system migration. "
-            "Some features (indexer loss, NPU memory config) may not work correctly."
+        from torchtitan_npu.train import (
+            _patch_init_for_dsa_set_loss_scale,
+            _patch_train_step_for_dsv32_indexer_loss,
         )
+
+        _patch_train_step_for_dsv32_indexer_loss()
+        _patch_init_for_dsa_set_loss_scale()
 
     if model_name == "llama4":
         from torchtitan_npu.tools.checkpoint_patch import (

@@ -19,6 +19,8 @@ INTEGRATION_REPORT_DIR="${PROJECT_ROOT}/test_reports/integration_tests"
 TORCHTITAN_BRANCH="main"
 TORCHTITAN_COMMIT="ac13e536c84e7f6647b14fa9375c3c8a8a2b8578"
 TORCHTITAN_DIR="${PROJECT_ROOT}/third_party/torchtitan"
+DEEPSEEK_V4_TOKENIZER_REPO="https://gitcode.com/hitwdy/deepseekv4.git"
+DEEPSEEK_V4_TOKENIZER_DIR="${PROJECT_ROOT}/tests/assets/tokenizer/deepseekv4_tokenizer"
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
 SMOKE_STEPS=${SMOKE_STEPS:-1}
 # Known false-positive patterns to exclude from error detection
@@ -54,6 +56,41 @@ _setup_env() {
 
     git -C "$TORCHTITAN_DIR" fetch origin "$TORCHTITAN_BRANCH"
     git -C "$TORCHTITAN_DIR" checkout "$TORCHTITAN_COMMIT"
+}
+
+_prepare_deepseek_v4_tokenizer() {
+    local tokenizer_json="${DEEPSEEK_V4_TOKENIZER_DIR}/tokenizer.json"
+    local tokenizer_config="${DEEPSEEK_V4_TOKENIZER_DIR}/tokenizer_config.json"
+
+    if [[ -s "$tokenizer_json" && -s "$tokenizer_config" ]]; then
+        echo "DeepSeek V4 tokenizer already exists: ${DEEPSEEK_V4_TOKENIZER_DIR}"
+        return 0
+    fi
+
+    echo "Downloading DeepSeek V4 tokenizer..."
+    mkdir -p "$DEEPSEEK_V4_TOKENIZER_DIR"
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    git clone --depth 1 --filter=blob:none --no-checkout \
+        "$DEEPSEEK_V4_TOKENIZER_REPO" "$tmp_dir"
+    git -C "$tmp_dir" sparse-checkout set --no-cone \
+        "/tokenizer.json" \
+        "/tokenizer_config.json"
+    git -C "$tmp_dir" checkout
+
+    cp "$tmp_dir/tokenizer.json" "$tmp_dir/tokenizer_config.json" \
+        "$DEEPSEEK_V4_TOKENIZER_DIR"/
+    rm -rf "$tmp_dir"
+
+    if [[ ! -s "$tokenizer_json" || ! -s "$tokenizer_config" ]]; then
+        echo "DeepSeek V4 tokenizer is incomplete in ${DEEPSEEK_V4_TOKENIZER_DIR}"
+        find "$DEEPSEEK_V4_TOKENIZER_DIR" -maxdepth 1 -type f -print || true
+        return 1
+    fi
+
+    echo "DeepSeek V4 tokenizer prepared: ${DEEPSEEK_V4_TOKENIZER_DIR}"
 }
 
 # Run integrated test: end-to-end training configurations.
@@ -194,6 +231,7 @@ run_torchtitan_smoke() {
 
 
 _setup_env
+_prepare_deepseek_v4_tokenizer
 
 _wait_npu_idle() {
     local max_wait=${1:-10}

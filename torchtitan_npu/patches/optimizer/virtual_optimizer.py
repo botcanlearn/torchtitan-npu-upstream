@@ -20,15 +20,9 @@ from typing import Any, cast
 
 import torch
 import torch_npu
-import torchtitan
-import torchtitan.components.optimizer
 from torch.distributed._tensor import DTensor
 
 logger = logging.getLogger(__name__)
-
-_original_build_optimizers = getattr(
-    torchtitan.components.optimizer, "build_optimizers", None
-)
 
 OPTIMIZER_STATE_KEYS = ["exp_avg", "exp_avg_sq", "max_exp_avg_sq"]
 
@@ -374,60 +368,3 @@ def _make_patched_load(orig_load):
         virtual_optimizer_replace(self)
 
     return patched_load
-
-
-def build_optimizers_with_virtual_optimizer(
-    model_parts, optimizer_config, parallel_dims, ft_manager=None
-):
-    has_virtual = getattr(optimizer_config, "virtual_optimizer", False)
-    virtual_size = getattr(optimizer_config, "virtual_optimizer_size", None)
-
-    if not has_virtual:
-        return _original_build_optimizers(
-            model_parts, optimizer_config, parallel_dims, ft_manager
-        )
-
-    if getattr(optimizer_config, "swap_optimizer", False):
-        raise ValueError("Virtual optimizer does not support swap_optimizer.")
-
-    if virtual_size is None:
-        raise ValueError(
-            "virtual_optimizer_size must be specified when virtual_optimizer is enabled."
-        )
-
-    torch.Tensor.copy_ = swap_tensor_copy_wrapper(torch.Tensor.copy_)
-    torch.Tensor.cpu = swap_tensor_func_wrapper(torch.Tensor.cpu, "cpu")
-    torch.Tensor.clone = swap_tensor_func_wrapper(torch.Tensor.clone, "clone")
-    torch.Tensor.detach = swap_tensor_func_wrapper(torch.Tensor.detach, "detach")
-
-    for cls in [torch.optim.AdamW, torch.optim.Adam]:
-        if not hasattr(cls, "_original_state_dict"):
-            cls._original_state_dict = cls.state_dict  # type: ignore[assignment]
-            cls.state_dict = patched_state_dict  # type: ignore[assignment]
-            cls.step = virtual_optimizer_step  # type: ignore[assignment]
-
-            cls._original_load_state_dict = cls.load_state_dict  # type: ignore[assignment]
-            cls.load_state_dict = _make_patched_load(cls.load_state_dict)  # type: ignore[assignment]
-
-    optimizers = _original_build_optimizers(
-        model_parts, optimizer_config, parallel_dims, ft_manager
-    )
-
-    # Simplified PP info (should be retrieved from parallel_dims in real scenario)
-    pp_rank, pp_size = 0, 1
-
-    for opt in optimizers:
-        opt._allocator_config = (pp_rank, pp_size, virtual_size)
-
-    return optimizers
-
-
-if _original_build_optimizers is not None:
-    torchtitan.components.optimizer.build_optimizers = (
-        build_optimizers_with_virtual_optimizer  # type: ignore[assignment]
-    )
-else:
-    logger.warning(
-        "Skipping virtual optimizer patch: build_optimizers is not available "
-        "in current torchtitan.components.optimizer API."
-    )

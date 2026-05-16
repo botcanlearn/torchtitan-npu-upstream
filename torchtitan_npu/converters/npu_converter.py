@@ -66,7 +66,14 @@ class NPUConverter(Configurable, ModelConverter):
 
     def _infer_model_name(self, model: nn.Module) -> str:
         module = model.__class__.__module__
-        for name in ("deepseek_v32", "deepseek_v3", "qwen3", "llama4", "llama3"):
+        for name in (
+            "deepseek_v4",
+            "deepseek_v32",
+            "deepseek_v3",
+            "qwen3",
+            "llama4",
+            "llama3",
+        ):
             if name in module:
                 return name
         return "unknown"

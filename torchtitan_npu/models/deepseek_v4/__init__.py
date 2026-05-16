@@ -4,30 +4,85 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-__all__ = [
-    "parallelize_deepseek_v4",
-    "DeepSeekV4ModelArgs",
-    "DeepSeekV4Model",
-    "deepseekv4_args",
-]
-
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
 
-from .infra.parallelize import parallelize_deepseek_v4
-from .model.args import DeepSeekV4ModelArgs
-from .model.model import DeepSeekV4Model
-from .model.moe import MoEArgs
-from .model.state_dict_adapter import DeepSeekV4StateDictAdapter
+from .model import DeepSeekV4Model
+from .moe import MoEArgs
+from .parallelize import parallelize_deepseek_v4
+from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 
-deepseekv4_args = {
-    "285B_debug_4_layers": DeepSeekV4ModelArgs(
+def _make_moe_args() -> MoEArgs:
+    return MoEArgs(
+        num_experts=256,
+        num_shared_experts=1,
+        top_k=6,
+        score_func="sqrtsoftplus",
+        route_norm=True,
+        score_before_experts=False,
+        use_grouped_mm=True,
+        n_hash_layers=3,
+        swiglu_limit=10,
+    )
+
+
+def _make_smoke_moe_args() -> MoEArgs:
+    return MoEArgs(
+        num_experts=8,
+        num_shared_experts=1,
+        top_k=2,
+        num_expert_groups=2,
+        num_limited_groups=2,
+        score_func="sqrtsoftplus",
+        route_norm=True,
+        score_before_experts=False,
+        use_grouped_mm=False,
+        n_hash_layers=0,
+        swiglu_limit=10,
+    )
+
+
+def _smoketest_model() -> DeepSeekV4Model.Config:
+    return DeepSeekV4Model.Config(
+        vocab_size=129280,
+        n_layers=2,
+        n_heads=4,
+        max_batch_size=2,
+        max_seq_len=128,
+        dim=128,
+        moe_inter_dim=64,
+        head_dim=32,
+        rope_head_dim=16,
+        q_lora_rank=64,
+        o_lora_rank=32,
+        o_groups=4,
+        window_size=32,
+        compress_ratios=(1, 1),
+        moe_args=_make_smoke_moe_args(),
+        hc_sinkhorn_iters=4,
+        hc_mult=2,
+        hc_eps=1e-6,
+        compress_rope_theta=40000,
+        original_seq_len=128,
+        rope_theta=10000,
+        rope_factor=4,
+        beta_fast=32,
+        beta_slow=1,
+        enable_indexer_loss=False,
+        index_n_heads=4,
+        index_head_dim=16,
+        index_topk=16,
+        save_format="hf",
+        save_expert_format=None,
+        hf_save_dir=None,
+    )
+
+
+def _285b_debug_4_layers() -> DeepSeekV4Model.Config:
+    return DeepSeekV4Model.Config(
         vocab_size=129280,
         n_layers=4,
         n_heads=64,
@@ -42,17 +97,7 @@ deepseekv4_args = {
         o_groups=8,
         window_size=128,
         compress_ratios=(1, 1, 4, 128),
-        moe_args=MoEArgs(
-            num_experts=256,
-            num_shared_experts=1,
-            top_k=6,
-            score_func="sqrtsoftplus",
-            route_norm=True,
-            score_before_experts=False,
-            use_grouped_mm=True,
-            n_hash_layers=3,
-            swiglu_limit=10,
-        ),
+        moe_args=_make_moe_args(),
         hc_sinkhorn_iters=20,
         hc_mult=4,
         hc_eps=1e-6,
@@ -62,17 +107,18 @@ deepseekv4_args = {
         rope_factor=16,
         beta_fast=32,
         beta_slow=1,
-        # Indexer
         enable_indexer_loss=True,
         index_n_heads=64,
         index_head_dim=128,
         index_topk=512,
-        # Checkpoint
         save_format="hf",
         save_expert_format="gmm",
         hf_save_dir=None,
-    ),
-    "285B_debug_43_layers": DeepSeekV4ModelArgs(
+    )
+
+
+def _285b_debug_43_layers() -> DeepSeekV4Model.Config:
+    return DeepSeekV4Model.Config(
         vocab_size=129280,
         n_layers=43,
         n_heads=64,
@@ -131,17 +177,7 @@ deepseekv4_args = {
             128,
             4,
         ),
-        moe_args=MoEArgs(
-            num_experts=256,
-            num_shared_experts=1,
-            top_k=6,
-            score_func="sqrtsoftplus",
-            route_norm=True,
-            score_before_experts=False,
-            use_grouped_mm=True,
-            n_hash_layers=3,
-            swiglu_limit=10,
-        ),
+        moe_args=_make_moe_args(),
         hc_sinkhorn_iters=20,
         hc_mult=4,
         hc_eps=1e-6,
@@ -151,29 +187,31 @@ deepseekv4_args = {
         rope_factor=16,
         beta_fast=32,
         beta_slow=1,
-        # Indexer
         enable_indexer_loss=True,
         index_n_heads=64,
         index_head_dim=128,
         index_topk=512,
-        # Checkpoint
         save_format="hf",
         save_expert_format="gmm",
         hf_save_dir=None,
-    ),
+    )
+
+
+deepseekv4_configs = {
+    "smoketest": _smoketest_model,
+    "285B_debug_4_layers": _285b_debug_4_layers,
+    "285B_debug_43_layers": _285b_debug_43_layers,
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_cls=DeepSeekV4Model,
-        model_args=deepseekv4_args,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="deepseek_v4",
+        flavor=flavor,
+        model=deepseekv4_configs[flavor](),
+        build_loss_fn=build_cross_entropy_loss,
         parallelize_fn=parallelize_deepseek_v4,
         pipelining_fn=pipeline_llm,
-        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
-        build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV4StateDictAdapter,
     )

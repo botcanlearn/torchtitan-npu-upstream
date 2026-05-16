@@ -92,8 +92,14 @@ def get_npu_converter_config(name: str) -> Configurable.Config | None:
 def has_npu_converter(converters: list, name: str) -> bool:
     """Return True if ``converters`` contains an NPU converter Config registered under ``name``.
 
-    Mirrors the upstream `find_float8_linear_config` pattern: scans
-    `Trainer.Config.model_converters.converters` (a list of Config instances)
-    and matches the dynamically-attached `_patch_name` ClassVar.
+    The registry attaches ``_patch_name`` to the dynamically-generated
+    *converter* class, and ``_owner`` to the *Config* class that points back at
+    it. ``converters`` contains Config instances, so we hop through ``_owner``
+    to read the name. Also accept the raw converter class on the off chance the
+    list ever contains them.
     """
-    return any(getattr(c, "_patch_name", None) == name for c in converters)
+    for c in converters:
+        owner = getattr(c, "_owner", None) or c
+        if getattr(owner, "_patch_name", None) == name:
+            return True
+    return False

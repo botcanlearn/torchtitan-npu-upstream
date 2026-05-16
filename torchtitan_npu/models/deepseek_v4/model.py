@@ -3,20 +3,26 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass, field
 
 import scipy
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.linear import Linear
 
-from .args import DeepSeekV4ModelArgs
-from .moe import MoE
+from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.module import Module, ModuleDict
+
+from .moe import MoE, MoEArgs
 
 logger = logging.getLogger()
 
@@ -70,7 +76,7 @@ def rotate_activation(x: torch.Tensor, hadamard_mat: torch.Tensor) -> torch.Tens
     return hadamard_transform_ref(x, hadamard_mat, scale=hidden_size**-0.5)
 
 
-class RMSNorm(nn.Module):
+class RMSNorm(Module):
     """
     Root Mean Square Layer Normalization (RMSNorm).
 
@@ -79,12 +85,17 @@ class RMSNorm(nn.Module):
         eps (float): Epsilon value for numerical stability. Defaults to 1e-6.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        eps: float = 1e-6
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
-        self.eps = eps
+        self.dim = config.dim
+        self.eps = config.eps
         # rmsnorm in the checkpoint is stored in bf16, while the parameter here is stored in fp32 for convenient.
-        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.ones(config.dim, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor):
         """
@@ -103,37 +114,47 @@ class RMSNorm(nn.Module):
         return (self.weight * x).to(dtype)
 
 
-class Compressor(nn.Module):
-    def __init__(
-        self,
-        args: DeepSeekV4ModelArgs,
-        compress_ratio: int = 4,
-        head_dim: int = 512,
-        rotate: bool = False,
-    ):
+class Compressor(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        args: "DeepSeekV4Model.Config"
+        compress_ratio: int = 4
+        head_dim: int = 512
+        rotate: bool = False
+
+    def __init__(self, config: Config):
         super().__init__()
+        args = config.args
         self.dim = args.dim
-        self.head_dim = head_dim
+        self.head_dim = config.head_dim
         self.rope_head_dim = args.rope_head_dim
-        self.nope_head_dim = head_dim - args.rope_head_dim
-        self.compress_ratio = compress_ratio
-        self.overlap = compress_ratio == 4
-        self.rotate = rotate
+        self.nope_head_dim = config.head_dim - args.rope_head_dim
+        self.compress_ratio = config.compress_ratio
+        self.overlap = config.compress_ratio == 4
+        self.rotate = config.rotate
         coff = 1 + self.overlap
         self.ape = nn.Parameter(
-            torch.empty(compress_ratio, coff * self.head_dim, dtype=torch.float32)
+            torch.empty(
+                config.compress_ratio, coff * self.head_dim, dtype=torch.float32
+            )
         )
-        # wkv and wgate in the checkpoint is stored in bf16, while the parameter here is stored in fp32 for convenient.
-        # The first half of dimensions for overlapping compression and second half for normal compression.
-        # self.wkv = Linear(self.dim, coff * self.head_dim, dtype=torch.float32)
-        self.wkv = nn.Linear(
-            self.dim, coff * self.head_dim, bias=False, dtype=torch.float32
-        )
-        # self.wgate = Linear(self.dim, coff * self.head_dim, dtype=torch.float32)
-        self.wgate = nn.Linear(
-            self.dim, coff * self.head_dim, bias=False, dtype=torch.float32
-        )
-        self.norm = RMSNorm(self.head_dim, args.norm_eps)
+        # wkv and wgate must stay in fp32: ``Compressor.forward`` upcasts ``x``
+        # to fp32 and the downstream ``score.softmax(dim=2)`` is numerically
+        # fragile in bf16. ``Linear.Config`` does not expose a dtype field so we
+        # cast the parameter to fp32 after build.
+        self.wkv = Linear.Config(
+            in_features=self.dim,
+            out_features=coff * self.head_dim,
+            bias=False,
+        ).build()
+        self.wgate = Linear.Config(
+            in_features=self.dim,
+            out_features=coff * self.head_dim,
+            bias=False,
+        ).build()
+        self.wkv.to(torch.float32)
+        self.wgate.to(torch.float32)
+        self.norm = RMSNorm.Config(dim=self.head_dim, eps=args.norm_eps).build()
         # If overlap is enabled, state[:, :ratio] for overlapping compression and state[:, ratio:] for normal compression.
 
     def overlap_transform(self, tensor: torch.Tensor, value=0):
@@ -184,22 +205,39 @@ class Compressor(nn.Module):
         nn.init.trunc_normal_(self.norm.weight, mean=1, std=0.02)
 
 
-class Indexer(torch.nn.Module):
-    def __init__(self, args: DeepSeekV4ModelArgs, compress_ratio: int = 4):
+class Indexer(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        args: "DeepSeekV4Model.Config"
+        compress_ratio: int = 4
+
+    def __init__(self, config: Config):
         super().__init__()
+        args = config.args
         self.dim = args.dim
         self.n_heads = args.index_n_heads
         self.head_dim = args.index_head_dim
         self.rope_head_dim = args.rope_head_dim
         self.index_topk = args.index_topk
         self.q_lora_rank = args.q_lora_rank
-        self.wq_b = nn.Linear(
-            self.q_lora_rank, self.n_heads * self.head_dim, bias=False
-        )
-        self.weights_proj = nn.Linear(self.dim, self.n_heads, bias=False)
+        self.wq_b = Linear.Config(
+            in_features=self.q_lora_rank,
+            out_features=self.n_heads * self.head_dim,
+            bias=False,
+        ).build()
+        self.weights_proj = Linear.Config(
+            in_features=self.dim,
+            out_features=self.n_heads,
+            bias=False,
+        ).build()
         self.softmax_scale = self.head_dim**-0.5
-        self.compress_ratio = compress_ratio
-        self.compressor = Compressor(args, compress_ratio, self.head_dim, True)
+        self.compress_ratio = config.compress_ratio
+        self.compressor = Compressor.Config(
+            args=args,
+            compress_ratio=config.compress_ratio,
+            head_dim=self.head_dim,
+            rotate=True,
+        ).build()
 
     def forward(
         self,
@@ -339,7 +377,7 @@ class DSAIndexerLossLoggingHelper:
         logger.info(f"indexer loss: {loss.item()}")
 
 
-class DSAIndexerLoss(torch.nn.Module):
+class DSAIndexerLoss(Module):
     """Compute dsa indexer loss at sparse training stage
     Reference: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/main/DeepSeek_V3_2.pdf
     Args:
@@ -349,7 +387,11 @@ class DSAIndexerLoss(torch.nn.Module):
         loss_scale: Dsa indexer loss scale
     """
 
-    def __init__(self) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
 
     def forward(
@@ -378,8 +420,12 @@ class DSAIndexerLoss(torch.nn.Module):
         return loss
 
 
-class GetAttnScores(torch.nn.Module):
-    def __init__(self) -> None:
+class GetAttnScores(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
 
     def forward(
@@ -412,18 +458,24 @@ class GetAttnScores(torch.nn.Module):
         return attn
 
 
-class LiLoss(torch.nn.Module):
-    def __init__(
-        self, n_heads, softmax_scale, compress_ratio, layer_id, n_layers
-    ) -> None:
+class LiLoss(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        n_heads: int
+        softmax_scale: float
+        compress_ratio: int
+        layer_id: int
+        n_layers: int
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.n_heads = n_heads
-        self.softmax_scale = softmax_scale
-        self.compress_ratio = compress_ratio
-        self.get_attn_scores = GetAttnScores()
-        self.compute_dsa_indexer_loss = DSAIndexerLoss()
-        self.layer_id = layer_id
-        self.n_layers = n_layers
+        self.n_heads = config.n_heads
+        self.softmax_scale = config.softmax_scale
+        self.compress_ratio = config.compress_ratio
+        self.get_attn_scores = GetAttnScores.Config().build()
+        self.compute_dsa_indexer_loss = DSAIndexerLoss.Config().build()
+        self.layer_id = config.layer_id
+        self.n_layers = config.n_layers
 
     def save_loss(self, loss):
         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -465,19 +517,24 @@ class LiLoss(torch.nn.Module):
         return loss
 
 
-class ComputeIndexerLoss(nn.Module):
-    def __init__(
-        self,
-        n_heads: int,
-        softmax_scale: float,
-        compress_ratio: int,
-        layer_id: int,
-        n_layers: int,
-    ) -> None:
+class ComputeIndexerLoss(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        n_heads: int
+        softmax_scale: float
+        compress_ratio: int
+        layer_id: int
+        n_layers: int
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.li_loss = LiLoss(
-            n_heads, softmax_scale, compress_ratio, layer_id, n_layers
-        )
+        self.li_loss = LiLoss.Config(
+            n_heads=config.n_heads,
+            softmax_scale=config.softmax_scale,
+            compress_ratio=config.compress_ratio,
+            layer_id=config.layer_id,
+            n_layers=config.n_layers,
+        ).build()
 
     def forward(
         self,
@@ -504,8 +561,12 @@ class ComputeIndexerLoss(nn.Module):
         )
 
 
-class GetWindowTopkIdxs(torch.nn.Module):
-    def __init__(self) -> None:
+class GetWindowTopkIdxs(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
 
     def forward(self, window_size: int, bsz: int, seqlen: int):
@@ -517,10 +578,14 @@ class GetWindowTopkIdxs(torch.nn.Module):
         return window_topk.unsqueeze(0).expand(bsz, -1, -1)
 
 
-class GetCompressTopkIdxs(torch.nn.Module):
-    def __init__(self, ratio: int = 1) -> None:
+class GetCompressTopkIdxs(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        ratio: int = 1
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.ratio = ratio
+        self.ratio = config.ratio
 
     def forward(self, x: torch.Tensor, offset: int):
         bsz, seqlen = x.shape[0], x.shape[1]
@@ -531,7 +596,7 @@ class GetCompressTopkIdxs(torch.nn.Module):
 
 
 def precompute_freqs_cis(
-    model_args: DeepSeekV4ModelArgs, with_compressor: bool
+    model_args: DeepSeekV4Model.Config, with_compressor: bool
 ) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
@@ -584,9 +649,16 @@ def precompute_freqs_cis(
     return freqs_cis
 
 
-class SparseAttention(torch.nn.Module):
-    def __init__(self, layer_id: int, args: DeepSeekV4ModelArgs) -> None:
+class SparseAttention(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
+        layer_id = config.layer_id
+        args = config.args
         self.layer_id = layer_id
         self.window_size = args.window_size
         self.rd = args.rope_head_dim
@@ -596,8 +668,10 @@ class SparseAttention(torch.nn.Module):
             else args.mtp_layer_compress_ratio
         )
         self.softmax_scale = args.head_dim**-0.5
-        self.get_window_topk_idxs = GetWindowTopkIdxs()
-        self.get_compress_topk_idxs = GetCompressTopkIdxs(self.compress_ratio)
+        self.get_window_topk_idxs = GetWindowTopkIdxs.Config().build()
+        self.get_compress_topk_idxs = GetCompressTopkIdxs.Config(
+            ratio=self.compress_ratio
+        ).build()
 
     def forward(
         self,
@@ -656,11 +730,16 @@ class SparseAttention(torch.nn.Module):
         return attn_output
 
 
-class LiCompute(torch.nn.Module):
-    def __init__(self, ratio, index_topk) -> None:
+class LiCompute(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        ratio: int
+        index_topk: int
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.ratio = ratio
-        self.index_topk = index_topk
+        self.ratio = config.ratio
+        self.index_topk = config.index_topk
 
     def forward(
         self,
@@ -689,11 +768,18 @@ class LiCompute(torch.nn.Module):
         return compress_topk_idxs, index_score
 
 
-class PreAttention(nn.Module):
+class PreAttention(Module):
     """Pre-attention module: compilable projection layers before the NPU attention kernel."""
 
-    def __init__(self, layer_id: int, args: DeepSeekV4ModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
         super().__init__()
+        layer_id = config.layer_id
+        args = config.args
         self.n_heads = args.n_heads
         self.q_lora_rank = args.q_lora_rank
         self.head_dim = args.head_dim
@@ -706,18 +792,34 @@ class PreAttention(nn.Module):
         )
         self.use_sfa = args.use_sfa
 
-        self.wq_a = nn.Linear(args.dim, self.q_lora_rank, bias=False)
-        self.q_norm = RMSNorm(self.q_lora_rank, self.eps)
-        self.wq_b = nn.Linear(
-            self.q_lora_rank, self.n_heads * self.head_dim, bias=False
-        )
-        self.wkv = nn.Linear(args.dim, self.head_dim, bias=False)
-        self.kv_norm = RMSNorm(self.head_dim, self.eps)
+        self.wq_a = Linear.Config(
+            in_features=args.dim,
+            out_features=self.q_lora_rank,
+            bias=False,
+        ).build()
+        self.q_norm = RMSNorm.Config(dim=self.q_lora_rank, eps=self.eps).build()
+        self.wq_b = Linear.Config(
+            in_features=self.q_lora_rank,
+            out_features=self.n_heads * self.head_dim,
+            bias=False,
+        ).build()
+        self.wkv = Linear.Config(
+            in_features=args.dim,
+            out_features=self.head_dim,
+            bias=False,
+        ).build()
+        self.kv_norm = RMSNorm.Config(dim=self.head_dim, eps=self.eps).build()
         if self.compress_ratio == 4:
-            self.compressor = Compressor(args, self.compress_ratio, self.head_dim)
-            self.indexer = Indexer(args, self.compress_ratio)
+            self.compressor = Compressor.Config(
+                args=args, compress_ratio=self.compress_ratio, head_dim=self.head_dim
+            ).build()
+            self.indexer = Indexer.Config(
+                args=args, compress_ratio=self.compress_ratio
+            ).build()
         elif self.compress_ratio > 1:
-            self.compressor_128 = Compressor(args, self.compress_ratio, self.head_dim)
+            self.compressor_128 = Compressor.Config(
+                args=args, compress_ratio=self.compress_ratio, head_dim=self.head_dim
+            ).build()
 
     def forward(
         self, x: torch.Tensor, freqs_cis: torch.Tensor, hadamard_mat: torch.Tensor
@@ -768,20 +870,29 @@ class PreAttention(nn.Module):
             self.compressor_128.init_weights(init_std)
 
 
-class InnerAttention(nn.Module):
+class InnerAttention(Module):
     """Inner attention module: NPU fused ops (sparse_attn, li_compute) that cannot be torch.compiled."""
 
-    def __init__(self, layer_id: int, args: DeepSeekV4ModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
         super().__init__()
+        layer_id = config.layer_id
+        args = config.args
         self.compress_ratio = (
             args.compress_ratios[layer_id]
             if layer_id < args.n_layers
             else args.mtp_layer_compress_ratio
         )
         self.attn_sink = nn.Parameter(torch.empty(args.n_heads, dtype=torch.float32))
-        self.sparse_attn = SparseAttention(layer_id, args)
+        self.sparse_attn = SparseAttention.Config(layer_id=layer_id, args=args).build()
         if self.compress_ratio == 4:
-            self.li_compute = LiCompute(self.compress_ratio, args.index_topk)
+            self.li_compute = LiCompute.Config(
+                ratio=self.compress_ratio, index_topk=args.index_topk
+            ).build()
 
     def forward(
         self,
@@ -809,22 +920,31 @@ class InnerAttention(nn.Module):
         return o, compress_topk_idxs, index_score
 
 
-class PostAttention(nn.Module):
+class PostAttention(Module):
     """Post-attention module: compilable output projection after the NPU attention kernel."""
 
-    def __init__(self, args: DeepSeekV4ModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
         super().__init__()
+        args = config.args
         self.n_heads = args.n_heads
         self.o_lora_rank = args.o_lora_rank
         self.n_groups = args.o_groups
         self.rope_head_dim = args.rope_head_dim
         self.head_dim = args.head_dim
-        self.wo_a = nn.Linear(
-            self.n_heads * self.head_dim // self.n_groups,
-            self.n_groups * self.o_lora_rank,
+        self.wo_a = Linear.Config(
+            in_features=self.n_heads * self.head_dim // self.n_groups,
+            out_features=self.n_groups * self.o_lora_rank,
             bias=False,
-        )
-        self.wo_b = nn.Linear(self.n_groups * self.o_lora_rank, args.dim, bias=False)
+        ).build()
+        self.wo_b = Linear.Config(
+            in_features=self.n_groups * self.o_lora_rank,
+            out_features=args.dim,
+            bias=False,
+        ).build()
 
     def forward(
         self,
@@ -848,11 +968,18 @@ class PostAttention(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
 
 
-class Attention(nn.Module):
+class Attention(Module):
     """Multi-Query Attention (MQA) Layer."""
 
-    def __init__(self, layer_id: int, args: DeepSeekV4ModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
         super().__init__()
+        layer_id = config.layer_id
+        args = config.args
         self.layer_id = layer_id
         self.n_heads = args.n_heads
         self.n_layers = args.n_layers + args.num_mtp_modules
@@ -866,9 +993,11 @@ class Attention(nn.Module):
         )
         self.args = args
 
-        self.pre_attention = PreAttention(layer_id, args)
-        self.inner_attention = InnerAttention(layer_id, args)
-        self.post_attention = PostAttention(args)
+        self.pre_attention = PreAttention.Config(layer_id=layer_id, args=args).build()
+        self.inner_attention = InnerAttention.Config(
+            layer_id=layer_id, args=args
+        ).build()
+        self.post_attention = PostAttention.Config(args=args).build()
 
     def forward(
         self,
@@ -911,8 +1040,12 @@ class Attention(nn.Module):
         self.post_attention.init_weights(init_std)
 
 
-class HcSplitSinkhorn(torch.nn.Module):
-    def __init__(self) -> None:
+class HcSplitSinkhorn(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
 
     def forward(
@@ -951,8 +1084,12 @@ class HcSplitSinkhorn(torch.nn.Module):
         return pre, post, comb
 
 
-class HcPost(torch.nn.Module):
-    def __init__(self) -> None:
+class HcPost(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
 
     def forward(
@@ -968,14 +1105,21 @@ class HcPost(torch.nn.Module):
         return y.type_as(x)
 
 
-class HcPre(torch.nn.Module):
-    def __init__(self, hc_mult, hc_sinkhorn_iters, hc_eps, norm_eps) -> None:
+class HcPre(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        hc_mult: int
+        hc_sinkhorn_iters: int
+        hc_eps: float
+        norm_eps: float
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.hc_mult = hc_mult
-        self.hc_sinkhorn_iters = hc_sinkhorn_iters
-        self.hc_eps = hc_eps
-        self.norm_eps = norm_eps
-        self.torch_hc_split_sinkhorn = HcSplitSinkhorn()
+        self.hc_mult = config.hc_mult
+        self.hc_sinkhorn_iters = config.hc_sinkhorn_iters
+        self.hc_eps = config.hc_eps
+        self.norm_eps = config.norm_eps
+        self.torch_hc_split_sinkhorn = HcSplitSinkhorn.Config().build()
 
     def forward(
         self,
@@ -995,26 +1139,35 @@ class HcPre(torch.nn.Module):
         return y.to(dtype), post, comb
 
 
-class DeepSeekV4TransformerBlock(nn.Module):
+class DeepSeekV4TransformerBlock(Module):
     """
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepSeekV4ModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        model_args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
         super().__init__()
+        layer_id = config.layer_id
+        model_args = config.model_args
         self.moe_enabled = True
         self.layer_id = layer_id
         self.norm_eps = model_args.norm_eps
-        self.attention = Attention(layer_id, model_args)
-        self.moe = MoE(
-            model_args.moe_args,
+        self.attention = Attention.Config(layer_id=layer_id, args=model_args).build()
+        self.moe = MoE.Config(
+            moe_args=model_args.moe_args,
             dim=model_args.dim,
             hidden_dim=model_args.moe_inter_dim,
             layer_id=layer_id,
             vocab_size=model_args.vocab_size,
-        )
-        self.attention_norm = RMSNorm(model_args.dim, self.norm_eps)
-        self.ffn_norm = RMSNorm(model_args.dim, self.norm_eps)
+        ).build()
+        self.attention_norm = RMSNorm.Config(
+            dim=model_args.dim, eps=self.norm_eps
+        ).build()
+        self.ffn_norm = RMSNorm.Config(dim=model_args.dim, eps=self.norm_eps).build()
         self.hc_mult = hc_mult = model_args.hc_mult
         self.hc_sinkhorn_iters = model_args.hc_sinkhorn_iters
         self.hc_eps = model_args.hc_eps
@@ -1030,22 +1183,25 @@ class DeepSeekV4TransformerBlock(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3))
         torch.set_default_dtype(origin_dtype)
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        self.hc_post = HcPost()
-        self.hc_pre = HcPre(
-            self.hc_mult, self.hc_sinkhorn_iters, self.hc_eps, self.norm_eps
-        )
+        self.hc_post = HcPost.Config().build()
+        self.hc_pre = HcPre.Config(
+            hc_mult=self.hc_mult,
+            hc_sinkhorn_iters=self.hc_sinkhorn_iters,
+            hc_eps=self.hc_eps,
+            norm_eps=self.norm_eps,
+        ).build()
         self.compress_ratio = (
             model_args.compress_ratios[layer_id]
             if layer_id < model_args.n_layers
             else model_args.mtp_layer_compress_ratio
         )
-        self.cal_index_loss = ComputeIndexerLoss(
-            model_args.n_heads,
-            model_args.head_dim**-0.5,
-            self.compress_ratio,
-            layer_id,
-            model_args.n_layers,
-        )
+        self.cal_index_loss = ComputeIndexerLoss.Config(
+            n_heads=model_args.n_heads,
+            softmax_scale=model_args.head_dim**-0.5,
+            compress_ratio=self.compress_ratio,
+            layer_id=layer_id,
+            n_layers=model_args.n_layers,
+        ).build()
 
     def forward(
         self,
@@ -1128,11 +1284,16 @@ class DeepSeekV4TransformerBlock(nn.Module):
             nn.init.trunc_normal_(self.hc_attn_scale, mean=0.0, std=0.02)
 
 
-class HcHead(torch.nn.Module):
-    def __init__(self, norm_eps, hc_eps) -> None:
+class HcHead(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        norm_eps: float
+        hc_eps: float
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.norm_eps = norm_eps
-        self.hc_eps = hc_eps
+        self.norm_eps = config.norm_eps
+        self.hc_eps = config.hc_eps
 
     def forward(
         self,
@@ -1155,12 +1316,30 @@ class MTPModule(DeepSeekV4TransformerBlock):
     MTP block with linear projection and transformerblock layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepSeekV4ModelArgs):
-        super().__init__(layer_id, model_args)
-        self.enorm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.hnorm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.e_proj = nn.Linear(model_args.dim, model_args.dim, bias=False)
-        self.h_proj = nn.Linear(model_args.dim, model_args.dim, bias=False)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        layer_id: int
+        model_args: "DeepSeekV4Model.Config"
+
+    def __init__(self, config: Config):
+        super().__init__(
+            DeepSeekV4TransformerBlock.Config(
+                layer_id=config.layer_id, model_args=config.model_args
+            )
+        )
+        model_args = config.model_args
+        self.enorm = RMSNorm.Config(dim=model_args.dim, eps=model_args.norm_eps).build()
+        self.hnorm = RMSNorm.Config(dim=model_args.dim, eps=model_args.norm_eps).build()
+        self.e_proj = Linear.Config(
+            in_features=model_args.dim,
+            out_features=model_args.dim,
+            bias=False,
+        ).build()
+        self.h_proj = Linear.Config(
+            in_features=model_args.dim,
+            out_features=model_args.dim,
+            bias=False,
+        ).build()
         self.hc_mult = hc_mult = model_args.hc_mult
 
     # pyrefly: ignore [bad-param-name-override]
@@ -1238,24 +1417,116 @@ class MTPModule(DeepSeekV4TransformerBlock):
         nn.init.trunc_normal_(self.h_proj.weight, mean=0.0, std=0.02)
 
 
-class DeepSeekV4Model(ModelProtocol):
+class DeepSeekV4Model(BaseModel):
     """
     DeepSeek-V4 Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepSeekV4ModelArgs):
-        super().__init__(model_args)
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseModel.Config):
+        norm_eps: float = 1e-6
+        index_n_heads: int = 64
+        index_head_dim: int = 128
+        index_topk: int = 512
+        enable_indexer_loss: bool = True
+        save_format: str = "dcp"
+        save_expert_format: str | None = None
+        hf_save_dir: str | None = None
+        save_patch_enabled: bool = False
+        dim: int = 4096
+        moe_args: MoEArgs = field(default_factory=MoEArgs)
+        rope_head_dim: int = 64
+        q_lora_rank: int = 1024
+        max_batch_size: int = 4
+        max_seq_len: int = 4096
+        n_heads: int = 64
+        o_lora_rank: int = 1024
+        head_dim: int = 512
+        o_groups: int = 8
+        window_size: int = 128
+        compress_ratios: tuple[int, ...] = (1, 1, 4, 128)
+        debug_force_load_balance: bool = False
+        hc_sinkhorn_iters: int = 20
+        hc_mult: int = 4
+        hc_eps: float = 1e-6
+        vocab_size: int = 129280
+        moe_inter_dim: int = 2048
+        load_balance_coeff: float = 1e-3
+        compress_rope_theta: float = 40000.0
+        original_seq_len: int = 65536
+        rope_theta: int = 10000
+        rope_factor: int = 4
+        beta_fast: int = 32
+        beta_slow: int = 1
+        n_layers: int = 4
+        use_sfa: bool = False
+        num_mtp_modules: int = 0
+        mtp_layer_compress_ratio: int = 1
+
+        def update_from_config(self, *, trainer_config, **kwargs) -> None:
+            seq_len = trainer_config.training.seq_len
+            if seq_len > self.max_seq_len:
+                logger.warning(
+                    f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+                )
+            self.max_seq_len = seq_len
+
+            attn_type = getattr(self, "attn_type", "sdpa")
+            if (
+                trainer_config.parallelism.context_parallel_degree > 1
+                and attn_type != "sdpa"
+            ):
+                raise NotImplementedError("CP support is only supported for SDPA.")
+
+            self.moe_args.debug_force_load_balance = (
+                trainer_config.debug.moe_force_load_balance
+            )
+            self.moe_args.load_balance_coeff = self.load_balance_coeff
+            self.moe_args.n_hash_layers = getattr(self.moe_args, "n_hash_layers", 3)
+            # The converter list holds dynamically-generated Config instances
+            # (e.g. ``DeepSeekV4SFAKernelConfig``), not the kernel classes
+            # themselves, so matching on ``type(c).__name__`` silently fails
+            # after the f7d0133 config refactor. Use the registry helper which
+            # matches on the ``_patch_name`` attribute the converter registry
+            # attaches to each Config.
+            from torchtitan_npu.converters.registry import has_npu_converter
+
+            self.use_sfa = has_npu_converter(
+                trainer_config.model_converters.converters, "deepseek_v4_sfa"
+            )
+            self.num_mtp_modules = trainer_config.training.num_mtp_modules
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            # DeepSeek-V4 model config is not a `Decoder.Config`, so we cannot
+            # use `get_moe_model_nparams_and_flops` (which expects `.layers[*].moe`).
+            # Use the dense estimator over all parameters as a stable fallback.
+            # [TODO] need to check
+            return get_dense_model_nparams_and_flops(
+                model=model,
+                n_layers=self.n_layers + self.num_mtp_modules,
+                n_heads=self.n_heads,
+                head_dims=self.head_dim + self.head_dim,
+                seq_len=seq_len,
+            )
+
+    def __init__(self, config: DeepSeekV4Model.Config):
+        super().__init__()
+        model_args = config
         self.max_seq_len = model_args.max_seq_len
         self.norm_eps = model_args.norm_eps
-        self.layers = torch.nn.ModuleDict()
+        self.layers = ModuleDict()
         for layer_id in range(model_args.n_layers + model_args.num_mtp_modules):
             if layer_id < model_args.n_layers:
-                self.layers[str(layer_id)] = DeepSeekV4TransformerBlock(
-                    layer_id, model_args
-                )
+                self.layers[str(layer_id)] = DeepSeekV4TransformerBlock.Config(
+                    layer_id=layer_id, model_args=model_args
+                ).build()
             else:
-                self.layers[str(layer_id)] = MTPModule(layer_id, model_args)
-        self.norm = RMSNorm(model_args.dim, self.norm_eps)
+                self.layers[str(layer_id)] = MTPModule.Config(
+                    layer_id=layer_id, model_args=model_args
+                ).build()
+        self.norm = RMSNorm.Config(dim=model_args.dim, eps=self.norm_eps).build()
         self.hc_eps = model_args.hc_eps
         self.hc_mult = hc_mult = model_args.hc_mult
         hc_dim = hc_mult * model_args.dim
@@ -1265,15 +1536,17 @@ class DeepSeekV4Model(ModelProtocol):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult))
         self.hc_head_scale = nn.Parameter(torch.empty(1))
         torch.set_default_dtype(origin_dtype)
-        self.hc_head = HcHead(self.norm_eps, self.hc_eps)
+        self.hc_head = HcHead.Config(norm_eps=self.norm_eps, hc_eps=self.hc_eps).build()
         self.model_args = model_args
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-        self.output = nn.Linear(
-            model_args.dim,
-            model_args.vocab_size,
-            dtype=torch.get_default_dtype(),
+        self.tok_embeddings = Embedding.Config(
+            num_embeddings=model_args.vocab_size,
+            embedding_dim=model_args.dim,
+        ).build()
+        self.output = Linear.Config(
+            in_features=model_args.dim,
+            out_features=model_args.vocab_size,
             bias=False,
-        )
+        ).build()
         self.register_buffer(
             "freqs_cis", precompute_freqs_cis(model_args, True), persistent=False
         )

@@ -3,14 +3,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import os
-import types
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 
-import torchtitan.components.optimizer as tt_optimizer
 from torch.distributed._tensor import DeviceMesh, DTensor, Replicate, Shard
 
 from torchtitan_npu.patches.optimizer.virtual_optimizer import (
@@ -73,46 +71,6 @@ def test_virtual_allocator_memory_logic():
         mem = alloc.create(p)
         assert mem.shape == p.shape
         assert torch.all(mem == 0)
-
-
-def test_build_optimizers_virtual_validation():
-    config = types.SimpleNamespace(
-        virtual_optimizer=True, swap_optimizer=True, virtual_optimizer_size=10.0
-    )
-    with pytest.raises(
-        ValueError, match="Virtual optimizer does not support swap_optimizer"
-    ):
-        tt_optimizer.build_optimizers([], config, None, None)
-
-    config_no_size = types.SimpleNamespace(
-        virtual_optimizer=True, swap_optimizer=False, virtual_optimizer_size=None
-    )
-    with pytest.raises(ValueError, match="virtual_optimizer_size must be specified"):
-        tt_optimizer.build_optimizers([], config_no_size, None, None)
-
-
-@patch("torchtitan_npu.patches.optimizer.virtual_optimizer.torch_npu")
-@patch("torchtitan_npu.patches.optimizer.virtual_optimizer._original_build_optimizers")
-def test_build_optimizers_success_path(mock_orig, mock_npu):
-    mock_npu.npu.current_device.return_value = 0
-    mock_opt = MagicMock(spec=torch.optim.AdamW)
-    mock_opt.param_groups = [{"params": []}]
-    mock_orig.return_value = [mock_opt]
-
-    config = types.SimpleNamespace(
-        virtual_optimizer=True,
-        swap_optimizer=False,
-        virtual_optimizer_size=20.0,
-        name="AdamW",
-    )
-
-    results = tt_optimizer.build_optimizers(["part1"], config, None, None)
-
-    assert len(results) == 1
-    # Fix: Use getattr to access protected member for testing purposes
-    config_val = results[0]._allocator_config
-    assert config_val == (0, 1, 20.0)
-    assert torch.optim.AdamW.step.__name__ == "virtual_optimizer_step"
 
 
 @patch("torchtitan_npu.patches.optimizer.virtual_optimizer.torch_npu")

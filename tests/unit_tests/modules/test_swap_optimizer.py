@@ -2,11 +2,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-import types
-from unittest.mock import patch
-
 import torch
-import torchtitan.components.optimizer as tt_optimizer
 
 from torchtitan_npu.patches.optimizer import swap_optimizer
 
@@ -19,35 +15,28 @@ def test_unwrap_dtensor_returns_plain_tensor_for_non_dtensor():
     assert result is tensor
 
 
-def test_build_optimizers_wrapper_delegates_when_swap_disabled():
-    sentinel = object()
-    calls = []
-    with patch.object(
-        swap_optimizer,
-        "_original_build_optimizers",
-        lambda model_parts, optimizer_config, parallel_dims, ft_manager: calls.append(
-            (model_parts, optimizer_config, parallel_dims, ft_manager)
-        )
-        or sentinel,
-    ):
-        optimizer_config = types.SimpleNamespace(swap_optimizer=False)
-
-        result = tt_optimizer.build_optimizers(
-            model_parts=["model"],
-            optimizer_config=optimizer_config,
-            parallel_dims="parallel_dims",
-            ft_manager="ft_manager",
+def test_swap_optimizer_patch_step_function_updates_adam_classes(monkeypatch):
+    orig_adam_step = torch.optim.Adam.step
+    orig_adamw_step = torch.optim.AdamW.step
+    try:
+        monkeypatch.setattr(torch.optim.Adam, "step", lambda self, closure=None: None)
+        monkeypatch.setattr(
+            torch.optim.AdamW,
+            "step",
+            lambda self, closure=None: None,
         )
 
-    assert result is sentinel
-    assert calls == [(["model"], optimizer_config, "parallel_dims", "ft_manager")]
+        swap_optimizer.patch_optimizer_step()
+
+        assert torch.optim.Adam.step is swap_optimizer.swap_optimizer_step
+        assert torch.optim.AdamW.step is swap_optimizer.swap_optimizer_step
+    finally:
+        monkeypatch.setattr(torch.optim.Adam, "step", orig_adam_step)
+        monkeypatch.setattr(torch.optim.AdamW, "step", orig_adamw_step)
 
 
-def test_build_optimizers_wrapper_rejects_unknown_optimizer(monkeypatch):
-    monkeypatch.setattr(torch.optim.AdamW, "step", lambda self, closure=None: None)
-    monkeypatch.setattr(torch.optim.Adam, "step", lambda self, closure=None: None)
-
-    optimizer_config = types.SimpleNamespace(
+def test_swap_optimizer_config_build_rejects_unknown_optimizer():
+    optimizer_config = swap_optimizer.SwapOptimizersContainer.Config(
         swap_optimizer=True,
         name="SGD",
         lr=1e-3,
@@ -60,32 +49,18 @@ def test_build_optimizers_wrapper_rejects_unknown_optimizer(monkeypatch):
     )
 
     try:
-        tt_optimizer.build_optimizers(
-            model_parts=[],
-            optimizer_config=optimizer_config,
-            parallel_dims=None,
-            ft_manager=None,
-        )
+        optimizer_config.build(model_parts=[])
         raise AssertionError("Expected NotImplementedError for unsupported optimizer")
     except NotImplementedError as exc:
         assert "Optimizer SGD not added" in str(exc)
 
 
-def test_build_optimizers_wrapper_uses_swap_container(monkeypatch):
-    calls = []
-
+def test_swap_optimizer_config_build_uses_swap_container(monkeypatch):
     monkeypatch.setattr(torch.optim.AdamW, "step", lambda self, closure=None: None)
     monkeypatch.setattr(torch.optim.Adam, "step", lambda self, closure=None: None)
-    monkeypatch.setattr(
-        swap_optimizer,
-        "SwapOptimizersContainer",
-        lambda model_parts, optimizer_cls, optimizer_kwargs, swap_times: calls.append(
-            (model_parts, optimizer_cls, optimizer_kwargs, swap_times)
-        )
-        or "swap_container",
-    )
 
-    optimizer_config = types.SimpleNamespace(
+    model = torch.nn.Linear(4, 4)
+    optimizer_config = swap_optimizer.SwapOptimizersContainer.Config(
         swap_optimizer=True,
         name="AdamW",
         lr=1e-3,
@@ -97,15 +72,8 @@ def test_build_optimizers_wrapper_uses_swap_container(monkeypatch):
         swap_optimizer_times=16,
     )
 
-    result = tt_optimizer.build_optimizers(
-        model_parts=["model_part"],
-        optimizer_config=optimizer_config,
-        parallel_dims=None,
-        ft_manager=None,
-    )
+    container = optimizer_config.build(model_parts=[model])
 
-    assert result == "swap_container"
-    assert calls[0][0] == ["model_part"]
-    assert calls[0][1] is torch.optim.AdamW
-    assert calls[0][2]["lr"] == 1e-3
-    assert calls[0][3] == 16
+    assert isinstance(container, swap_optimizer.SwapOptimizersContainer)
+    assert len(container.optimizers) == 1
+    assert container.optimizers[0].step.__func__ is swap_optimizer.swap_optimizer_step

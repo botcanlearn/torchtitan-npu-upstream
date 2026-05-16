@@ -9,7 +9,13 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchtitan.models.moe.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common import moe as common_moe
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
+from torchtitan.protocols.module import Module
+
+GroupedExperts = common_moe.GroupedExperts
+TokenReorderer = common_moe.TokenReorderer
 
 
 @dataclass
@@ -26,12 +32,12 @@ class MoEArgs:
 
     # token-choice with optional node limited routing
     top_k: int = 1
-    num_expert_groups: int | None = 8  # must be a divisor of num_experts
+    num_expert_groups: int | None = None  # if set, must divide num_experts
     num_limited_groups: int | None = 8
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
-    _debug_force_load_balance: bool = False
+    debug_force_load_balance: bool = False
     # if True, we force each experts get same amount of token via round-robin
 
     n_hash_layers: int = 3
@@ -65,40 +71,51 @@ def _build_hash_routing_table(
     return tid2eid
 
 
-class TokenChoiceTopKRouter(TokenChoiceTopKRouter):
-    def __init__(
-        self,
-        dim: int,
-        num_experts: int,
-        top_k: int,
-        layer_id: int,
-        args: MoEArgs,
-        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"],
-        route_norm: bool,
-        route_scale: float,
-        vocab_size: int,
-        _debug_force_load_balance: bool = False,
-    ):
-        super().__init__(
-            dim,
-            num_experts,
-            args.num_expert_groups,
-            args.num_limited_groups,
-            top_k,
-            # pyrefly: ignore [bad-argument-type]
-            score_func,
-            route_norm,
-            route_scale,
-            _debug_force_load_balance,
-        )
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+class TokenChoiceTopKRouter(common_moe.TokenChoiceTopKRouter):
+    """DSV4 router: sqrtsoftplus + optional hash routing; gate is nn.Linear."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        num_experts: int
+        top_k: int
+        layer_id: int
+        args: "MoEArgs"
+        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"]
+        route_norm: bool
+        route_scale: float
+        vocab_size: int
+        debug_force_load_balance: bool = False
+
+    def __init__(self, config: Config):
+        # Do not call common_moe.TokenChoiceTopKRouter.__init__: upstream expects
+        # Linear.Config gate and only sigmoid/softmax score_func.
+        super(common_moe.TokenChoiceTopKRouter, self).__init__()
+        dim = config.dim
+        num_experts = config.num_experts
+        top_k = config.top_k
+        layer_id = config.layer_id
+        args = config.args
+        score_func = config.score_func
+        route_norm = config.route_norm
+        route_scale = config.route_scale
+        vocab_size = config.vocab_size
+        debug_force_load_balance = config.debug_force_load_balance
+
+        self.gate = Linear.Config(
+            in_features=dim,
+            out_features=num_experts,
+            bias=False,
+        ).build()
+        self.num_expert_groups = args.num_expert_groups
+        self.num_limited_groups = args.num_limited_groups
         self.num_experts = num_experts
         self.top_k = top_k
         # pyrefly: ignore [bad-assignment]
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
-        self._debug_force_load_balance = _debug_force_load_balance
+        self._debug_force_load_balance = debug_force_load_balance
         self.hash = layer_id < args.n_hash_layers
         self.vocab_size = vocab_size
         if self.hash:
@@ -185,38 +202,118 @@ class TokenChoiceTopKRouter(TokenChoiceTopKRouter):
             )
 
 
-class MoE(MoE):
-    def __init__(
-        self, moe_args: MoEArgs, dim: int, hidden_dim: int, layer_id, vocab_size
-    ):
-        # pyrefly: ignore [bad-argument-type]
-        super().__init__(moe_args, dim, hidden_dim)
-        # pyrefly: ignore [missing-argument]
-        self.router = TokenChoiceTopKRouter(
+class MoE(Module):
+    """DSV4 token-choice MoE (hash routing optional). Mirrors upstream MoE wiring."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        moe_args: MoEArgs
+        dim: int
+        hidden_dim: int
+        layer_id: int
+        vocab_size: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        moe_args = config.moe_args
+        dim = config.dim
+        hidden_dim = config.hidden_dim
+        layer_id = config.layer_id
+        vocab_size = config.vocab_size
+        num_experts = moe_args.num_experts
+
+        self.experts = GroupedExperts.Config(
             dim=dim,
-            # pyrefly: ignore [unexpected-keyword]
+            hidden_dim=hidden_dim,
+            num_experts=num_experts,
+            use_grouped_mm=moe_args.use_grouped_mm,
+        ).build()
+        self.experts.swiglu_limit = moe_args.swiglu_limit
+
+        self.router = TokenChoiceTopKRouter.Config(
+            dim=dim,
             layer_id=layer_id,
-            # pyrefly: ignore [unexpected-keyword]
             args=moe_args,
-            num_experts=moe_args.num_experts,
+            num_experts=num_experts,
             top_k=moe_args.top_k,
-            # pyrefly: ignore [bad-argument-type]
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
-            # pyrefly: ignore [unexpected-keyword]
             vocab_size=vocab_size,
-            _debug_force_load_balance=moe_args._debug_force_load_balance,
+            debug_force_load_balance=moe_args.debug_force_load_balance,
+        ).build()
+
+        self.reorderer = TokenReorderer(
+            num_experts=num_experts,
+            top_k=moe_args.top_k,
         )
+
+        n_shared = moe_args.num_shared_experts
+        if n_shared > 0:
+            shared_hidden = hidden_dim * n_shared
+            self.shared_experts = FeedForward.Config(
+                w1=Linear.Config(
+                    in_features=dim,
+                    out_features=shared_hidden,
+                    bias=False,
+                ),
+                w2=Linear.Config(
+                    in_features=shared_hidden,
+                    out_features=dim,
+                    bias=False,
+                ),
+                w3=Linear.Config(
+                    in_features=dim,
+                    out_features=shared_hidden,
+                    bias=False,
+                ),
+            ).build()
+        else:
+            self.shared_experts = None
+
         self.score_before_experts = moe_args.score_before_experts
-        # pyrefly: ignore [bad-argument-type]
-        self.experts.swiglu_limit = moe_args.swiglu_limit
+        self.load_balance_coeff = moe_args.load_balance_coeff
+
+        if self.load_balance_coeff is not None:
+            if self.load_balance_coeff <= 0.0:
+                raise ValueError("load_balance_coeff must be greater than 0.0")
+            self.register_buffer(
+                "expert_bias",
+                torch.zeros(num_experts, dtype=torch.float32),
+                persistent=True,
+            )
+        else:
+            self.expert_bias = None
+
+        self.register_buffer(
+            "tokens_per_expert",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=False,
+        )
 
         # Remove expert_bias buffer for hash layers. Note that init_weight of
         # class MoE will still create a non-buffer field named as `expert_bias`
         # so that `build_optimizers_with_moe_load_balancing` will not break.
         if layer_id < moe_args.n_hash_layers:
             del self.expert_bias
+
+    def init_weights(self, init_std: float, buffer_device: torch.device | None = None):
+        self.router.init_weights(init_std)
+        # npu_gmm patches GroupedExperts.init_weights (see converters/kernels/gmm.py) and merges
+        # w1+w3 -> w13, setting w1/w3 to None. Must delegate to experts.init_weights so we do not
+        # bypass that path or touch None tensors.
+        experts_init = getattr(self.experts, "init_weights", None)
+        if callable(experts_init):
+            experts_init(init_std)
+        else:
+            for name in ("w1", "w2", "w3"):
+                p = getattr(self.experts, name, None)
+                if p is not None:
+                    nn.init.trunc_normal_(p, mean=0.0, std=init_std)
+        if self.shared_experts is not None:
+            for m in self.shared_experts.modules():
+                if isinstance(m, nn.Linear) and m.weight is not None:
+                    nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
 
     # pyrefly: ignore [bad-override]
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -233,10 +330,11 @@ class MoE(MoE):
         bs, slen, dim = x.shape
         x_flat = x.view(-1, dim)
         input_ids_flat = input_ids.flatten()
+        bias = getattr(self, "expert_bias", None)
         top_scores, selected_experts_indices, num_tokens_per_expert = self.router(
             x_flat,
             input_ids_flat,
-            self.expert_bias,
+            bias,
         )
 
         with torch.no_grad():
@@ -248,8 +346,10 @@ class MoE(MoE):
             num_tokens_per_expert,
         ) = self.reorderer(top_scores, selected_experts_indices)
 
+        # token_indices_experts_sorted is already token-level: upstream
+        # TokenReorderer divides the argsort permutation by top_k internally.
         # shape (bs*slen*top_k, dim)
-        routed_input = x_flat[token_indices_experts_sorted // self.router.top_k]
+        routed_input = x_flat[token_indices_experts_sorted]
 
         if self.score_before_experts:
             routed_input = (
@@ -265,28 +365,19 @@ class MoE(MoE):
             self.shared_experts(x_flat) if self.shared_experts is not None else None
         )
 
-        # Unsorted routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
-
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
-            )
-        else:
-            out_experts = routed_output_unsorted.sum(dim=1)
+            routed_output = (
+                routed_output.to(torch.float32)
+                * top_scores_experts_sorted.reshape(-1, 1)
+            ).to(x.dtype)
+
+        # Scatter-add each token's top_k expert outputs back to its position.
+        out_experts = torch.zeros_like(x_flat)
+        out_experts = out_experts.scatter_add(
+            0,
+            token_indices_experts_sorted.reshape(-1, 1).expand(-1, dim),
+            routed_output,
+        )
 
         if shared_output is None:
             output = out_experts.reshape(bs, slen, dim)

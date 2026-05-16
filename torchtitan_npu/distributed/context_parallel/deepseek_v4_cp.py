@@ -360,7 +360,7 @@ def patch_deepseek_v4_for_context_parallel(
     C1A (compress_ratio=1) and C128A (compress_ratio=128) are supported.
     C4A (compress_ratio=4) will raise NotImplementedError at runtime.
     """
-    from torchtitan_npu.models.deepseek_v4.model.model import Attention, SparseAttention
+    from torchtitan_npu.models.deepseek_v4.model import Attention, SparseAttention
 
     cp_group = cp_mesh.get_group()
     cp_rank = dist.get_rank(group=cp_group)

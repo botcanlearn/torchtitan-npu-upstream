@@ -438,10 +438,7 @@ class TestC128AForwardWithCp:
 class TestPatchDeepSeekV4ForContextParallel:
     @staticmethod
     def test_sets_attention_and_sparse_attention_cp_context():
-        from torchtitan_npu.models.deepseek_v4.model.model import (
-            Attention,
-            SparseAttention,
-        )
+        from torchtitan_npu.models.deepseek_v4.model import Attention, SparseAttention
 
         snapshot = TestPatchDeepSeekV4ForContextParallel._snapshot_class_state(
             Attention, SparseAttention

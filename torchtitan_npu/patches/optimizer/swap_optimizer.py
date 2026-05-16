@@ -21,7 +21,6 @@ from typing import ClassVar, TypeVar
 
 import torch
 import torch.nn as nn
-import torchtitan.components.optimizer as tt_optimizer
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.optim.optimizer import _use_grad_for_differentiable
@@ -33,8 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 T = TypeVar("T", bound=Optimizer)
-
-_original_build_optimizers = getattr(tt_optimizer, "build_optimizers", None)
 
 
 def get_torch_device():
@@ -370,27 +367,8 @@ _OWNER_ATTR = "_owner"
 setattr(SwapOptimizersContainer.Config, _OWNER_ATTR, SwapOptimizersContainer)
 
 
-def build_optimizers(model_parts, optimizer_config, parallel_dims, ft_manager=None):
-    if not getattr(optimizer_config, "swap_optimizer", False):
-        if _original_build_optimizers is not None:
-            return _original_build_optimizers(
-                model_parts, optimizer_config, parallel_dims, ft_manager
-            )
-        return OptimizersContainer(config=optimizer_config, model_parts=model_parts)
-
-    if getattr(optimizer_config, "name", "") not in ("Adam", "AdamW"):
-        raise NotImplementedError(f"Optimizer {optimizer_config.name} not added.")
-
-    return SwapOptimizersContainer(config=optimizer_config, model_parts=model_parts)
-
-
 def patch_optimizer_step():
     """Patch optimizer step functions for swap optimizer support."""
     torch.optim.AdamW.step = swap_optimizer_step
     torch.optim.Adam.step = swap_optimizer_step
     logger.info("[SwapOptimizer] Patched AdamW.step and Adam.step")
-
-
-if _original_build_optimizers is None:
-    tt_optimizer.build_optimizers = build_optimizers  # type: ignore[assignment]
-    logger.info("[SwapOptimizer] Installed build_optimizers compatibility shim")

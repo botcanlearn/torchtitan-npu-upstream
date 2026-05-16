@@ -2,12 +2,9 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-from types import SimpleNamespace
-
 import pytest
 import torch
 import torch.nn as nn
-import torchtitan.components.optimizer as tt_optimizer
 
 from torchtitan_npu.patches.optimizer.swap_optimizer import (
     swap_optimizer_step,
@@ -33,7 +30,7 @@ def _reset_swap_global_state():
 
 
 def _swap_optimizer_config():
-    return SimpleNamespace(
+    return SwapOptimizersContainer.Config(
         swap_optimizer=True,
         name="AdamW",
         lr=1e-3,
@@ -49,11 +46,7 @@ def _swap_optimizer_config():
 def test_swap_optimizer_builds_swap_container(npu_device):
     model = nn.Linear(32, 32).to(npu_device)
 
-    container = tt_optimizer.build_optimizers(
-        [model],
-        _swap_optimizer_config(),
-        parallel_dims=object(),
-    )
+    container = _swap_optimizer_config().build(model_parts=[model])
     optimizer = container.optimizers[0]
 
     assert isinstance(container, SwapOptimizersContainer)
@@ -64,11 +57,7 @@ def test_swap_optimizer_builds_swap_container(npu_device):
 def test_swap_optimizer_initializes_cpu_state_buffers(npu_device):
     model = nn.Linear(16, 16).to(npu_device)
 
-    container = tt_optimizer.build_optimizers(
-        [model],
-        _swap_optimizer_config(),
-        parallel_dims=object(),
-    )
+    container = _swap_optimizer_config().build(model_parts=[model])
     optimizer = container.optimizers[0]
 
     for param in optimizer.param_groups[0]["params"]:
@@ -79,11 +68,7 @@ def test_swap_optimizer_initializes_cpu_state_buffers(npu_device):
 
 def test_swap_optimizer_step_updates_model_parameters(npu_device):
     model = nn.Linear(8, 8).to(npu_device)
-    container = tt_optimizer.build_optimizers(
-        [model],
-        _swap_optimizer_config(),
-        parallel_dims=object(),
-    )
+    container = _swap_optimizer_config().build(model_parts=[model])
     optimizer = container.optimizers[0]
     tracked_param = optimizer.param_groups[0]["params"][0]
     baseline_state = SwapOptimizersContainer.param_to_cpu_states_map[tracked_param][

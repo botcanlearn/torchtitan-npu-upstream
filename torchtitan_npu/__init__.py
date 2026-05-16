@@ -20,12 +20,15 @@ def _apply_patches():
     # patching optimizer before importing torchtitan.models
     from .patches.optimizer import swap_optimizer  # noqa: F401 # usort:skip
 
+    import torchtitan.models as titan_models
+
     # patching torchtitan
     from torchtitan_npu.patches.torchtitan import (  # noqa: F401
         activation_checkpoint,
         expert_parallel,
         hf_datasets,
         loss,
+        optimizer,
     )
 
     # patching ops
@@ -46,7 +49,12 @@ def _apply_patches():
 
     # async_tp
     # patching torch
-    from .patches.torch import clip_grad, micro_pipeline_tp, pipelining  # noqa: F401
+    from .patches.torch import (  # noqa: F401
+        clip_grad,
+        distributed_tensor_api,
+        micro_pipeline_tp,
+        pipelining,
+    )
 
     # patching fake process group
     from .patches.torch.testing._internal.distributed import fake_pg  # noqa: F401
@@ -56,6 +64,15 @@ def _apply_patches():
 
     # patching tools
     from .tools import flight_recorder, profiling  # noqa: F401
+
+    new_set = set(titan_models._supported_models)
+    new_set.add("deepseek_v4")
+    titan_models._supported_models = frozenset(new_set)
+
+    # module injection
+    from .models import deepseek_v4  # noqa: F401
+
+    _inject_module("torchtitan.models.deepseek_v4", deepseek_v4)
 
 
 def _inject_module(module_path: str, replacement_module):

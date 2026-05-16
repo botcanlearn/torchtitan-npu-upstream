@@ -25,7 +25,7 @@ from . import model_registry
 
 def deepseek_v3_671b_debug() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="/mnt/share/hanboyou/DeepSeek-V3.1-Base",
+        hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_16die"),
         model_converters=ModelConvertersContainer.Config(
             converters=[
@@ -67,13 +67,13 @@ def deepseek_v3_671b_debug() -> TrainerConfig:
             enable_custom_context_parallel=True,
         ),
         checkpoint=CheckpointManager.Config(
-            enable=True,
+            enable=False,
             folder="/mnt/models/DeepSeek-V3",
             interval=500,
             last_save_model_only=True,
             load_only=True,
-            initial_load_in_hf=True,
-            initial_load_path="/mnt/share/c00878090/20260330/torchtitan-npu-dsv3/dsv3_4layers_0401_2/",
+            initial_load_in_hf=False,
+            initial_load_path="/mnt/models/DeepSeek-V3",
             export_dtype="float32",
             async_mode="disabled",
         ),
@@ -95,7 +95,7 @@ def deepseek_v3_671b_debug() -> TrainerConfig:
 
 def deepseek_v3_671b_16die_debug() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
+        hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_16die"),
         metrics=MetricsProcessor.Config(log_freq=10),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -151,7 +151,7 @@ def deepseek_v3_671b_16die_debug() -> TrainerConfig:
 
 def deepseek_v3_671b_61layers_4k_128die() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
+        hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_128die"),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="enwiki-eod"),
@@ -208,7 +208,7 @@ def deepseek_v3_671b_61layers_4k_128die() -> TrainerConfig:
 
 def deepseek_v3_smoketest() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./tests/assets/tokenizer",
+        hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug"),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),

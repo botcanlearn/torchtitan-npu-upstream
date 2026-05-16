@@ -26,26 +26,21 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.components.quantization.float8 import find_float8_linear_config
+from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.dual_pipe_v import (
-    DualPipeExpertParallel,
-    get_dual_pipe_v_flag,
-)
 from torchtitan.distributed.expert_parallel import (
-    BaseExpertParallel,
     DeepEPExpertParallel,
     ExpertParallel,
     TensorParallel,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
-from torchtitan.models.llama4.infra.parallelize import apply_fsdp
-from torchtitan.models.moe import moe as moe_module
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.models.common import moe as moe_module
+from torchtitan.models.llama3.parallelize import apply_replicate
+from torchtitan.models.llama4.parallelize import apply_fsdp
 
-from torchtitan_npu.models.deepseek_v4.model.model import (
+from torchtitan_npu.models.deepseek_v4.model import (
     Attention,
     DSAIndexerLossLoggingHelper,
 )
@@ -168,28 +163,34 @@ def _register_distributed_parameter(
 
 def parallelize_deepseek_v4(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training,
+    model_converters,
+    parallelism,
+    compile_config,
+    ac_config,
+    dump_folder: str,
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+    if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "
             f"Got attn_type='{attn_type}'. "
             f"FlexAttention and varlen attention are not supported with CP."
         )
 
-    if job_config.parallelism.context_parallel_degree > 1:
+    if parallelism.context_parallel_degree > 1:
         from torchtitan_npu.distributed.context_parallel.deepseek_v4_cp import (
             patch_deepseek_v4_for_context_parallel,
         )
@@ -203,8 +204,9 @@ def parallelize_deepseek_v4(
     apply_distributed_indexer_loss_tracking(parallel_dims)
 
     if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
+        float8_config = find_float8_linear_config(model_converters.converters)
+        enable_float8_linear = float8_config is not None
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -212,21 +214,23 @@ def parallelize_deepseek_v4(
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
             raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for deepseekv3"
+                "Currently, float8 tensorwise TP is not tested for deepseekv4"
             )
 
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            job_config=job_config,
+            parallelism=parallelism,
+            model_converters=model_converters,
+            ac_config=ac_config,
         )
-        maybe_enable_async_tp(job_config, tp_mesh)
+        maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     # Check if using DeepEP for MoE communication
-    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+    if parallelism.expert_parallel_comm_backend == "deepep":
         if not parallel_dims.ep_enabled:
             raise ValueError(
                 "DeepEP requires expert parallelism (ep_degree > 1). "
@@ -250,34 +254,29 @@ def parallelize_deepseek_v4(
         use_deepep = False
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
-
         apply_moe_ep_tp(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
-            dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
         )
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if ac_config.mode != "none":
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
-            base_folder=job_config.job.dump_folder,
+            base_folder=dump_folder,
         )
 
     if model_compile_enabled:
-        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -298,11 +297,11 @@ def parallelize_deepseek_v4(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
@@ -313,17 +312,18 @@ def parallelize_deepseek_v4(
         else:
             logger.info("Applied FSDP to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
 
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")
         if dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
             dp_mesh,
-            enable_compile=model_compile_enabled,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -334,19 +334,22 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    job_config: JobConfig,
+    parallelism,
+    model_converters,
+    ac_config,
 ):
     """Apply tensor parallelism."""
 
     # whether the npu_dsa kernel is enabled
-    parallel_cfg = job_config.parallelism
+    parallel_cfg = parallelism
     use_cp = (
         # pyrefly: ignore [missing-attribute]
         parallel_cfg.enable_custom_context_parallel
         and parallel_cfg.context_parallel_degree > 1
     )
-    enable_npu_dsa = "npu_dsa" in job_config.model.converters or use_cp
-    enable_activation_checkpoint = job_config.activation_checkpoint.mode in [
+    converter_names = {type(c).__name__.lower() for c in model_converters.converters}
+    enable_npu_dsa = ("npu_dsa" in converter_names) or use_cp
+    enable_activation_checkpoint = ac_config.mode in [
         "full",
         "selective",
     ]
@@ -618,11 +621,11 @@ def apply_non_moe_tp(
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is
             # correctly handled by the autograd engine.
-            "attention.pre_attention.wq_a": NoParallel(use_local_output=False),
-            "attention.pre_attention.q_norm": NoParallel(use_local_output=False),
+            "attention.pre_attention.wq_a": NoParallel(),
+            "attention.pre_attention.q_norm": NoParallel(),
             "attention.pre_attention.wq_b": colwise_parallel(use_local_output=False),
-            "attention.pre_attention.wkv": NoParallel(use_local_output=False),
-            "attention.pre_attention.kv_norm": NoParallel(use_local_output=False),
+            "attention.pre_attention.wkv": NoParallel(),
+            "attention.pre_attention.kv_norm": NoParallel(),
             "attention.post_attention.wo_a": colwise_parallel(use_local_output=False),
             "attention.post_attention.wo_b": rowwise_parallel(
                 input_layouts=Shard(-1),
@@ -656,9 +659,9 @@ def apply_non_moe_tp(
             layer_plan.update(
                 {
                     compressor_key: compressor_plan,
-                    f"{compressor_key}.wkv": NoParallel(use_local_output=False),
-                    f"{compressor_key}.wgate": NoParallel(use_local_output=False),
-                    f"{compressor_key}.norm": NoParallel(use_local_output=False),
+                    f"{compressor_key}.wkv": NoParallel(),
+                    f"{compressor_key}.wgate": NoParallel(),
+                    f"{compressor_key}.norm": NoParallel(),
                 }
             )
             if compress_ratio == 4:
@@ -675,20 +678,16 @@ def apply_non_moe_tp(
                         "attention.pre_attention.indexer": indexer_plan,
                         "attention.pre_attention.indexer.compressor": indexer_compressor_plan,
                         "attention.pre_attention.indexer.wq_b": NoParallel(
-                            use_local_output=True
+                            local_output_grad_placements=(Replicate(),)
                         ),
                         "attention.pre_attention.indexer.weights_proj": NoParallel(
-                            use_local_output=True
+                            local_output_grad_placements=(Replicate(),)
                         ),
-                        "attention.pre_attention.indexer.compressor.wkv": NoParallel(
-                            use_local_output=False
-                        ),
-                        "attention.pre_attention.indexer.compressor.wgate": NoParallel(
-                            use_local_output=False
-                        ),
-                        "attention.pre_attention.indexer.compressor.norm": NoParallel(
-                            use_local_output=False
-                        ),
+                        # Upstream NoParallel dropped ``use_local_output``;
+                        # output stays a DTensor by default.
+                        "attention.pre_attention.indexer.compressor.wkv": NoParallel(),
+                        "attention.pre_attention.indexer.compressor.wgate": NoParallel(),
+                        "attention.pre_attention.indexer.compressor.norm": NoParallel(),
                     }
                 )
 
@@ -746,7 +745,6 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
-    dual_pipe_v: bool = False,
     use_deepep: bool = False,
 ):
     assert (
@@ -821,9 +819,6 @@ def apply_moe_ep_tp(
         else:
             raise NotImplementedError("ETP is not supported currently")
 
-        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
-            experts_plan = DualPipeExpertParallel(experts_plan)
-
         parallelize_module(
             # pyrefly: ignore [missing-attribute]
             module=transformer_block.moe.experts,
@@ -832,120 +827,115 @@ def apply_moe_ep_tp(
         )
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
+def _compile_moe_transformer_block(
+    transformer_block: nn.Module,
+    compile_config,
+) -> nn.Module:
+    # MoE layers contain FSDP(GroupedExperts) hooks. Compile around those hooks so
+    # activation checkpointing does not fall the whole graph back to eager.
+    block = (
+        transformer_block._checkpoint_wrapped_module
+        if isinstance(transformer_block, CheckpointWrapper)
+        else transformer_block
+    )
+    for attr_name, submod in block.named_children():
+        if getattr(block, attr_name) != getattr(transformer_block, attr_name):
+            raise RuntimeError(
+                f"Checkpoint-wrapped block child '{attr_name}' is not exposed on wrapper"
+            )
+        if attr_name in {"cal_index_loss", "hc_pre"}:
+            continue
+        if isinstance(submod, moe_module.MoE):
+            _compile_children_except(submod, {"experts"}, compile_config)
+        elif isinstance(submod, Attention):
+            _compile_children_except(submod, {"inner_attention"}, compile_config)
+        else:
+            setattr(
+                block,
+                attr_name,
+                torch.compile(submod, backend=compile_config.backend, fullgraph=True),
+            )
+    return transformer_block
+
+
+def _compile_children_except(
+    module: nn.Module,
+    skip_names: set[str],
+    compile_config,
+) -> None:
+    for child_name, child_module in module.named_children():
+        if child_name in skip_names:
+            continue
+        setattr(
+            module,
+            child_name,
+            torch.compile(
+                child_module,
+                backend=compile_config.backend,
+                fullgraph=True,
+            ),
+        )
+
+
+def _patch_grouped_mm_compile(compile_config, ep_enabled: bool) -> None:
+    already_patched = (
+        "_run_experts_grouped_mm_dynamic"
+        in moe_module._run_experts_grouped_mm.__qualname__
+    )
+    if already_patched:
+        return
+
+    moe_module._run_experts_grouped_mm = torch.compile(
+        moe_module._run_experts_grouped_mm,
+        backend=compile_config.backend,
+        fullgraph=True,
+    )
+    if not ep_enabled:
+        return
+
+    compiled_fn = moe_module._run_experts_grouped_mm
+
+    # Keep function logic in sync with the `already_patched` check above.
+    def _run_experts_grouped_mm_dynamic(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        torch._dynamo.mark_dynamic(x, 0)
+        return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
+
+    moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
+
+
+def apply_compile(model: nn.Module, compile_config, ep_enabled: bool):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
+    # Required for torch.compile to avoid graph breaking on dynamic shapes in
+    # token-choice MoE.
     torch._dynamo.config.capture_scalar_outputs = True
     # Workaround for https://github.com/pytorch/pytorch/issues/166926
     # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
-    # pyrefly: ignore [missing-attribute]
+
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
-            # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
-            # So we must weave compile wrappers around those FSDP hooks to
-            # prevent AC from falling back the whole graph to eager.
-            # TODO: Fix Compile(AC(graph break))
-
-            if isinstance(transformer_block, CheckpointWrapper):
-                # TODO: Make CheckpointWrapper a transparent wrapper
-                # unwrap so that .named_children() works
-                block = transformer_block._checkpoint_wrapped_module
-            else:
-                block = transformer_block
-
-            for attr_name, submod in block.named_children():
-                assert getattr(block, attr_name) == getattr(
-                    transformer_block, attr_name
-                )
-
-                if attr_name in {"cal_index_loss", "hc_pre"}:
-                    continue
-
-                if isinstance(submod, moe_module.MoE):
-                    # avoid graph breaking on the GroupedExperts' FSDP hooks
-                    # by wrapping each submod's forward instead of their __call__
-                    moe = submod
-                    for attr_name, submod in moe.named_children():
-                        if attr_name == "experts":
-                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
-                            # https://github.com/pytorch/torchtitan/issues/1940
-                            continue
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
-                elif isinstance(submod, Attention):
-                    # inner_attention contains NPU fused ops (sparse_attn, li_compute) that cannot be compiled.
-                    # Compile pre_attention and post_attention as whole units for better efficiency.
-                    attention = submod
-                    for attr_name, submod in attention.named_children():
-                        if attr_name == "inner_attention":
-                            continue
-                        setattr(
-                            attention,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
-                else:
-                    setattr(
-                        block,
-                        attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
-                    )
-
+            transformer_block = _compile_moe_transformer_block(
+                transformer_block, compile_config
+            )
         else:
-            # If it's not a MoE layer, there is no FSDP(GroupedExperts)
-            # So we can compile the whole block
             transformer_block = torch.compile(
                 transformer_block,
                 backend=compile_config.backend,
                 fullgraph=True,
             )
-
         # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
-    # Patch some globals only once (apply_compile is called multiple times for PP setup)
-    already_patched = (
-        "_run_experts_grouped_mm_dynamic"
-        in moe_module._run_experts_grouped_mm.__qualname__
-    )
-    if not already_patched:
-        moe_module._run_experts_grouped_mm = torch.compile(
-            moe_module._run_experts_grouped_mm,
-            backend=compile_config.backend,
-            fullgraph=True,
-        )
-
-        if ep_enabled:
-            compiled_fn = moe_module._run_experts_grouped_mm
-
-            # keep function logic in sync with `already_patched` above
-            def _run_experts_grouped_mm_dynamic(
-                w1: torch.Tensor,
-                w2: torch.Tensor,
-                w3: torch.Tensor,
-                x: torch.Tensor,
-                num_tokens_per_expert: torch.Tensor,
-            ) -> torch.Tensor:
-                # dynamic number of tokens in expert parallel
-                torch._dynamo.mark_dynamic(x, 0)
-                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
-
-            moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
-
+    _patch_grouped_mm_compile(compile_config, ep_enabled)
     # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
     # https://github.com/pytorch/pytorch/issues/166460
 

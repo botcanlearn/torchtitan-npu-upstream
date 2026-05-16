@@ -57,6 +57,10 @@ def _run_experts_grouped_mm(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int64)
 
     h = npu_grouped_mm(x.bfloat16(), w13.bfloat16().transpose(-2, -1), offsets)
+    # DSv4 injects ``swiglu_limit`` on its GroupedExperts to bound gate/up before
+    # the swiglu activation. Without this clamp the bf16 grouped_mm output can
+    # overflow during the first optimizer step under sqrtsoftplus routing and
+    # produce NaNs.
     if swiglu_limit is not None:
         gate, up = h.chunk(2, -1)
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
@@ -84,8 +88,13 @@ def npu_grouped_experts_forward(
                 is_tp = True
                 break
         tp_group = self.w2.device_mesh.get_group() if is_tp else None
+        # One-time diagnostic. Skip entirely under torch.compile: dynamo cannot
+        # trace setattr on a function object, and this branch has no effect on
+        # the computation.
         logged_attr = "_logged"
-        if not hasattr(npu_grouped_experts_forward, logged_attr):
+        if not torch.compiler.is_compiling() and not hasattr(
+            npu_grouped_experts_forward, logged_attr
+        ):
             setattr(npu_grouped_experts_forward, logged_attr, True)
             logger.info(
                 f"[GMM-TP] w2 placements={self.w2.placements}, is_tp={is_tp}, "
@@ -96,7 +105,9 @@ def npu_grouped_experts_forward(
         w13 = self.w13
         tp_group = None
 
-    # Refactor this, only DSv4 inject this attribute to its experts.
+    # DSv4 sets ``self.swiglu_limit`` on its GroupedExperts instance (see
+    # torchtitan_npu/models/deepseek_v4/moe.py). Other models leave this unset
+    # and the clamp is skipped in ``_run_experts_grouped_mm``.
     swiglu_limit = getattr(self, "swiglu_limit", None)
 
     # pyrefly: ignore [bad-argument-type]
@@ -105,12 +116,20 @@ def npu_grouped_experts_forward(
     if is_tp and tp_group is not None:
         import torch.distributed as dist
 
-        pre_ar = out.mean().item()
-        dist.all_reduce(out, group=tp_group)
-        post_ar = out.mean().item()
+        # One-time diagnostic of the TP all-reduce. Skip under torch.compile
+        # (dynamo cannot trace setattr on a function) and avoid the .item()
+        # device syncs on every step once it has been logged.
         ar_logged_attr = "_ar_logged"
-        if not hasattr(npu_grouped_experts_forward, ar_logged_attr):
+        log_ar = not torch.compiler.is_compiling() and not hasattr(
+            npu_grouped_experts_forward, ar_logged_attr
+        )
+        pre_ar = out.mean().item() if log_ar else None
+
+        dist.all_reduce(out, group=tp_group)
+
+        if log_ar:
             setattr(npu_grouped_experts_forward, ar_logged_attr, True)
+            post_ar = out.mean().item()
             ratio = post_ar / pre_ar if pre_ar != 0 else float("inf")
             logger.info(
                 "[GMM-TP] all-reduce: pre_mean=%.6f, post_mean=%.6f, ratio=%s",
