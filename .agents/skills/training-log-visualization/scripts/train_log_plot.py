@@ -24,6 +24,7 @@ TPS_RE = re.compile(rf"\btps:\s*{NUM_RE}")
 TFLOPS_RE = re.compile(rf"\btflops:\s*{NUM_RE}")
 MFU_RE = re.compile(rf"\bmfu:\s*{NUM_RE}%")
 ELAPSED_RE = re.compile(rf"\belapsed_time_per_step:\s*{NUM_RE}s")
+INDEXER_LOSS_RE = re.compile(rf"\bindexer\s+loss:\s*{NUM_RE}")
 
 
 @dataclass(frozen=True)
@@ -70,10 +71,16 @@ def read_training_metrics(log_path: str | Path) -> tuple[list[dict], list[str]]:
     records_by_step: dict[int, dict] = {}
     malformed_lines = 0
     duplicate_steps = 0
+    pending_indexer_loss: float | None = None
 
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_no, raw_line in enumerate(handle, start=1):
             line = _clean_line(raw_line)
+
+            line_indexer_loss = _search_float(INDEXER_LOSS_RE, line)
+            if line_indexer_loss is not None:
+                pending_indexer_loss = line_indexer_loss
+
             if "step:" not in line or "loss:" not in line:
                 continue
 
@@ -81,6 +88,7 @@ def read_training_metrics(log_path: str | Path) -> tuple[list[dict], list[str]]:
             loss_val = _search_float(LOSS_RE, line)
             if step_val is None or loss_val is None:
                 malformed_lines += 1
+                pending_indexer_loss = None
                 continue
 
             step = int(step_val)
@@ -114,6 +122,13 @@ def read_training_metrics(log_path: str | Path) -> tuple[list[dict], list[str]]:
             elapsed = _search_float(ELAPSED_RE, line)
             if elapsed is not None:
                 record["elapsed_time_per_step"] = elapsed
+
+            indexer_loss = line_indexer_loss
+            if indexer_loss is None:
+                indexer_loss = pending_indexer_loss
+            if indexer_loss is not None:
+                record["indexer_loss"] = indexer_loss
+            pending_indexer_loss = None
 
             if step in records_by_step:
                 duplicate_steps += 1

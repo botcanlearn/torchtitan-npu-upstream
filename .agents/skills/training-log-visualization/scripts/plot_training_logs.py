@@ -35,6 +35,8 @@ def _normalize_metric(metric: str) -> str:
         "memory": "memory_gib",
         "mfu": "mfu_pct",
         "elapsed": "elapsed_time_per_step",
+        "indexer": "indexer_loss",
+        "indexer_loss": "indexer_loss",
     }
     return alias_map.get(metric, metric)
 
@@ -99,6 +101,26 @@ def _require_matplotlib(no_show: bool):
         ) from exc
 
 
+def _apply_integer_xaxis(axis) -> None:
+    """Force the x-axis (training step) to display integer ticks only.
+
+    MaxNLocator(integer=True) prefers integer ticks but still falls back to
+    fractional values when the data range is narrow (e.g. a single point). Pair
+    it with a formatter that hides labels for any non-integer tick so the
+    rendered step axis never shows decimals.
+    """
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+    def _format_step(value: float, _pos: int) -> str:
+        rounded = round(value)
+        if abs(value - rounded) > 1e-6:
+            return ""
+        return f"{int(rounded)}"
+
+    axis.xaxis.set_major_locator(MaxNLocator(integer=True))
+    axis.xaxis.set_major_formatter(FuncFormatter(_format_step))
+
+
 def _metric_label(metric_key: str) -> str:
     labels = {
         "loss": "loss",
@@ -109,6 +131,7 @@ def _metric_label(metric_key: str) -> str:
         "tflops": "tflops",
         "mfu_pct": "mfu (%)",
         "elapsed_time_per_step": "elapsed_time_per_step (s)",
+        "indexer_loss": "indexer loss",
         "loss_abs_error": "loss abs error",
         "loss_rel_error": "loss relative error",
         "grad_norm_abs_error": "grad_norm abs error",
@@ -192,6 +215,7 @@ def _plot_single_log(
         axis.set_ylabel(_metric_label(metric))
         axis.grid(True, linestyle="--", alpha=0.4)
         axis.legend(loc="best", fontsize=8)
+        _apply_integer_xaxis(axis)
 
     # Hide unused subplots
     for idx in range(n_metrics, len(axes_flat)):
@@ -300,6 +324,7 @@ def _plot_compare(
     ax_loss.set_ylabel("loss")
     ax_loss.grid(True, linestyle="--", alpha=0.4)
     ax_loss.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_loss)
 
     # Grad norm subplot
     ax_grad = axes[0][1]
@@ -310,6 +335,7 @@ def _plot_compare(
     ax_grad.set_ylabel("grad_norm")
     ax_grad.grid(True, linestyle="--", alpha=0.4)
     ax_grad.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_grad)
 
     # Row 1: absolute errors (no threshold lines)
     # Loss abs error
@@ -321,6 +347,7 @@ def _plot_compare(
     ax_loss_abs.set_ylabel("loss abs error")
     ax_loss_abs.grid(True, linestyle="--", alpha=0.4)
     ax_loss_abs.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_loss_abs)
 
     # Add statistics text below the plot (larger font)
     stats_text = (
@@ -350,6 +377,7 @@ def _plot_compare(
     ax_grad_abs.set_ylabel("grad_norm abs error")
     ax_grad_abs.grid(True, linestyle="--", alpha=0.4)
     ax_grad_abs.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_grad_abs)
 
     # Add statistics text (larger font)
     stats_text = (
@@ -385,6 +413,7 @@ def _plot_compare(
     ax_loss_rel.set_ylabel("loss relative error")
     ax_loss_rel.grid(True, linestyle="--", alpha=0.4)
     ax_loss_rel.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_loss_rel)
 
     # Add statistics text (larger font)
     stats_text = (
@@ -418,6 +447,7 @@ def _plot_compare(
     ax_grad_rel.set_ylabel("grad_norm relative error")
     ax_grad_rel.grid(True, linestyle="--", alpha=0.4)
     ax_grad_rel.legend(loc="best", fontsize=8)
+    _apply_integer_xaxis(ax_grad_rel)
 
     # Add statistics text (larger font)
     stats_text = (
@@ -472,6 +502,7 @@ def _plot_compare(
         axis.set_ylabel(_metric_label(metric))
         axis.grid(True, linestyle="--", alpha=0.4)
         axis.legend(loc="best", fontsize=8)
+        _apply_integer_xaxis(axis)
 
     # Hide unused subplots in optional metrics section
     n_optional_plotted = len(optional_metrics)
@@ -514,7 +545,7 @@ def main() -> int:
     parser.add_argument(
         "--metrics",
         default="",
-        help="optional metrics: memory_gib,memory_pct,tps,tflops,mfu_pct,elapsed_time_per_step",
+        help="optional metrics: memory_gib,memory_pct,tps,tflops,mfu_pct,elapsed_time_per_step,indexer_loss",
     )
     parser.add_argument("--output", default=None, help="output image path")
     parser.add_argument(
