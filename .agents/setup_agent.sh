@@ -10,8 +10,8 @@ PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 SKILLS_DIR="${PROJECT_ROOT}/.agents/skills"
 
 if [[ ! -d "${SKILLS_DIR}" ]]; then
-  echo "未找到 skills 目录: ${SKILLS_DIR}"
-  echo "请在项目根目录执行该脚本，或确认 .agents/skills 存在。"
+  echo "未找到 skills 目录: ${SKILLS_DIR}" >&2
+  echo "请在项目根目录执行该脚本，或确认 .agents/skills 存在。" >&2
   exit 1
 fi
 
@@ -50,6 +50,11 @@ trim_wrapped_quotes() {
 }
 
 show_available_skills() {
+  # 在 quiet 模式下不打印 skill 列表，避免每次启动都刷屏
+  if [[ "${QUIET:-0}" -eq 1 ]]; then
+    return
+  fi
+
   local skill_files=()
   local file=""
 
@@ -86,130 +91,165 @@ show_available_skills() {
   done
 }
 
-select_agent() {
-  local choice=""
+apply_agent_choice() {
+  local agent="$1"
+  case "${agent}" in
+    claude|claude-code|.claude)
+      AGENT_LABEL="claude code"
+      AGENT_DIR_NAME=".claude"
+      ;;
+    opencode|.opencode)
+      AGENT_LABEL="opencode"
+      AGENT_DIR_NAME=".opencode"
+      ;;
+    codex|.codex)
+      AGENT_LABEL="codex"
+      AGENT_DIR_NAME=".codex"
+      ;;
+    *)
+      echo "未知 agent: ${agent}（仅支持 claude / opencode / codex）" >&2
+      return 1
+      ;;
+  esac
+}
 
-  echo "请选择当前使用的 agent:"
-  echo "1) claude code (.claude)"
-  echo "2) opencode (.opencode)"
+usage() {
+  cat <<EOF
+用法: $(basename "$0") --agent claude|opencode|codex [--quiet]
+  --agent  必填，指定要初始化的 agent 目录
+  --quiet  仅打印异常信息，适合在 hook/plugin 里调用
 
-  while true; do
-    read -r -p "请输入序号 [1-2]: " choice
-    case "${choice}" in
-      1)
-        AGENT_LABEL="claude code"
-        AGENT_DIR_NAME=".claude"
-        break
+注意：本脚本已交由 .claude/settings.json (SessionStart hook)、
+.opencode/plugins/bootstrap.ts 和 .codex/hooks.json 自动调用，无需手动执行。
+EOF
+}
+
+parse_args() {
+  AGENT_DIR_NAME=""
+  AGENT_LABEL=""
+  QUIET=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent)
+        [[ $# -ge 2 ]] || { echo "--agent 缺少参数" >&2; exit 1; }
+        apply_agent_choice "$2" || exit 1
+        shift 2
         ;;
-      2)
-        AGENT_LABEL="opencode"
-        AGENT_DIR_NAME=".opencode"
-        break
+      --agent=*)
+        apply_agent_choice "${1#--agent=}" || exit 1
+        shift
+        ;;
+      --quiet|-q)
+        QUIET=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
         ;;
       *)
-        echo "无效输入，请输入 1 或 2。"
+        echo "未知参数: $1" >&2
+        usage >&2
+        exit 1
         ;;
     esac
   done
+
+  if [[ -z "${AGENT_DIR_NAME}" ]]; then
+    echo "缺少必填参数 --agent" >&2
+    usage >&2
+    exit 1
+  fi
 }
 
-setup_agent_skills_link() {
-  local agent_dir="${PROJECT_ROOT}/${AGENT_DIR_NAME}"
-  local skills_link="${agent_dir}/skills"
-  local relative_target="../.agents/skills"
+log() {
+  [[ "${QUIET:-0}" -eq 1 ]] || echo "$@"
+}
 
-  mkdir -p "${agent_dir}"
+ensure_symlink() {
+  # 在 link_path 处建立指向 relative_target 的软链接，已存在同目标软链直接放过；
+  # 其它情况（旧软链指错、普通文件、目录）会被备份到 .bak.<时间戳> 后重建。
+  local link_path="$1"
+  local relative_target="$2"
 
-  if [[ -L "${skills_link}" ]]; then
+  if [[ -L "${link_path}" ]]; then
     local current_target
-    current_target="$(readlink "${skills_link}")"
+    current_target="$(readlink "${link_path}")"
     if [[ "${current_target}" == "${relative_target}" ]]; then
-      echo "已存在软链接: ${skills_link} -> ${current_target}"
+      log "已存在软链接: ${link_path} -> ${current_target}"
       return
     fi
   fi
 
-  if [[ -e "${skills_link}" ]]; then
-    local backup_path="${skills_link}.bak.$(date +%Y%m%d%H%M%S)"
-    mv "${skills_link}" "${backup_path}"
-    echo "检测到已有 ${skills_link}，已备份到 ${backup_path}"
+  if [[ -e "${link_path}" || -L "${link_path}" ]]; then
+    local backup_path="${link_path}.bak.$(date +%Y%m%d%H%M%S)"
+    mv "${link_path}" "${backup_path}"
+    log "检测到已有 ${link_path}，已备份到 ${backup_path}"
   fi
 
-  ln -s "${relative_target}" "${skills_link}"
-  echo "已创建软链接: ${skills_link} -> ${relative_target}"
+  ln -s "${relative_target}" "${link_path}"
+  log "已创建软链接: ${link_path} -> ${relative_target}"
 }
 
-setup_claude_files() {
-  # 仅当选择 claude code 时执行：
-  # 将 AGENTS.md 软链接为 .claude/CLAUDE.md，将 rules/ 软链接为 .claude/rules
-  if [[ "${AGENT_DIR_NAME}" != ".claude" ]]; then
-    return
-  fi
-
+setup_agent_links() {
+  # claude code 与 opencode 各自需要的入口名不同：
+  #   - claude code: .claude/CLAUDE.md   <- ../.agents/AGENTS.md
+  #   - opencode  : .opencode/AGENTS.md  <- ../.agents/AGENTS.md
+  #   - codex     : AGENTS.md             <- .agents/AGENTS.md
+  # 其余 skills / rules 命名一致，codex 侧保留 .codex/skills 软链以兼容旧版扫描路径。
   local agent_dir="${PROJECT_ROOT}/${AGENT_DIR_NAME}"
-  local agents_md="${PROJECT_ROOT}/.agents/AGENTS.md"
+  mkdir -p "${agent_dir}"
 
-  # 软链接 AGENTS.md -> .claude/CLAUDE.md
-  local claude_md="${agent_dir}/CLAUDE.md"
-  local relative_md="../.agents/AGENTS.md"
+  local context_filename
+  local context_link_path
+  local context_target
+  case "${AGENT_DIR_NAME}" in
+    .claude)
+      context_filename="CLAUDE.md"
+      context_link_path="${agent_dir}/${context_filename}"
+      context_target="../.agents/AGENTS.md"
+      ;;
+    .opencode)
+      context_filename="AGENTS.md"
+      context_link_path="${agent_dir}/${context_filename}"
+      context_target="../.agents/AGENTS.md"
+      ;;
+    .codex)
+      context_filename="AGENTS.md"
+      context_link_path="${PROJECT_ROOT}/${context_filename}"
+      context_target=".agents/AGENTS.md"
+      ;;
+    *)
+      echo "未知 AGENT_DIR_NAME: ${AGENT_DIR_NAME}" >&2
+      exit 1
+      ;;
+  esac
 
-  if [[ -L "${claude_md}" ]]; then
-    local current_target
-    current_target="$(readlink "${claude_md}")"
-    if [[ "${current_target}" == "${relative_md}" ]]; then
-      echo "已存在软链接: ${claude_md} -> ${current_target}"
-    else
-      ln -sf "${relative_md}" "${claude_md}"
-      echo "已更新软链接: ${claude_md} -> ${relative_md}"
-    fi
-  elif [[ -e "${claude_md}" ]]; then
-    local backup_path="${claude_md}.bak.$(date +%Y%m%d%H%M%S)"
-    mv "${claude_md}" "${backup_path}"
-    echo "检测到已有 ${claude_md}，已备份到 ${backup_path}"
-    ln -s "${relative_md}" "${claude_md}"
-    echo "已创建软链接: ${claude_md} -> ${relative_md}"
-  else
-    ln -s "${relative_md}" "${claude_md}"
-    echo "已创建软链接: ${claude_md} -> ${relative_md}"
-  fi
-
-  # 软链接 .agents/rules -> .claude/rules
-  local rules_link="${agent_dir}/rules"
-  local relative_rules="../.agents/rules"
-
-  if [[ -L "${rules_link}" ]]; then
-    local current_target
-    current_target="$(readlink "${rules_link}")"
-    if [[ "${current_target}" == "${relative_rules}" ]]; then
-      echo "已存在软链接: ${rules_link} -> ${current_target}"
-    else
-      ln -sf "${relative_rules}" "${rules_link}"
-      echo "已更新软链接: ${rules_link} -> ${relative_rules}"
-    fi
-  elif [[ -e "${rules_link}" ]]; then
-    local backup_path="${rules_link}.bak.$(date +%Y%m%d%H%M%S)"
-    mv "${rules_link}" "${backup_path}"
-    echo "检测到已有 ${rules_link}，已备份到 ${backup_path}"
-    ln -s "${relative_rules}" "${rules_link}"
-    echo "已创建软链接: ${rules_link} -> ${relative_rules}"
-  else
-    ln -s "${relative_rules}" "${rules_link}"
-    echo "已创建软链接: ${rules_link} -> ${relative_rules}"
-  fi
+  ensure_symlink "${agent_dir}/skills"             "../.agents/skills"
+  ensure_symlink "${agent_dir}/rules"              "../.agents/rules"
+  ensure_symlink "${context_link_path}"            "${context_target}"
 }
 
 main() {
-  echo "项目根目录: ${PROJECT_ROOT}"
-  echo "skills 目录: ${SKILLS_DIR}"
-  echo
+  parse_args "$@"
 
-  select_agent
-  setup_agent_skills_link
-  setup_claude_files
+  log "项目根目录: ${PROJECT_ROOT}"
+  log "skills 目录: ${SKILLS_DIR}"
+  log ""
+
+  setup_agent_links
   show_available_skills
 
-  echo
-  echo "初始化完成。你现在可以在 ${AGENT_LABEL} 中使用这些 skills。"
+  log ""
+  log "初始化完成。你现在可以在 ${AGENT_LABEL} 中使用这些 skills。"
 }
 
-main "$@"
+_LOG="${PROJECT_ROOT}/.agents/.setup_agent.log"
+if ! _err=$(main "$@" 2>&1); then
+  echo "${_err}" > "${_LOG}"
+  echo "[setup_agent] 初始化失败，详见 ${_LOG}" >&2
+  exit 1
+fi
+if [[ -n "${_err}" ]]; then
+  printf '%s\n' "${_err}"
+fi

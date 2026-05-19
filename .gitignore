@@ -40,3 +40,20 @@ Sessionx.vim
 
 # macOS dir files
 .DS_Store
+
+# agent
+.claude/skills
+.claude/CLAUDE.md
+.claude/rules
+.claude/settings.local.json
+.claude/*.bak.*
+.opencode/skills
+.opencode/rules
+.opencode/AGENTS.md
+.opencode/node_modules
+.opencode/bootstrap.log
+.opencode/*.bak.*
+.codex/skills
+.codex/rules
+.codex/*.bak.*
+AGENTS.md
