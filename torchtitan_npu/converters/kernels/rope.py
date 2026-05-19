@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
-#
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -208,13 +208,21 @@ class NpuRoPEConverter(ModelCustomConverter):
                 f"with {impl.__name__}"
             )
 
-        # from X import Y creates a local binding that setattr won't update
+        # from X import Y creates a local binding that setattr won't update;
+        # replace_functions walks sys.modules to patch those local bindings.
+        # The rope functions are imported by attention.py (and re-exported by
+        # common/__init__.py), so we must search torchtitan.models.common in
+        # addition to the model's own package.
         count = replace_functions(func_name, impl, model=model)
         upstream_pkg = model.__class__.__module__.replace(
             "torchtitan_npu", "torchtitan"
         )
         if upstream_pkg != model.__class__.__module__:
             count += replace_functions(func_name, impl, package=upstream_pkg)
+
+        common_pkg = "torchtitan.models.common"
+        if not upstream_pkg.startswith(common_pkg):
+            count += replace_functions(func_name, impl, package=common_pkg)
 
         if count == 0 and mod is None:
             logger.warning(

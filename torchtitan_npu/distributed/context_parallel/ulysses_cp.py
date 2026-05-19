@@ -7,7 +7,8 @@ import functools
 
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torchtitan.models.attention import ScaledDotProductAttentionWrapper
+
+from torchtitan.models.common.attention import ScaledDotProductAttention
 
 
 class AllToAll(torch.autograd.Function):
@@ -77,19 +78,23 @@ def all_to_all(input_tensor, mesh, scatter_dim, gather_dim):
 
 def patch_ulysses_for_context_parallel(*, cp_mesh: DeviceMesh) -> None:
     """
-    Patch ScaledDotProductAttentionWrapper.forward to a Ulysses CP-aware implementation.
+    Patch ScaledDotProductAttention.forward to a Ulysses CP-aware implementation.
 
     Called from apply_cp_to_attention_module when attention_type == "ulysses".
     Replaces the class-level forward so every instance automatically performs
     AllToAll before and after the SDPA kernel.
 
-    Input layout:  [B, n_heads,      seq // CP, head_dim]
-    After A2A:     [B, n_heads // CP, seq,       head_dim]
-    After SDPA:    [B, n_heads // CP, seq,       v_head_dim]
-    After A2A:     [B, n_heads,       seq // CP, v_head_dim]
+    New ScaledDotProductAttention.forward receives Q/K/V in [B, S, H, D] (BSND)
+    layout and internally transposes to [B, H, S, D] (BNSD) before calling SDPA.
+    We insert AllToAll after the internal transpose so that:
+      - Before A2A:  [B, n_heads,      seq // CP, head_dim]  (BNSD)
+      - After A2A:   [B, n_heads // CP, seq,       head_dim]  (BNSD)
+      - After SDPA:  [B, n_heads // CP, seq,       head_dim]  (BNSD)
+      - After A2A:   [B, n_heads,       seq // CP, head_dim]  (BNSD)
+    Then the original transpose back to BSND continues as normal.
     """
-    ScaledDotProductAttentionWrapper.cp_mesh = cp_mesh
-    orig_forward = ScaledDotProductAttentionWrapper.forward
+    ScaledDotProductAttention.cp_mesh = cp_mesh
+    orig_forward = ScaledDotProductAttention.forward
 
     @functools.wraps(orig_forward)
     def patched_forward(
@@ -99,13 +104,31 @@ def patch_ulysses_for_context_parallel(*, cp_mesh: DeviceMesh) -> None:
         v: torch.Tensor,
         *,
         scale: float | None = None,
+        enable_gqa: bool = False,
+        is_causal: bool = True,
+        **kwargs,
     ):
+        # Transpose to (bs, heads, seq, dim) for SDPA — same as original
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        # Ulysses AllToAll: swap heads dim (1) and seq dim (2)
         q = all_to_all(q, self.cp_mesh, scatter_dim=1, gather_dim=2)
         k = all_to_all(k, self.cp_mesh, scatter_dim=1, gather_dim=2)
         v = all_to_all(v, self.cp_mesh, scatter_dim=1, gather_dim=2)
-        output = orig_forward(self, q, k, v, scale=scale)
-        return all_to_all(output, self.cp_mesh, scatter_dim=2, gather_dim=1)
 
-    ScaledDotProductAttentionWrapper.forward = (
+        from torch.nn.attention import sdpa_kernel
+
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa
+            )
+
+        # Reverse AllToAll: swap seq dim (2) and heads dim (1)
+        out = all_to_all(out, self.cp_mesh, scatter_dim=2, gather_dim=1)
+
+        # Transpose back to (bs, seq, heads, dim) — same as original
+        return out.transpose(1, 2)
+
+    ScaledDotProductAttention.forward = (
         patched_forward  # pyrefly: ignore [bad-assignment]
     )

@@ -17,11 +17,15 @@ def _is_custom_cp_target(trainer) -> bool:
     if not getattr(trainer.parallel_dims, "cp_enabled", False):
         return False
 
-    model_name = getattr(getattr(trainer, "job_config", None), "model", None)
-    model_name = str(getattr(model_name, "name", ""))
+    model_name = str(getattr(getattr(trainer.config, "model_spec", None), "name", ""))
 
     # DeepSeek-V4 always requires sequential sharding (window attention + compressor)
     if "deepseek_v4" in model_name:
+        return True
+
+    # Qwen3 only supports Ulysses CP (not upstream HeadTail ring attention),
+    # so cp_enabled=True always means Ulysses CP → sequential sharding required
+    if "qwen3" in model_name:
         return True
 
     # DeepSeek-V32 with DSA requires sequential sharding (AllGather causal slice)
@@ -43,7 +47,7 @@ def _patch_post_dataloading_process_for_dsa_cp() -> None:
         if not _is_custom_cp_target(self):
             return original(self, input_dict, labels)
 
-        parallelism_cfg = self.job_config.parallelism
+        parallelism_cfg = self.config.parallelism
         old_lb = parallelism_cfg.context_parallel_load_balancer
 
         # Force sequential sharding: HeadTail is for ring-attention only.
@@ -56,7 +60,7 @@ def _patch_post_dataloading_process_for_dsa_cp() -> None:
     titan_train.Trainer.post_dataloading_process = wrapper
     logger.info(
         "[Patch] Registered post_dataloading hook for CP sequential sharding "
-        "(forces context_parallel_load_balancer=None for deepseek_v4 and deepseek_v32+DSA)."
+        "(forces context_parallel_load_balancer=None for deepseek_v4, qwen3, and deepseek_v32+DSA)."
     )
 
 
