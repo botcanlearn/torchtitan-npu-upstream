@@ -57,7 +57,7 @@ state['exp_avg_sq'] = torch_npu.empty_with_swapped_memory(
 
 
 ### 配置示例
-首先在配置文件中使能本代码仓的自定义配置，随后在 `[optimizer]` 节中添加以下配置，为AdamW优化器开启SwapOptimizer特性并设置流水线切片参数：
+首先在配置文件中使能本代码仓的自定义配置，随后在 `[optimizer]` 节中添加以下配置，为AdamW优化器开启Virtual Optimizer特性并设置流水线切片参数：
 
 ```toml
 [job]
