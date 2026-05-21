@@ -10,15 +10,17 @@ RUN mkdir /root/.pip \
 
 RUN pip3 install esdk-obs-python --trusted-host mirrors.huaweicloud.com -i https://mirrors.huaweicloud.com/repository/pypi/simple
 
-RUN pip3 install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
+RUN pip3 install --no-cache-dir \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple \
     torchtitan==0.2.2 \
     torch==2.10.0+cpu \
-    torch_npu==2.10.0rc2 \
+    torch_npu==2.10.0 \
     pybind11 \
-    triton-ascend==3.2.0 \
+    triton-ascend==3.2.1 \
     scipy \
     safetensors==0.7.0 \
-    pytest==7.3.2 \
+    pytest==8.3.2 \
     pytest-cov \
     pre-commit \
     pyrefly==0.45.1 \
