@@ -195,3 +195,14 @@ torchtitan‑npu 功能依赖的 PyTorch 等第三方开源软件，均由第三
 
 - torchtitan‑npu 产品的使用许可证，具体请参见 [LICENSE](https://gitcode.com/cann/torchtitan-npu/blob/master/LICENSE)。
 - torchtitan‑npu 工具 docs 目录下的文档适用相应许可证，具体请根目录下的 LICENSE 文件。
+
+## 🤝联系我们
+
+本项目功能和文档正在持续更新和完善中，欢迎您关注最新版本。
+
+- **问题反馈**：通过GitCode[【Issues】](https://gitcode.com/cann/torchtitan-npu/issues)提交问题。
+- **社区互动**：通过GitCode[【讨论】](https://gitcode.com/cann/torchtitan-npu/discussions)参与交流。
+- **经验分享**：通过GitCode[【Wiki】](https://gitcode.com/cann/torchtitan-npu/wiki)分享经验总结。
+- **加入交流群**：通过扫描下方微信二维码添加torchtitan‑npu小助手微信，加入微信群与我们进一步交流。
+
+<img src="docs/assets/torchtitan_npu_contact.png" alt="contact us" width="50%">
