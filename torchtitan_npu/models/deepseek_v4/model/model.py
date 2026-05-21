@@ -334,8 +334,14 @@ class LiLoss(torch.nn.Module):
             self.n_heads,
             self.softmax_scale,
         )
+        # torch.gather rejects the -1 marking masked slots; clamp to 0 to make it
+        # legal, then zero those slots since index 0 is a real, attended position.
+        sentinel_idx = compress_topk_idxs.clamp(min=0)
         selected_main_attn_dist = torch.gather(
-            main_attn_dist, dim=-1, index=compress_topk_idxs
+            main_attn_dist, dim=-1, index=sentinel_idx
+        )
+        selected_main_attn_dist = selected_main_attn_dist.masked_fill(
+            compress_topk_idxs < 0, 0.0
         )
         loss = self.compute_dsa_indexer_loss(
             selected_main_attn_dist,
@@ -477,6 +483,9 @@ class SparseAttention(torch.nn.Module):
             torch.matmul(query_states, kv_states.transpose(2, 3)) * self.softmax_scale
         )
         topk_idxs = topk_idxs.to(query_states.device)
+        # scatter_ rejects -1; send masked slots to the padding lane at index
+        # kv_states.shape[2] (the +1 column), which index_mask[..., :-1] drops.
+        topk_idxs.masked_fill_(topk_idxs < 0, kv_states.shape[2])
         index_mask = torch.full(
             (query_states.shape[0], 1, query_states.shape[2], kv_states.shape[2] + 1),
             fill_value=torch.finfo(torch.bfloat16).min,

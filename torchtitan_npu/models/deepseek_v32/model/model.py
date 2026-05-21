@@ -294,8 +294,10 @@ class DSV32_SDPA(torch.nn.Module):  # noqa: N801
             torch.arange(seqlen, device=topk_indices.device).unsqueeze(0).unsqueeze(-1)
         )
         valid_positions = topk_indices <= query_positions
+        # scatter_/gather reject -1; invalid slots use seqlen-1, a causal-masked
+        # future token, so the scattered 0 is absorbed (gather path zeros them below).
         topk_indices = torch.where(
-            valid_positions, topk_indices, torch.full_like(topk_indices, -1)
+            valid_positions, topk_indices, torch.full_like(topk_indices, seqlen - 1)
         )
         index_mask = torch.full(
             (bsz, seqlen, seqlen), float("-inf"), device=q.device
@@ -317,6 +319,11 @@ class DSV32_SDPA(torch.nn.Module):  # noqa: N801
         main_attn_dist = get_attn_scores(q_det, k_det, attention_masks, scale)
         selected_main_attn_dist = torch.gather(
             main_attn_dist, dim=-1, index=topk_indices
+        )
+        # Zero out sentinel-slot reads so the indexer KL loss does not depend on the
+        # implicit softmax(-inf)=0 invariant of main_attn_dist[..., seqlen-1].
+        selected_main_attn_dist = selected_main_attn_dist.masked_fill(
+            ~valid_positions, 0.0
         )
         loss = self.compute_dsa_indexer_loss(
             selected_main_attn_dist,
