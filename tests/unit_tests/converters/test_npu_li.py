@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import torch
 
-from torchtitan_npu.converters.kernels.deepseek_v4_sfa import sdpa_to_li_adapter
+from torchtitan_npu.converters.kernels.deepseek_v4_sfa import NpuLiCompute
 
 _mock_fused_fn = MagicMock()
 
@@ -40,11 +40,12 @@ class TestLIKernel(unittest.TestCase):
             self.batch_size, self.seq_len_q, self.dim, dtype=torch.float32
         )
 
-        self.mock_self = MagicMock()
-        self.mock_self.index_topk = self.topk
-        self.mock_self.ratio = self.ratio
+        self.mock_parent = MagicMock()
+        self.mock_parent.index_topk = self.topk
+        self.mock_parent.ratio = self.ratio
 
-    def test_sdpa_to_li_adapter_logic(self):
+    def test_npu_li_compute_forward_logic(self):
+        """Test NpuLiCompute.forward calls mindspeed lightning indexer correctly."""
         mock_li_op = _mock_fused_fn
         mock_li_op.reset_mock()
 
@@ -60,8 +61,9 @@ class TestLIKernel(unittest.TestCase):
 
         offset_val = 100
 
-        res_indices, res_scores = sdpa_to_li_adapter(
-            self.mock_self,
+        wrapper = NpuLiCompute(self.mock_parent)
+
+        res_indices, res_scores = wrapper.forward(
             self.q_indexer,
             self.k_indexer,
             self.weights,

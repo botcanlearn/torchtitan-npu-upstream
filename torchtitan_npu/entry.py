@@ -55,10 +55,7 @@ def main() -> None:
     if config.compile.enable:
         converter_names = []
         if config.model_converters and hasattr(config.model_converters, "converters"):
-            converter_names = [
-                c if isinstance(c, str) else type(c).__name__
-                for c in config.model_converters.converters
-            ]
+            converter_names = [c.name for c in config.model_converters.converters]
 
         if model_name in ("deepseek_v3", "deepseek_v4"):
             if model_name == "deepseek_v3":

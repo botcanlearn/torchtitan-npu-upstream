@@ -61,7 +61,10 @@ class _ConverterRegistry:
         config_cls = type(
             f"{converter_cls.__name__}Config",
             (Configurable.Config,),
-            {"__annotations__": {}},
+            {
+                "name": name,
+                "__annotations__": {},
+            },
         )
         owner_attr = "_owner"
         setattr(config_cls, owner_attr, converter_cls)

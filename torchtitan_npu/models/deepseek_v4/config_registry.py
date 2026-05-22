@@ -23,7 +23,6 @@ from torchtitan_npu.config.configs import (
     TrainingConfig,
 )
 from torchtitan_npu.converters.npu_registry import get_model_converter_config
-from torchtitan_npu.converters.registry import get_npu_converter_config
 
 from . import model_registry
 
@@ -35,9 +34,8 @@ def _default_converters() -> list:
         get_model_converter_config("npu_permute"),
         get_model_converter_config("npu_gmm"),
         get_model_converter_config("npu_rope"),
-        # [TODO] Still on the legacy BaseConverter registry.
-        get_npu_converter_config("deepseek_v4_sfa"),
-        get_npu_converter_config("npu_mhc_pre"),
+        get_model_converter_config("deepseek_v4_sfa"),
+        get_model_converter_config("npu_mhc_pre"),
     ]
 
 

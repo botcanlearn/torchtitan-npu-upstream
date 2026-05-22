@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import torch
 
-from torchtitan_npu.converters.kernels.deepseek_v4_sfa import sdpa_to_sfa_adapter
+from torchtitan_npu.converters.kernels.deepseek_v4_sfa import NpuSparseAttention
 
 _mock_fused_fn = MagicMock()
 
@@ -52,7 +52,8 @@ class TestSFANPUKernel(unittest.TestCase):
         ).to(torch.int64)
         self.sinks = torch.randn(1, 128)
 
-    def test_sdpa_to_sfa_adapter_flow(self):
+    def test_npu_sparse_attention_forward_flow(self):
+        """Test NpuSparseAttention.forward calls npu_sparse_attn_shared_kv correctly."""
         mock_fused_op = _mock_fused_fn
         mock_fused_op.reset_mock()
 
@@ -60,13 +61,16 @@ class TestSFANPUKernel(unittest.TestCase):
             self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim
         )
 
-        mock_self = MagicMock()
-        mock_self.softmax_scale = self.softmax_scale
-        mock_self.compress_ratio = self.compress_ratio
-        mock_self.cp_rank = 0
+        # Create mock parent module
+        mock_parent = MagicMock()
+        mock_parent.softmax_scale = self.softmax_scale
+        mock_parent.compress_ratio = self.compress_ratio
+        mock_parent.window_size = 128
+        mock_parent.cp_rank = 0
 
-        output = sdpa_to_sfa_adapter(
-            mock_self,
+        wrapper = NpuSparseAttention(mock_parent)
+
+        output = wrapper.forward(
             self.query,
             self.kv_states,
             self.sinks,
@@ -80,12 +84,14 @@ class TestSFANPUKernel(unittest.TestCase):
         self.assertEqual(cmp_sparse_indices.dtype, torch.int32)
         ori_kv_processed = args[1]
         self.assertEqual(
-            ori_kv_processed.shape, (self.seq_len_kv, self.batch_size, 1, self.head_dim)
+            ori_kv_processed.shape,
+            (self.seq_len_kv, self.batch_size, 1, self.head_dim),
         )
 
         self.assertTrue(output.is_contiguous())
 
     def test_cp_rank_gt_zero_c128a_pads_only_kv_to_global_positions(self):
+        """Test C128A CP rank>0 pads KV to global positions."""
         mock_fused_op = _mock_fused_fn
         mock_fused_op.reset_mock()
 
@@ -105,12 +111,12 @@ class TestSFANPUKernel(unittest.TestCase):
         )
         mock_fused_op.return_value = fused_output
 
-        mock_self = self._make_sparse_attention(
+        mock_parent = self._make_sparse_attention_parent(
             compress_ratio=128, cp_rank=cp_rank, window_size=window_size
         )
-        output = sdpa_to_sfa_adapter(
-            mock_self, query, kv_states, attn_sink, kv_compress
-        )
+        wrapper = NpuSparseAttention(mock_parent)
+
+        output = wrapper.forward(query, kv_states, attn_sink, kv_compress)
 
         args, _ = mock_fused_op.call_args
         query_arg = args[0]
@@ -139,19 +145,21 @@ class TestSFANPUKernel(unittest.TestCase):
         self.assertTrue(output.is_contiguous())
 
     def test_rank_zero_c128a_ignores_explicit_sparse_indices(self):
+        """Test C128A rank=0 ignores explicit sparse indices."""
         mock_fused_op = _mock_fused_fn
         mock_fused_op.reset_mock()
         mock_fused_op.return_value = torch.randn(
             self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim
         )
 
-        mock_self = self._make_sparse_attention(compress_ratio=128, cp_rank=0)
+        mock_parent = self._make_sparse_attention_parent(compress_ratio=128, cp_rank=0)
+        wrapper = NpuSparseAttention(mock_parent)
+
         compress_topk_idxs = torch.randint(
             0, 16, (self.batch_size, self.seq_len_q, 8), dtype=torch.int64
         )
 
-        sdpa_to_sfa_adapter(
-            mock_self,
+        wrapper.forward(
             self.query,
             torch.randn(self.batch_size, self.seq_len_kv, self.head_dim),
             self.sinks,
@@ -163,6 +171,7 @@ class TestSFANPUKernel(unittest.TestCase):
         self.assertIsNone(args[7])
 
     def test_cp_rank_gt_zero_c1a_uses_sfa_with_boundary_window(self):
+        """Test C1A CP rank>0 uses SFA with boundary window."""
         mock_fused_op = _mock_fused_fn
         mock_fused_op.reset_mock()
 
@@ -176,11 +185,13 @@ class TestSFANPUKernel(unittest.TestCase):
         attn_sink = torch.randn(num_heads)
         fused_output = torch.randn(batch_size, chunk, num_heads, head_dim)
         mock_fused_op.return_value = fused_output
-        mock_self = self._make_sparse_attention(
+
+        mock_parent = self._make_sparse_attention_parent(
             compress_ratio=1, cp_rank=3, window_size=window_size
         )
+        wrapper = NpuSparseAttention(mock_parent)
 
-        output = sdpa_to_sfa_adapter(mock_self, query, kv_states, attn_sink)
+        output = wrapper.forward(query, kv_states, attn_sink)
 
         args, _ = mock_fused_op.call_args
         torch.testing.assert_close(args[0], query)
@@ -193,13 +204,13 @@ class TestSFANPUKernel(unittest.TestCase):
         self.assertEqual(args[8].dtype, torch.float32)
         torch.testing.assert_close(output, fused_output.contiguous())
 
-    def _make_sparse_attention(self, compress_ratio, cp_rank=0, window_size=128):
-        mock_self = MagicMock()
-        mock_self.softmax_scale = self.softmax_scale
-        mock_self.compress_ratio = compress_ratio
-        mock_self.cp_rank = cp_rank
-        mock_self.window_size = window_size
-        return mock_self
+    def _make_sparse_attention_parent(self, compress_ratio, cp_rank=0, window_size=128):
+        mock_parent = MagicMock()
+        mock_parent.softmax_scale = self.softmax_scale
+        mock_parent.compress_ratio = compress_ratio
+        mock_parent.cp_rank = cp_rank
+        mock_parent.window_size = window_size
+        return mock_parent
 
 
 if __name__ == "__main__":

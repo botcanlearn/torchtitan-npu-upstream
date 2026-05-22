@@ -3,17 +3,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+
 import logging
 
 import torch
 import torch.nn as nn
 
-from ..base_converter import BaseConverter
-from ..convert_utils import replace_methods
-from ..registry import register_npu_converter
+from torchtitan_npu.converters.convert_utils import replace_module_with_name
+from torchtitan_npu.converters.model_custom_interface import (
+    ModelCustomConfig,
+    ModelCustomConverter,
+)
+from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.models.deepseek_v4.model import LiCompute, LiLoss, SparseAttention
+
 
 logger = logging.getLogger(__name__)
-
 
 # ---- SFA (SparseAttention) ----
 
@@ -88,6 +93,7 @@ def _c128a_cp_sfa_with_global_positions(
 ):
     """Run C128A CP rank1 through SFA by restoring global token positions.
 
+
     The SFA kernel computes each query's effective position as (S2 - S1) + local_i,
     so padding only kv to length global_start * cp is sufficient: with S1=chunk_size
     and S2=global_seq_len, S2-S1=global_start shifts the window automatically.
@@ -119,94 +125,115 @@ def _c128a_cp_sfa_with_global_positions(
     )
 
 
-def sdpa_to_sfa_adapter(
-    self,
-    query_states,
-    kv_states,
-    attn_sink,
-    kv_compress=None,
-    compress_topk_idxs=None,
-):
-    if compress_topk_idxs is not None:
-        if compress_topk_idxs.dtype != torch.int32:
-            compress_topk_idxs = compress_topk_idxs.to(torch.int32)
+class NpuSparseAttention(SparseAttention):
+    def __init__(self, parent: SparseAttention) -> None:
+        # Shallow copy of parent's __dict__ is intentional here:
+        # - SparseAttention attributes are primarily PyTorch modules and buffers (weights should be shared)
+        # - Avoids complex dependency on SparseAttention.__init__ parameters (layer_id, window_size, etc.)
+        # - Parent instance already has all attributes properly initialized
+        # Note: If SparseAttention had mutable non-module attributes requiring independent state,
+        # we would need explicit attribute copying instead
+        self.__dict__.update(parent.__dict__)
 
-    cp_rank = getattr(self, "cp_rank", 0)
-    if cp_rank > 0:
-        n_boundary = self.window_size - 1  # 127
+    def forward(
+        self,
+        query_states: torch.Tensor,
+        kv_states: torch.Tensor,
+        attn_sink: torch.Tensor,
+        kv_compress: torch.Tensor | None = None,
+        compress_topk_idxs: torch.Tensor | None = None,
+    ):
+        if compress_topk_idxs is not None:
+            if compress_topk_idxs.dtype != torch.int32:
+                compress_topk_idxs = compress_topk_idxs.to(torch.int32)
 
-        if self.compress_ratio == 128:
-            # Restore C128A tensor positions to global token coordinates.
-            return _c128a_cp_sfa_with_global_positions(
-                self, query_states, kv_states, attn_sink, kv_compress
-            )
+        cp_rank = getattr(self, "cp_rank", 0)
+        if cp_rank > 0:
+            n_boundary = self.window_size - 1  # 127
+            if self.compress_ratio == 128:
+                # Restore C128A tensor positions to global token coordinates.
+                return _c128a_cp_sfa_with_global_positions(
+                    self, query_states, kv_states, attn_sink, kv_compress
+                )
 
-        if self.compress_ratio == 1:
-            # kv_states layout for rank>0: [boundary_w-1 || local_chunk], so
-            # SFA band mode naturally maps query i to kv_states[i:i + window_size].
-            return npu_sparse_attn_shared_kv(
-                query=query_states,
-                ori_kv=kv_states,
-                cmp_kv=None,
-                cmp_sparse_indices=None,
-                sinks=attn_sink.float(),
-                softmax_scale=self.softmax_scale,
-                cmp_ratio=self.compress_ratio,
-                ori_win_left=n_boundary,
-            )
+            if self.compress_ratio == 1:
+                # kv_states layout for rank>0: [boundary_w-1 || local_chunk], so
+                # SFA band mode naturally maps query i to kv_states[i:i + window_size].
+                return npu_sparse_attn_shared_kv(
+                    query=query_states,
+                    ori_kv=kv_states,
+                    cmp_kv=None,
+                    cmp_sparse_indices=None,
+                    sinks=attn_sink.float(),
+                    softmax_scale=self.softmax_scale,
+                    cmp_ratio=self.compress_ratio,
+                    ori_win_left=n_boundary,
+                )
 
-    # Rank0/non-CP uses the kernel's native causal positions.
-    output = npu_sparse_attn_shared_kv(
-        query=query_states,
-        ori_kv=kv_states,
-        cmp_kv=kv_compress,
-        cmp_sparse_indices=compress_topk_idxs if self.compress_ratio == 4 else None,
-        sinks=attn_sink.float(),
-        softmax_scale=self.softmax_scale,
-        cmp_ratio=self.compress_ratio,
-    )
-    return output
+        # Rank0/non-CP uses the kernel's native causal positions.
+        output = npu_sparse_attn_shared_kv(
+            query=query_states,
+            ori_kv=kv_states,
+            cmp_kv=kv_compress,
+            cmp_sparse_indices=compress_topk_idxs if self.compress_ratio == 4 else None,
+            sinks=attn_sink.float(),
+            softmax_scale=self.softmax_scale,
+            cmp_ratio=self.compress_ratio,
+        )
+        return output
 
 
 # ---- LI (LiCompute) ----
 
 
-def sdpa_to_li_adapter(
-    self,
-    q_indexer: torch.Tensor,
-    k_indexer: torch.Tensor,
-    weights: torch.Tensor,
-    seqlen: int,
-    offset: int,
-):
+class NpuLiCompute(LiCompute):
+    def __init__(self, parent: LiCompute) -> None:
+        # Shallow copy of parent's __dict__ is intentional here:
+        # - LiCompute attributes are primarily PyTorch modules and buffers (weights should be shared)
+        # - Avoids complex dependency on LiCompute.__init__ parameters (ratio, index_topk)
+        # - Parent instance already has all attributes properly initialized
+        # Note: If LiCompute had mutable non-module attributes requiring independent state,
+        # we would need explicit attribute copying instead
+        self.__dict__.update(parent.__dict__)
 
-    q_indexer = q_indexer.to(torch.bfloat16)
-    k_indexer = k_indexer.to(torch.bfloat16).unsqueeze(2)
-    weights = weights.to(torch.bfloat16)
-    # pyrefly: ignore [missing-import]
-    import mindspeed.ops.npu_lightning_indexer as mindspeed_li
+    def forward(
+        self,
+        q_indexer: torch.Tensor,
+        k_indexer: torch.Tensor,
+        weights: torch.Tensor,
+        seqlen: int,
+        offset: int,
+    ):
+        q_indexer = q_indexer.to(torch.bfloat16)
+        k_indexer = k_indexer.to(torch.bfloat16).unsqueeze(2)
+        weights = weights.to(torch.bfloat16)
+        # pyrefly: ignore [missing-import]
+        import mindspeed.ops.npu_lightning_indexer as mindspeed_li
 
-    compress_topk_idxs, index_score = mindspeed_li.npu_lightning_indexer(
-        q_indexer,
-        k_indexer,
-        weights,
-        sparse_count=self.index_topk,
-        sparse_mode=3,
-        cmp_ratio=self.ratio,
-    )
-
-    compress_topk_idxs = compress_topk_idxs.squeeze(2)
-    index_score = index_score.squeeze(2)
-    if offset != 0:
-        # pyrefly: ignore [no-matching-overload]
-        compress_topk_idxs = torch.where(
-            compress_topk_idxs == -1, compress_topk_idxs, compress_topk_idxs + offset
+        compress_topk_idxs, index_score = mindspeed_li.npu_lightning_indexer(
+            q_indexer,
+            k_indexer,
+            weights,
+            sparse_count=self.index_topk,
+            sparse_mode=3,
+            cmp_ratio=self.ratio,
         )
 
-    return compress_topk_idxs, index_score
+        compress_topk_idxs = compress_topk_idxs.squeeze(2)
+        index_score = index_score.squeeze(2)
+        if offset != 0:
+            # pyrefly: ignore [no-matching-overload]
+            compress_topk_idxs = torch.where(
+                compress_topk_idxs == -1,
+                compress_topk_idxs,
+                compress_topk_idxs + offset,
+            )
+
+        return compress_topk_idxs, index_score
 
 
 # ---- LI Loss (LiLoss) ----
+
 
 ms_npu_sparse_lightning_indexer_grad_kl_loss = None
 
@@ -350,62 +377,63 @@ def npu_sparse_lightning_indexer_grad_kl_loss(
     )
 
 
-def li_loss_adapter(
-    self,
-    query,
-    key,
-    query_index,
-    key_index,
-    weights,
-    sparse_indices,
-    indexer_score,
-    attention_masks,
-    offset,
-):
-    if sparse_indices.dtype != torch.int32:
-        sparse_indices = sparse_indices.to(torch.int32)
+class NpuLiLoss(LiLoss):
+    def __init__(self, parent: LiLoss):
+        # Shallow copy of parent's __dict__ is intentional here:
+        # - LiLoss attributes are primarily PyTorch modules and buffers (weights should be shared)
+        # - Avoids complex dependency on LiLoss.__init__ parameters (n_heads, softmax_scale, etc.)
+        # - Parent instance already has all attributes properly initialized
+        # Note: If LiLoss had mutable non-module attributes requiring independent state,
+        # we would need explicit attribute copying instead
+        self.__dict__.update(parent.__dict__)
 
-    return npu_sparse_lightning_indexer_grad_kl_loss(
-        query,
-        key.unsqueeze(2),
-        query_index,
-        key_index.unsqueeze(2),
+    # pyrefly: ignore [bad-param-name-override]
+    def forward(
+        self,
+        q,
+        k,
+        q_indexer,
+        k_indexer,
         weights,
-        sparse_indices.unsqueeze(2),
-        loss_tracker=self.save_loss,
-        scale_value=self.softmax_scale,
-        cmp_ratio=self.compress_ratio,
-    )
+        sparse_indices,
+        indexer_score,
+        attention_masks,
+        offset,
+    ):
+        if sparse_indices.dtype != torch.int32:
+            sparse_indices = sparse_indices.to(torch.int32)
 
-
-# ---- Combined Converter ----
-
-
-@register_npu_converter("deepseek_v4_sfa")
-class DeepSeekV4SFAKernel(BaseConverter):
-
-    MODEL_PACKAGE = "torchtitan_npu.models.deepseek_v4"
-    SUPPORTED_MODELS = {"deepseek_v4"}
-
-    @classmethod
-    # pyrefly: ignore [bad-override]
-    def apply(cls, model: nn.Module, model_name: str, **kwargs) -> nn.Module:
-        pkg = cls.MODEL_PACKAGE
-        total = 0
-
-        count = replace_methods(
-            "SparseAttention", "forward", sdpa_to_sfa_adapter, package=pkg
+        return npu_sparse_lightning_indexer_grad_kl_loss(
+            q,
+            k.unsqueeze(2),
+            q_indexer,
+            k_indexer.unsqueeze(2),
+            weights,
+            sparse_indices.unsqueeze(2),
+            loss_tracker=self.save_loss,
+            scale_value=self.softmax_scale,
+            cmp_ratio=self.compress_ratio,
         )
-        logger.info(f"  [SparseAttention forward] Applied {count} replacement(s)")
-        total += count
 
-        count = replace_methods("LiCompute", "forward", sdpa_to_li_adapter, package=pkg)
-        logger.info(f"  [LiCompute forward] Applied {count} replacement(s)")
-        total += count
 
-        count = replace_methods("LiLoss", "forward", li_loss_adapter, package=pkg)
-        logger.info(f"  [LiLoss forward] Applied {count} replacement(s)")
-        total += count
+class DeepSeekV4SFAConverter(ModelCustomConverter):
+    def convert(self, model: nn.Module):
+        for name, module in model.named_modules():
+            if isinstance(module, SparseAttention):
+                replace_module_with_name(model, name, NpuSparseAttention(module))
+                logger.info(
+                    "[DeepSeekV4SFAConverter] [SparseAttention forward] Applied."
+                )
 
-        # pyrefly: ignore [bad-return]
-        return total
+            if isinstance(module, LiCompute):
+                replace_module_with_name(model, name, NpuLiCompute(module))
+                logger.info("[DeepSeekV4SFAConverter] [LiCompute forward] Applied.")
+
+            if isinstance(module, LiLoss):
+                replace_module_with_name(model, name, NpuLiLoss(module))
+                logger.info("[DeepSeekV4SFAConverter] [LiLoss forward] Applied.")
+
+
+@register_model_converter("deepseek_v4_sfa")
+class DeepSeekV4SFAModelConfig(ModelCustomConfig):
+    model_converter = DeepSeekV4SFAConverter

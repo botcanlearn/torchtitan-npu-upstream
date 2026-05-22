@@ -31,7 +31,7 @@ class ModelCustomConfig:
 # ──────────────────────────────────────────────────
 # torchtitan_npu/converters/kernels/gmm.py
 
-from torchtitan.models.moe.moe import GroupedExperts
+from torchtitan.models.common.moe import GroupedExperts
 
 class NpuGroupedExperts(GroupedExperts):
     """替换原版 GroupedExperts，将 w1+w3 合并为 w13 以适配 NPU grouped_matmul 算子"""
@@ -40,15 +40,20 @@ class NpuGroupedExperts(GroupedExperts):
         self,
         parent: GroupedExperts,
     ):
-        dim = parent.w2.shape[1]
-        hidden_dim = parent.w2.shape[2]
-        super().__init__(dim, hidden_dim, parent.num_experts, True)
+        # Shallow copy of parent's __dict__ is intentional here:
+        # - GroupedExperts attributes are primarily PyTorch modules and buffers (weights should be shared)
+        # - Avoids complex dependency on GroupedExperts.__init__ parameters (dim, hidden_dim, num_experts)
+        # - Parent instance already has all attributes properly initialized
+        # Note: If GroupedExperts had mutable non-module attributes requiring independent state,
+        # we would need explicit attribute copying instead
+        self.__dict__.update(parent.__dict__)
+        self.use_grouped_mm = True
         if self.w1 is not None and self.w3 is not None:
             # pyrefly: ignore [no-matching-overload]
             w13_data = torch.empty(
-                parent.num_experts,
-                hidden_dim * 2,
-                dim,
+                self.num_experts,
+                self.w2.shape[2] * 2,
+                self.w2.shape[1],
                 dtype=self.w1.dtype,
                 device=self.w1.device,
             )
@@ -79,7 +84,7 @@ class NpuGroupedExperts(GroupedExperts):
 
 # 定义执行替换的Converter
 from torchtitan_npu.converters.convert_utils import replace_module_with_name
-from torchtitan_npu.converters.model_custom_converter import ModelCustomConverter
+from torchtitan_npu.converters.model_custom_interface import ModelCustomConverter
 
 class NpuGroupedExpertConverter(ModelCustomConverter):
     def convert(self, model: nn.Module):
@@ -90,9 +95,10 @@ class NpuGroupedExpertConverter(ModelCustomConverter):
 ```
 
 **要点：**
-- 应当构造数据域与**原始实例**相同的实例并按需扩展其他数据成员变量，用于替换原实例
-- 覆写定制化的业务逻辑的方法，比如`forward`、`init_weights` 等
-- 构造一个继承自ModelCustomConverter的自定义Converter，用于执行替换实例的动作
+- 使用 `self.__dict__.update(parent.__dict__)` 浅拷贝父实例的所有属性，避免复杂的 `__init__` 参数依赖
+- 这种方式适用于父类属性主要是 PyTorch 模块和缓冲区（权重应共享），且父实例已正确初始化
+- 覆写定制化的业务逻辑的方法，比如 `forward`、`init_weights` 等
+- 构造一个继承自 ModelCustomConverter 的自定义 Converter，用于执行替换实例的动作
 
 #### 2.2.2 第二步：定义 ParallelizePlanUpdater（可选）
 
@@ -218,14 +224,15 @@ converters = ["npu_gmm"]
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `register_model_converter()` | `converters/npu_registry.py` | **注册装饰器**，将自定义配置注册到全局单例 `ConverterRegistry`，并通过ModelConverter应用到模型 |
-| `ModelCustomConfig` | `converters/model_custom_config.py` | **声明模型自定义配置**，描述自定义所需的补丁 |
-| `ModelCustomConfigConverter` | `converters/model_custom_config_converter.py` | **配合自定义模型配置的ModelConverter**，读取配置并应用到模型 |
-| `ModelCustomConverter` | `converters/model_custom_converter.py` | **执行Module替换的ModelConverter**，开发者自定义，用于满足较为复杂的替换场景 |
-| `ParallelizePlanUpdater` (ABC) | `converters/parallelize_plan_updater.py` | **并行策略修改接口**，在 `parallelize_module` 前拦截并修改 TP/EP 策略 |
-| `StateDictUpdater` (ABC) | `converters/state_dict_updater.py` | **权重格式转换接口**，在 `to_hf` / `from_hf` 时转换权重结构，在模型原有的`from_hf`之后 / `to_hf`之前执行 |
-| `ParallelizePlanUpdateWrapper` | `converters/parallelize_plan_update_wrapper.py` | 使用`ParallelizePlanUpdateWrapper`封装的方法替换`parallelize_module`并在执行时修改并行策略 |
-| `StateDictUpdateWrapper` | `converters/state_dict_update_wrapper.py` | 运行时动态包装 `state_dict_adapter`，注入 `StateDictUpdater` 链 |
+| `register_model_converter()` | `converters/npu_registry.py` | **注册装饰器**，将自定义配置注册到全局单例 `_ConverterRegistry`，并通过ModelConverter应用到模型 |
+| `ModelCustomConfig` | `converters/model_custom_interface.py` | **声明模型自定义配置**，描述自定义所需的补丁 |
+| `ModelCustomConfigConverter` | `converters/framework/model_custom_config_converter.py` | **配合自定义模型配置的ModelConverter**，继承 Configurable 和 ModelConverter，读取配置并应用到模型 |
+| `ModelCustomConverter` | `converters/model_custom_interface.py` | **执行Module替换的抽象基类**，开发者自定义子类，用于满足较为复杂的替换场景 |
+| `ParallelizePlanUpdater` (ABC) | `converters/model_custom_interface.py` | **并行策略修改接口**，在 `parallelize_module` 前拦截并修改 TP/EP 策略（classmethod） |
+| `StateDictUpdater` (ABC) | `converters/model_custom_interface.py` | **权重格式转换接口**，在 `to_hf` / `from_hf` 时转换权重结构，在模型原有的`from_hf`之后 / `to_hf`之前执行（classmethod） |
+| `ParallelizePlanUpdateWrapper` | `converters/framework/parallelize_plan_update_wrapper.py` | 使用`ParallelizePlanUpdateWrapper`封装的方法替换`parallelize_module`并在执行时修改并行策略 |
+| `StateDictUpdateWrapper` | `converters/framework/state_dict_update_wrapper.py` | 运行时动态包装 `state_dict_adapter`，注入 `StateDictUpdater` 链 |
+| `_ConverterRegistry` | `converters/framework/model_custom_config_registry.py` | **全局注册单例**，管理 ModelCustomConfig 和动态生成的 Converter 类 |
 
 ### 3.2 类关系图
 
@@ -237,11 +244,11 @@ class CustomModule {
 
 class ParallelizePlanUpdater {
     <<Abstract>>
-    +update(ParallelStyle | dict~str, ParallelStyle~ | None prallelize_plan) ParallelStyle | dict~str, ParallelStyle~ | None
+    +update$cls(ParallelStyle | dict~str, ParallelStyle~ | None parallelize_plan) ParallelStyle | dict~str, ParallelStyle~ | None
 }
 
 class CustomParallelizePlanUpdater {
-    +update(ParallelStyle | dict~str, ParallelStyle~ | None prallelize_plan) ParallelStyle | dict~str, ParallelStyle~ | None
+    +update$cls(ParallelStyle | dict~str, ParallelStyle~ | None parallelize_plan) ParallelStyle | dict~str, ParallelStyle~ | None
 }
 
 class ParallelizePlanUpdateWrapper {
@@ -254,13 +261,13 @@ class ParallelizePlanUpdateWrapper {
 
 class StateDictUpdater {
     <<Abstract>>
-    +to_hf(dict~str, Any~ state_dict) dict~str, Any~
-    +from_hf(dict~str, Any~ state_dict) dict~str, Any~
+    +to_hf$cls(dict~str, Any~ state_dict) dict~str, Any~
+    +from_hf$cls(dict~str, Any~ state_dict) dict~str, Any~
 }
 
 class CustomStateDictUpdater {
-    +to_hf(dict~str, Any~ state_dict) dict~str, Any~
-    +from_hf(dict~str, Any~ state_dict) dict~str, Any~
+    +to_hf$cls(dict~str, Any~ state_dict) dict~str, Any~
+    +from_hf$cls(dict~str, Any~ state_dict) dict~str, Any~
 }
 
 class StateDictUpdateWrapper {
@@ -277,41 +284,49 @@ class ModelCustomConfig {
 }
 
 class ModelConverter {
+    <<torchtitan>>
     + convert(self, model nn.Module) nn.Module
+}
+
+class Configurable {
+    <<torchtitan>>
+    +Config Config
 }
 
 class ModelCustomConverter {
-    +__init__(self, JobConfig job_config, ParallelDims parallel_dims)
-    + convert(self, model nn.Module) nn.Module
+    <<Abstract>>
+    +__init__(self, ModelSpec model_spec)
+    + convert(self, model nn.Module) None
 }
 
 class UserModelCustomConverter {
-    +__init__(self, JobConfig job_config, ParallelDims parallel_dims)
-    + convert(self, model nn.Module) nn.Module
+    +__init__(self, ModelSpec model_spec)
+    + convert(self, model nn.Module) None
 }
 
 class ModelCustomConfigConverter {
-    + convert(self, model nn.Module) nn.Module
+    +__init__(self, Config config, ParallelDims parallel_dims, bool model_compile_enabled)
+    + convert(self, model nn.Module) None
 }
 
-class ConverterRegistry {
+class _ConverterRegistry {
     +register(name string)
-    +register_as_model_converter(name str, config ModelCustomConfig)
+    +_register_as_model_converter(name str, config ModelCustomConfig)
 }
 
 ParallelizePlanUpdater <|.. CustomParallelizePlanUpdater
 ParallelizePlanUpdater --* ParallelizePlanUpdateWrapper
 StateDictUpdater <|.. CustomStateDictUpdater
 StateDictUpdater --* StateDictUpdateWrapper
-ModelConverter <|.. ModelCustomConverter
-UserModelCustomConverter ..|> ModelCustomConverter
-CustomModule <-- ModelCustomConverter
-ModelCustomConverter --* ModelCustomConfig
+ModelCustomConverter <|.. UserModelCustomConverter
+CustomModule <-- UserModelCustomConverter
+UserModelCustomConverter --* ModelCustomConfig
 CustomParallelizePlanUpdater --* ModelCustomConfig
 CustomStateDictUpdater --* ModelCustomConfig
+Configurable <|.. ModelCustomConfigConverter
 ModelConverter <|.. ModelCustomConfigConverter
-ConverterRegistry ..> ModelCustomConfig
-ConverterRegistry ..> ModelCustomConfigConverter
+_ConverterRegistry ..> ModelCustomConfig
+_ConverterRegistry ..> ModelCustomConfigConverter
 ModelCustomConfigConverter ..> UserModelCustomConverter
 ModelCustomConfigConverter ..> ParallelizePlanUpdateWrapper
 ModelCustomConfigConverter ..> StateDictUpdateWrapper
@@ -324,7 +339,7 @@ ModelCustomConfigConverter ..> StateDictUpdateWrapper
 ```mermaid
 sequenceDiagram
     participant converters as converters/__init__.py
-    participant reg as ConverterRegistry
+    participant reg as _ConverterRegistry
     participant dyn as type() 动态创建
     participant tt as torchtitan 框架
 
@@ -337,26 +352,27 @@ sequenceDiagram
     reg->>reg: config.name = "my_npu_kernel"
     reg->>reg: _model_configs["my_npu_kernel"] = config
 
-    reg->>dyn: type("my_npu_kernelModelConverter", (ModelCustomConfigConverter,), {_model_config: config})
+    reg->>dyn: type("my_npu_kernelModelCustomConfigConverter", (ModelCustomConfigConverter,), {_model_config: config})
     dyn-->>reg: converter_cls
 
-    reg->>tt: register_model_converter(converter_cls, "my_npu_kernel")
-    tt-->>tt: 存入可用 converter 列表
+    reg->>reg: _converter_classes["my_npu_kernel"] = converter_cls
+    Note over reg: 动态生成的 converter_cls 会被 torchtitan 通过 Configurable.Config 发现
 ```
 
-### 4.2 模型入口阶段（TrainSpec 关联）
+### 4.2 模型入口阶段（Trainer.init_distributed 拦截）
 
 ```mermaid
 sequenceDiagram
-    participant model as model/__init__.py
-    participant reg as npu_register
-    participant spec as TrainSpec
+    participant trainer as Trainer
+    participant wrapper as init_distributed_wrapper
+    participant reg as npu_registry
 
-    model->>spec: get_train_spec() 创建 TrainSpec
-    spec->>reg: et_train_spec() 创建 TrainSpec
-    reg-->>reg: G_CUR_USING_TRAIN_SPEC = train_spec
+    trainer->>wrapper: init_distributed()
+    wrapper->>wrapper: G_USING_TRAIN_CONFIG = self.config
+    wrapper->>trainer: _original_init_distributed(self)
+    trainer-->>trainer: 返回 ParallelDims
 
-    Note over model,spec: TrainSpec 包含 parallelize_fn, state_dict_adapter 等
+    Note over trainer,reg: G_USING_TRAIN_CONFIG 存储 Trainer.Config，包含 model_spec
 ```
 
 ### 4.3 转换执行阶段（torchtitan 调用 convert 时）
@@ -367,33 +383,33 @@ sequenceDiagram
     participant mcc as ModelCustomConfigConverter
     participant config as ModelCustomConfig
     participant model as nn.Module (模型)
-    participant reg as npu_register
-    participant spec as TrainSpec
+    participant reg as npu_registry
+    participant spec as ModelSpec
     participant cmc as ModelCustomConverter
-    participant lpw as ParallelizePlanUpdateWrapper
-    participant sdw as StateDictUpdateWrapper
+    participant lpw as parallelize_plan_update_wrapper
+    participant sdw as state_dict_update_wrapper
 
     tt->>mcc: convert(model)
 
-    mcc->>reg: get_using_train_spec()
-    reg-->>mcc: train_spec
+    mcc->>reg: get_using_model_spec()
+    reg-->>mcc: model_spec
 
     mcc->>config: model_converter
     alt model_converter 存在
-        mcc->>cmc: model_converter.__init__
-        mcc->>cmc: model_converter.convert
+        mcc->>cmc: model_converter(model_spec).__init__
+        mcc->>cmc: model_converter.convert(model)
     end
 
     mcc->>config: parallelize_plan_updater
     alt parallelize_plan_updater 存在
-        mcc->>lpw: apply_parallelize_plan_update(updaters, train_spec)
-        lpw->>spec: parallelize_fn = parallelize_fn_wrapper(original_fn)
-        Note over lpw,spec: 用 mock.patch 拦截 parallelize_module 调用
+        mcc->>lpw: apply_parallelize_plan_update(updater_cls)
+        lpw->>lpw: _updater_cls_list.append(updater_cls)
+        Note over lpw: parallel.parallelize_module 已被替换为 wrapper
     end
 
     mcc->>config: state_dict_updater
     alt state_dict_updater 存在
-        mcc->>sdw: apply_state_dict_update(updaters, train_spec)
+        mcc->>sdw: apply_state_dict_update(updater_cls, model_spec)
         sdw->>spec: state_dict_adapter = StateDictUpdateWrapper(adapter)
         Note over sdw,spec: 包装 to_hf/from_hf，注入 updater 链
     end
@@ -401,31 +417,27 @@ sequenceDiagram
     mcc-->>tt: model (已转换)
 ```
 
-### 4.4 前向推理时（ParallelizePlanUpdater 生效）
+### 4.4 并行化执行时（ParallelizePlanUpdater 生效）
 
 ```mermaid
 sequenceDiagram
     participant tt as torchtitan
-    participant wrapper as parallelize_fn_wrapper
-    participant mock as unittest.mock.patch
-    participant lpw as ParallelizePlanUpdateWrapper
+    participant lpw as parallelize_module_wrapper
     participant updater as ParallelizePlanUpdater
-    participant pm as parallelize_module (Torch)
+    participant pm as parallel.parallelize_module (Torch原生)
 
-    tt->>wrapper: parallelize_fn(model, ...)
-    wrapper->>mock: patch("parallelize_module", ParallelizePlanUpdateWrapper.parallelize_module)
-    wrapper->>pm: original_parallelize_fn(model, ...) [在 patch 上下文中]
+    tt->>lpw: parallelize_module(module, mesh, plan)
+    Note over lpw: parallel.parallelize_module 已被全局替换
 
-    Note over pm: 原始函数内部调用 parallelize_module()
-
-    pm->>lpw: parallelize_module(module, mesh, plan)
-    lpw->>updater: update(plan)
+    lpw->>lpw: for updater_cls in _updater_cls_list
+    lpw->>updater: updater_cls.update(plan)
     updater-->>lpw: modified_plan
-    lpw->>pm: parallelize_module(module, mesh, modified_plan)
+    lpw->>lpw: plan = modified_plan
+
+    lpw->>pm: _torch_parallelize_module(module, mesh, plan)
     pm-->>lpw: module (已应用 TP/EP)
 
-    lpw-->>wrapper: 返回
-    wrapper-->>tt: 完成
+    lpw-->>tt: 返回 module
 ```
 
 ### 4.5 权重加载/保存时（StateDictUpdater 生效）
@@ -434,7 +446,7 @@ sequenceDiagram
 sequenceDiagram
     participant tt as torchtitan
     participant adapter as StateDictUpdateWrapper
-    participant updater as StateDictUpdater
+    participant updater as StateDictUpdater (classmethod)
     participant parent as StateDictAdapter
 
     Note over tt: from_hf 加载流程
@@ -442,14 +454,16 @@ sequenceDiagram
     tt->>adapter: from_hf(state_dict)
     adapter->>parent: super().from_hf(state_dict)
     parent-->>adapter: transformed_dict
-    adapter->>updater: updater.from_hf(transformed_dict)
-    updater-->>adapter: final_dict
+    adapter->>adapter: for updater_cls in _updater_cls_list
+    adapter->>updater: updater_cls.from_hf(transformed_dict)
+    updater-->>adapter: updated_dict
     adapter-->>tt: state_dict (已转换为 NPU 格式)
 
     Note over tt: to_hf 保存流程（反向）
 
     tt->>adapter: to_hf(state_dict)
-    adapter->>updater: updater.to_hf(state_dict)
+    adapter->>adapter: for updater_cls in _updater_cls_list
+    adapter->>updater: updater_cls.to_hf(state_dict)
     updater-->>adapter: modified_dict
     adapter->>parent: super().to_hf(modified_dict)
     parent-->>tt: hf_dict (已转换回 HF 格式)
