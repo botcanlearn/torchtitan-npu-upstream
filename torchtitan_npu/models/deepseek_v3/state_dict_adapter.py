@@ -144,7 +144,9 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         for key, value in state_dict.items():
             if "moe.experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                layer_num = re.search(r"\d+", key).group(0)
+                layer_num = re.search(  # pyrefly: ignore [missing-attribute]
+                    r"\d+", key
+                ).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
 
                 if isinstance(value, DTensor):
@@ -174,7 +176,9 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                layer_num = re.search(r"\d+", key).group(0)
+                layer_num = re.search(  # pyrefly: ignore [missing-attribute]
+                    r"\d+", key
+                ).group(0)
 
                 if abstract_key in to_hf_map:
                     new_key = to_hf_map[abstract_key]

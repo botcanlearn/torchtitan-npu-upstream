@@ -38,7 +38,9 @@ def multi_token_cross_entropy_loss(
     main_loss = cross_entropy_loss(preds[0], labels[:, :seq_len])
     mtp_loss = 0
 
-    for label_offset, pred in enumerate(preds[1:], 1):
+    for label_offset, pred in enumerate(  # pyrefly: ignore [bad-assignment]
+        preds[1:], 1
+    ):
         end_idx = label_offset + seq_len
         loss = cross_entropy_loss(pred, labels[:, label_offset:end_idx])
         loss = loss / num_mtp_modules

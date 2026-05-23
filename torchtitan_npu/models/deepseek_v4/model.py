@@ -1317,7 +1317,7 @@ class MTPModule(DeepSeekV4TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(Module.Config):  # pyrefly: ignore [bad-override]
         layer_id: int
         model_args: "DeepSeekV4Model.Config"
 
@@ -1623,7 +1623,9 @@ class DeepSeekV4Model(BaseModel):
                 token_offset_id = mtp_layer_id + 1
                 token_end_idx = token_offset_id + seq_len
                 token_offset = tokens[:, token_offset_id:token_end_idx]
-                input_offset = self.tok_embeddings(token_offset)
+                input_offset = self.tok_embeddings(  # pyrefly: ignore [not-callable]
+                    token_offset
+                )
                 layer_id = mtp_layer_id + self.model_args.n_layers
                 h = self.layers[str(layer_id)](
                     input_offset,
@@ -1647,6 +1649,7 @@ class DeepSeekV4Model(BaseModel):
                 output_list[mtp_layer_id + 1] = output
         return output_list
 
+    # pyrefly: ignore [bad-override]
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):

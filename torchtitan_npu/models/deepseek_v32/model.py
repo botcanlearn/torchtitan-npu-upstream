@@ -165,14 +165,16 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         else:
             # pyrefly: ignore [missing-attribute]
             output_list = [None] * (1 + self.num_mtp_modules)
-            output_list[0] = output
+            output_list[0] = output  # pyrefly: ignore [unsupported-operation]
         # MTP module calculate
         # pyrefly: ignore [missing-attribute]
         for mtp_layer_id in range(self.num_mtp_modules):
             token_offset_id = mtp_layer_id + 1
             token_end_idx = token_offset_id + seq_len
             token_offset = tokens[:, token_offset_id:token_end_idx]
-            input_offset = self.tok_embeddings(token_offset)
+            input_offset = self.tok_embeddings(  # pyrefly: ignore [not-callable]
+                token_offset
+            )
             layer_id = mtp_layer_id + self.n_main_layers
             h, residual = self.layers[str(layer_id)](
                 input_offset, prev_embed, self.freqs_cis, attention_masks, positions
@@ -229,7 +231,7 @@ class RMSNorm(TorchTitanRMSNorm):
         dtype = x.dtype
         x = x.float()
         var = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(var + self.eps)
+        x = x * torch.rsqrt(var + self.eps)  # pyrefly: ignore [unsupported-operation]
         return (self.weight * x).to(dtype)
 
     def reset_parameters(self):
@@ -864,7 +866,7 @@ class TransformerBlockV32(DeepSeekV3TransformerBlock):
     class Config(DeepSeekV3TransformerBlock.Config):
         # Tighten ``attention`` typing to the v32 sub-Config so trainer-side
         # validation catches misconfigured layers early.
-        attention: "Attention.Config"
+        attention: "Attention.Config"  # pyrefly: ignore [bad-override]
 
     def __init__(self, config: Config, layer_id: int, num_total_layers: int):
         # Skip ``DeepSeekV3TransformerBlock.__init__`` because v32 builds its
@@ -991,7 +993,7 @@ class MTPModule(TransformerBlockV32):
         final_out_std = self._dim**-0.5
         cutoff_factor = 3
         nn.init.trunc_normal_(
-            self.eh_proj.weight,
+            self.eh_proj.weight,  # pyrefly: ignore [bad-argument-type]
             mean=0.0,
             std=final_out_std,
             a=-cutoff_factor * final_out_std,

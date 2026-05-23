@@ -7,11 +7,7 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.config import (
-    ActivationCheckpointConfig, 
-    CompileConfig, 
-    DebugConfig
-)
+from torchtitan.config import ActivationCheckpointConfig, CompileConfig, DebugConfig
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 

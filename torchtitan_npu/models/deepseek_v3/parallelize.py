@@ -51,6 +51,7 @@ def parallelize_deepseekv3(
         cp_mesh = parallel_dims.get_mesh("cp")
         model_config = model.model_config if hasattr(model, "model_config") else None
 
+        # pyrefly: ignore [missing-attribute, not-callable]
         n_heads = model_config.layers[0].attention.n_heads if model_config else 128
         cp_degree = cp_mesh.size()
 
@@ -68,15 +69,6 @@ def parallelize_deepseekv3(
             apply_cp_to_attention_module(
                 attention_modules,
                 cp_mesh,
-                attention_type="ulysses",  # pyrefly: ignore [unexpected-keyword]
-                model_args=getattr(
-                    model, "model_args", None
-                ),  # pyrefly: ignore [unexpected-keyword]
-                tp_mesh=parallel_dims.get_mesh(
-                    "tp"
-                )  # pyrefly: ignore [unexpected-keyword]
-                if parallel_dims.tp_enabled
-                else None,
             )
 
         titan_deepseekv3_parallelize.apply_cp_to_attention_module = _force_ulysses_cp

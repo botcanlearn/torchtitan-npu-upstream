@@ -41,7 +41,9 @@ def parallelize_qwen3(
         from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 
         orig_apply_cp = titan_qwen3_parallelize.apply_cp_to_attention_module
-        n_heads = next(iter(model.layers.values())).attention.n_heads
+        n_heads = next(  # pyrefly: ignore [missing-attribute]
+            iter(model.layers.values())
+        ).attention.n_heads
         cp_degree = parallel_dims.cp
         if n_heads % cp_degree != 0:
             raise ValueError(
@@ -53,7 +55,6 @@ def parallelize_qwen3(
             return apply_cp_to_attention_module(
                 attention_modules,
                 cp_mesh,
-                attention_type="ulysses",
             )
 
         titan_qwen3_parallelize.apply_cp_to_attention_module = _apply_ulysses_cp

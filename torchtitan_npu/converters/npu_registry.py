@@ -29,7 +29,7 @@ G_USING_TRAIN_CONFIG: Trainer.Config | None = None
 def get_using_model_spec() -> ModelSpec:
     if G_USING_TRAIN_CONFIG is None:
         raise RuntimeError("G_USING_TRAIN_CONFIG must be set before using.")
-    return G_USING_TRAIN_CONFIG.model_spec
+    return G_USING_TRAIN_CONFIG.model_spec  # pyrefly: ignore [bad-return]
 
 
 _original_init_distributed = Trainer.init_distributed

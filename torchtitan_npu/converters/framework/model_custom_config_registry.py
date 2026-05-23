@@ -37,7 +37,7 @@ class _ConverterRegistry:
         converter_cls = self._converter_classes.get(name)
         if converter_cls is None:
             return None
-        return converter_cls.Config()
+        return converter_cls.Config()  # pyrefly: ignore [missing-attribute]
 
     def get(self, name: str) -> ModelCustomConfig | None:
         return self._model_configs.get(name)
@@ -68,7 +68,7 @@ class _ConverterRegistry:
         )
         owner_attr = "_owner"
         setattr(config_cls, owner_attr, converter_cls)
-        converter_cls.Config = config_cls
+        converter_cls.Config = config_cls  # pyrefly: ignore [missing-attribute]
 
         self._converter_classes[name] = converter_cls
 

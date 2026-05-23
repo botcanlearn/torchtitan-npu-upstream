@@ -94,6 +94,8 @@ def npu_quant_mxfp8_converter(self, model: nn.Module):
     )
 
 
-MXFP8Converter.Config = NPUMXFP8Config
-MXFP8Converter.__init__ = npu_quant_mxfp8_converter_init
+MXFP8Converter.Config = NPUMXFP8Config  # pyrefly: ignore [read-only, bad-assignment]
+MXFP8Converter.__init__ = (
+    npu_quant_mxfp8_converter_init  # pyrefly: ignore [bad-assignment]
+)
 MXFP8Converter.convert = npu_quant_mxfp8_converter

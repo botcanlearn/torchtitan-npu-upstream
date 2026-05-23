@@ -62,7 +62,7 @@ def _make_dsv3_model_config(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=router_top_k,
-        router_score_func=router_score_func,
+        router_score_func=router_score_func,  # pyrefly: ignore [bad-argument-type]
         router_route_scale=router_route_scale,
         router_route_norm=router_route_norm,
         score_before_experts=False,

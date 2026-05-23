@@ -28,12 +28,19 @@ def main() -> None:
     config = config_manager.parse_args()
     trainer = None
 
-    model_name = config.model_spec.name if config.model_spec else "unknown"
+    model_name = (
+        config.model_spec.name  # pyrefly: ignore [missing-attribute]
+        if config.model_spec  # pyrefly: ignore [missing-attribute]
+        else "unknown"
+    )
 
     from torchtitan.models.common import FlexAttention, ScaledDotProductAttention
     from torchtitan.models.common.decoder import Decoder
 
-    if config.model_spec and isinstance(config.model_spec.model, Decoder.Config):
+    if config.model_spec and isinstance(
+        config.model_spec.model,  # pyrefly: ignore [missing-attribute]
+        Decoder.Config,
+    ):
         for layer_cfg in config.model_spec.model.layers:
             if isinstance(layer_cfg.attention.inner_attention, FlexAttention.Config):
                 layer_cfg.attention.inner_attention = ScaledDotProductAttention.Config()
@@ -42,7 +49,11 @@ def main() -> None:
                     "Replaced FlexAttention with ScaledDotProductAttention for NPU compatibility"
                 )
 
-    if config.compile.enable and config.activation_checkpoint.mode != "none":
+    if (
+        config.compile.enable  # pyrefly: ignore [missing-attribute]
+        and config.activation_checkpoint.mode  # pyrefly: ignore [missing-attribute]
+        != "none"
+    ):
         logger.warning(
             "There might be performance issues with activation checkpointing and torch.compile enabled!"
         )
@@ -52,9 +63,11 @@ def main() -> None:
             activation_checkpoint_module, apply_full_ac_attr, _patched_apply_full_ac
         )
 
-    if config.compile.enable:
+    if config.compile.enable:  # pyrefly: ignore [missing-attribute]
         converter_names = []
-        if config.model_converters and hasattr(config.model_converters, "converters"):
+        if config.model_converters and hasattr(  # pyrefly: ignore [missing-attribute]
+            config.model_converters, "converters"
+        ):
             converter_names = [c.name for c in config.model_converters.converters]
 
         if model_name in ("deepseek_v3", "deepseek_v4"):
@@ -121,14 +134,16 @@ def main() -> None:
         )
 
     try:
-        trainer = config.build()
+        trainer = config.build()  # pyrefly: ignore [missing-attribute]
 
-        if config.checkpoint.create_seed_checkpoint:
+        if (
+            config.checkpoint.create_seed_checkpoint  # pyrefly: ignore [missing-attribute]
+        ):
             assert (
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
-                config.checkpoint.enable
+                config.checkpoint.enable  # pyrefly: ignore [missing-attribute]
             ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")

@@ -105,7 +105,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
             inputs: Tuple of input tensors to the module
         """
         for _, (inp, needs_allreduce) in enumerate(
-            zip(inputs, self.bwd_allreduce_inputs)
+            zip(inputs, self.bwd_allreduce_inputs, strict=True)
         ):
             if not needs_allreduce:
                 continue
@@ -169,7 +169,7 @@ def parallelize_deepseekv32(
     if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "
-            f"Got attn_type='{attn_type}'. "
+            f"Got attn_type={attn_type!r}. "
             f"FlexAttention and varlen attention are not supported with CP."
         )
 
@@ -365,7 +365,9 @@ def apply_non_moe_tp(
     # ``enable_mla_absorb`` lives on the per-layer Attention.Config in the new
     # Config tree. v32 layers share attention shape so layers[0] is canonical.
     enable_mla_absorb = getattr(
-        model.config.layers[0].attention, "enable_mla_absorb", True
+        model.config.layers[0].attention,  # pyrefly: ignore [missing-attribute]
+        "enable_mla_absorb",
+        True,  # pyrefly: ignore [missing-attribute]
     )
     enable_activation_checkpoint = ac_config.mode in [
         "full",

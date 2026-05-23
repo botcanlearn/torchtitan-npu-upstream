@@ -252,12 +252,14 @@ def patch_dsa_for_context_parallel(
     for cls in (DSASparseAttention, DSV32_SDPA):
         cls.cp_mesh = cp_mesh
         if model_args is not None:
-            cls.kv_lora_rank = model_args.layers[
+            cls.kv_lora_rank = model_args.layers[  # pyrefly: ignore [missing-attribute]
                 0
             ].attention.kv_lora_rank  # pyrefly: ignore [no-access]
-            cls.qk_rope_head_dim = model_args.layers[
-                0
-            ].attention.qk_rope_head_dim  # pyrefly: ignore [no-access]
+            cls.qk_rope_head_dim = (
+                model_args.layers[  # pyrefly: ignore [missing-attribute]
+                    0
+                ].attention.qk_rope_head_dim
+            )  # pyrefly: ignore [no-access]
         cls.tp_mesh = tp_mesh
         cls.compute_dsa_indexer_loss = (  # pyrefly: ignore [no-access]
             SparseLightningIndexerKLLoss()

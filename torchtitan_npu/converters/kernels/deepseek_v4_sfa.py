@@ -246,10 +246,10 @@ def _get_ms_npu_sparse_lightning_indexer_grad_kl_loss():
             NPUSparseLIGradKlLossOpBuilder,
         )
 
+        builder = NPUSparseLIGradKlLossOpBuilder()
+        loaded = builder.load()
         ms_npu_sparse_lightning_indexer_grad_kl_loss = (
-            NPUSparseLIGradKlLossOpBuilder()
-            .load()
-            .npu_sparse_lightning_indexer_grad_kl_loss
+            loaded.npu_sparse_lightning_indexer_grad_kl_loss  # pyrefly: ignore [missing-attribute]
         )
     return ms_npu_sparse_lightning_indexer_grad_kl_loss
 

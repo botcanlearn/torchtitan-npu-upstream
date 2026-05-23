@@ -41,8 +41,8 @@ def _wrap_dtensor_like(
 
         return DTensor.from_local(
             out_local,
-            device_mesh=original_tensor.device_mesh,
-            placements=original_tensor.placements,
+            device_mesh=original_tensor.device_mesh,  # pyrefly: ignore [missing-attribute]
+            placements=original_tensor.placements,  # pyrefly: ignore [missing-attribute]
             run_check=False,
         )
     return out_local

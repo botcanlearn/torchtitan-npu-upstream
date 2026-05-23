@@ -16,6 +16,7 @@ Reason:
 """
 
 import torch
+import torch.distributed.tensor  # noqa: F401 - explicit import needed for isinstance check
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.tensor import Replicate

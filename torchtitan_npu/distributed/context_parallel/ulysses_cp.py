@@ -93,7 +93,7 @@ def patch_ulysses_for_context_parallel(*, cp_mesh: DeviceMesh) -> None:
       - After A2A:   [B, n_heads,       seq // CP, head_dim]  (BNSD)
     Then the original transpose back to BSND continues as normal.
     """
-    ScaledDotProductAttention.cp_mesh = cp_mesh
+    ScaledDotProductAttention.cp_mesh = cp_mesh  # pyrefly: ignore [not-callable]
     orig_forward = ScaledDotProductAttention.forward
 
     @functools.wraps(orig_forward)

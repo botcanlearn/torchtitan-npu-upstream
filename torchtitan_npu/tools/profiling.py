@@ -120,5 +120,9 @@ def maybe_enable_profiling(
 # at import time (Trainer imports `from torchtitan.tools.profiling import
 # maybe_enable_profiling`, so its local name is fixed when trainer.py is first
 # imported — patching only the source module would not propagate).
-upstream_profiling.maybe_enable_profiling = maybe_enable_profiling
-trainer_module.maybe_enable_profiling = maybe_enable_profiling
+upstream_profiling.maybe_enable_profiling = (
+    maybe_enable_profiling  # pyrefly: ignore [bad-assignment]
+)
+trainer_module.maybe_enable_profiling = (
+    maybe_enable_profiling  # pyrefly: ignore [bad-assignment]
+)

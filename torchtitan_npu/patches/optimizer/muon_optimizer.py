@@ -83,7 +83,9 @@ def _build_muon_kwargs(
         "ns_steps": config.muon_ns_steps,
     }
     if muon_adjust_lr_fn:
-        muon_kwargs["adjust_lr_fn"] = muon_adjust_lr_fn
+        muon_kwargs[
+            "adjust_lr_fn"
+        ] = muon_adjust_lr_fn  # pyrefly: ignore [bad-typed-dict-key]
     return muon_kwargs
 
 
@@ -95,7 +97,7 @@ def _build_adamw_kwargs(
     optim_implementation = config.implementation
     if optim_implementation not in ["fused", "foreach", "for-loop"]:
         raise ValueError(
-            f"Invalid implementation '{optim_implementation}'. "
+            f"Invalid implementation {optim_implementation!r}. "
             f"Must be one of: 'fused', 'foreach', 'for-loop'"
         )
     return {
@@ -158,7 +160,7 @@ class MuonHybridOptimizersContainer(OptimizersContainer):
             if self.name != "Muon":
                 raise ValueError(
                     f"MuonHybridOptimizersContainer.Config.name must be 'Muon', "
-                    f"got '{self.name}'"
+                    f"got {self.name!r}"
                 )
             config_fields = {f.name for f in fields(self)}
             overlap = config_fields & kwargs.keys()

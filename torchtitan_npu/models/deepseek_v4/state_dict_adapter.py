@@ -173,8 +173,10 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     def to_hf_mtp(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         new_state_dict = {}
-        base = self.model_config.n_layers
-        mtp_count = self.model_config.num_mtp_modules
+        base = self.model_config.n_layers  # pyrefly: ignore [missing-attribute]
+        mtp_count = (
+            self.model_config.num_mtp_modules  # pyrefly: ignore [missing-attribute]
+        )
         for key, tensor in state_dict.items():
             match = re.match(r"layers\.(\d+)\.(.+)", key)
             if not match:
@@ -282,8 +284,10 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     def from_hf_mtp(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         new_state_dict = {}
-        base = self.model_config.n_layers
-        mtp_count = self.model_config.num_mtp_modules
+        base = self.model_config.n_layers  # pyrefly: ignore [missing-attribute]
+        mtp_count = (
+            self.model_config.num_mtp_modules  # pyrefly: ignore [missing-attribute]
+        )
         for key, tensor in state_dict.items():
             match = re.match(r"mtp\.(\d+)\.(.+)", key)
             if not match:

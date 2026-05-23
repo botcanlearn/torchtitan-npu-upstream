@@ -70,7 +70,10 @@ def test_parallelize_raises_on_indivisible_n_heads():
 
 
 def _call_parallelize_qwen3_with_mock_upstream(
-    titan_qwen3_parallelize, parallelize_qwen3, mock_model, mock_parallel_dims,
+    titan_qwen3_parallelize,
+    parallelize_qwen3,
+    mock_model,
+    mock_parallel_dims,
 ):
     """Call parallelize_qwen3 with upstream patched, return (result, mock_upstream)."""
     upstream_return = MagicMock()
@@ -105,7 +108,10 @@ def test_parallelize_without_cp_calls_upstream_directly():
     mock_parallel_dims.cp_enabled = False
 
     result, mock_upstream = _call_parallelize_qwen3_with_mock_upstream(
-        titan_qwen3_parallelize, parallelize_qwen3, mock_model, mock_parallel_dims,
+        titan_qwen3_parallelize,
+        parallelize_qwen3,
+        mock_model,
+        mock_parallel_dims,
     )
 
     assert result is mock_upstream.return_value
@@ -143,7 +149,10 @@ def test_parallelize_with_cp_patches_and_restores_apply_cp():
     mock_parallel_dims.tp_enabled = False
 
     result, _ = _call_parallelize_qwen3_with_mock_upstream(
-        titan_qwen3_parallelize, parallelize_qwen3, mock_model, mock_parallel_dims,
+        titan_qwen3_parallelize,
+        parallelize_qwen3,
+        mock_model,
+        mock_parallel_dims,
     )
 
     assert result is not None

@@ -40,7 +40,7 @@ class BypassTritonCodegenConverter(ModelCustomConverter):
     def convert(self, model: nn.Module):
         if self.model_name not in self.SUPPORTED_MODELS:
             logger.warning(
-                f"BypassTritonCodegenConverter: model '{self.model_name}' "
+                f"BypassTritonCodegenConverter: model {self.model_name!r} "
                 f"not in supported models {self.SUPPORTED_MODELS}"
             )
             return

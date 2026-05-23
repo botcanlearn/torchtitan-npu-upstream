@@ -44,7 +44,7 @@ class ModelCustomConfigConverter(Configurable, ModelConverter):
     def convert(self, model: nn.Module):
         try:
             logger.info(
-                f"[ModelCustomConfigConverter] Applied '{self._model_config.name}' start ..."
+                f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} start ..."
             )
 
             model_converter = self._model_config.model_converter
@@ -67,9 +67,9 @@ class ModelCustomConfigConverter(Configurable, ModelConverter):
                 )
 
             logger.info(
-                f"[ModelCustomConfigConverter] Applied '{self._model_config.name}' end."
+                f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} end."
             )
         except Exception as e:
             raise RuntimeError(
-                f"Failed to apply custom model config '{self._model_config.name}' : {e}"
+                f"Failed to apply custom model config {self._model_config.name!r} : {e}"
             ) from e

@@ -115,7 +115,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
             inputs: Tuple of input tensors to the module
         """
         for _, (inp, needs_allreduce) in enumerate(
-            zip(inputs, self.bwd_allreduce_inputs)
+            zip(inputs, self.bwd_allreduce_inputs, strict=True)
         ):
             if not needs_allreduce:
                 continue
@@ -186,7 +186,7 @@ def parallelize_deepseek_v4(
     if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "
-            f"Got attn_type='{attn_type}'. "
+            f"Got attn_type={attn_type!r}. "
             f"FlexAttention and varlen attention are not supported with CP."
         )
 
@@ -841,7 +841,7 @@ def _compile_moe_transformer_block(
     for attr_name, submod in block.named_children():
         if getattr(block, attr_name) != getattr(transformer_block, attr_name):
             raise RuntimeError(
-                f"Checkpoint-wrapped block child '{attr_name}' is not exposed on wrapper"
+                f"Checkpoint-wrapped block child {attr_name!r} is not exposed on wrapper"
             )
         if attr_name in {"cal_index_loss", "hc_pre"}:
             continue
@@ -921,7 +921,10 @@ def apply_compile(model: nn.Module, compile_config, ep_enabled: bool):
     # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
-    for layer_id, transformer_block in model.layers.named_children():
+    for (
+        layer_id,
+        transformer_block,
+    ) in model.layers.named_children():  # pyrefly: ignore [missing-attribute]
         if transformer_block.moe_enabled:
             transformer_block = _compile_moe_transformer_block(
                 transformer_block, compile_config

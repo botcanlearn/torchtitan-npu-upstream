@@ -124,7 +124,7 @@ def _patch_train_step_for_dsv4_indexer_loss():
         model_cfg = getattr(self, "model_config", None)
         if model_cfg is not None and getattr(model_cfg, "enable_indexer_loss", False):
             # Import dynamically to avoid circular dependencies
-            from torchtitan_npu.models.deepseek_v4.model.model import (
+            from torchtitan_npu.models.deepseek_v4.model import (
                 DSAIndexerLossLoggingHelper,
             )
 

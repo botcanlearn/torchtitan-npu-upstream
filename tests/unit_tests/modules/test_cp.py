@@ -139,7 +139,7 @@ class TestPatchDsaForContextParallel:
         try:
             # Remove any pre-existing model_args
             if hasattr(DSV32_SDPA, "model_args"):
-                delattr(DSV32_SDPA, "model_args")
+                del DSV32_SDPA.model_args
 
             mock_mesh = MagicMock()
             patch_dsa_for_context_parallel(cp_mesh=mock_mesh, model_args=None)
@@ -260,7 +260,7 @@ def mock_all_to_all_identity_for_gloo():
         output_tensor_list, input_tensor_list, group=None, async_op=False
     ):
         assert len(output_tensor_list) == len(input_tensor_list)
-        for out_t, in_t in zip(output_tensor_list, input_tensor_list):
+        for out_t, in_t in zip(output_tensor_list, input_tensor_list, strict=True):
             out_t.copy_(in_t)
         return None
 
@@ -379,7 +379,7 @@ class TestPatchUlyssesForContextParallel:
         if not snapshot["had_cp_mesh"] and hasattr(
             ScaledDotProductAttentionWrapper, "cp_mesh"
         ):
-            delattr(ScaledDotProductAttentionWrapper, "cp_mesh")
+            del ScaledDotProductAttentionWrapper.cp_mesh
 
 
 class TestValidateUlyssesConfigs:

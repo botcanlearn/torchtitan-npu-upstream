@@ -75,7 +75,7 @@ class TokenChoiceTopKRouter(common_moe.TokenChoiceTopKRouter):
     """DSV4 router: sqrtsoftplus + optional hash routing; gate is nn.Linear."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(Module.Config):  # pyrefly: ignore [bad-override]
         dim: int
         num_experts: int
         top_k: int
@@ -338,7 +338,9 @@ class MoE(Module):
         )
 
         with torch.no_grad():
-            self.tokens_per_expert.add_(num_tokens_per_expert)
+            self.tokens_per_expert.add_(  # pyrefly: ignore [not-callable]
+                num_tokens_per_expert
+            )
 
         (
             top_scores_experts_sorted,

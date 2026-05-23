@@ -92,18 +92,36 @@ def _etp_partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) 
     if mod.w1 is not None:
         mod.register_parameter(
             "w1",
-            nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(
+                distribute_tensor(
+                    mod.w1,  # pyrefly: ignore [bad-argument-type]
+                    device_mesh,
+                    [Shard(0), Shard(1)],
+                )
+            ),
         )
 
     mod.register_parameter(
         "w2",
-        nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
+        nn.Parameter(
+            distribute_tensor(
+                mod.w2,  # pyrefly: ignore [bad-argument-type]
+                device_mesh,
+                [Shard(0), Shard(2)],
+            )
+        ),
     )
 
     if mod.w3 is not None:
         mod.register_parameter(
             "w3",
-            nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(
+                distribute_tensor(
+                    mod.w3,  # pyrefly: ignore [bad-argument-type]
+                    device_mesh,
+                    [Shard(0), Shard(1)],
+                )
+            ),
         )
 
     if getattr(mod, "w13", None) is not None:

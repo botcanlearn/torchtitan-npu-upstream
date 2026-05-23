@@ -111,7 +111,9 @@ def validate_dsa_converters(
         resolved_converters = (
             getattr(model_cfg, "converters", None) if model_cfg is not None else None
         )
-    if not resolved_converters or not has_npu_converter(resolved_converters, "npu_dsa"):
+    if not resolved_converters or not has_npu_converter(
+        resolved_converters, "npu_dsa"  # pyrefly: ignore [bad-argument-type]
+    ):
         raise ValueError(
             '[dsa] attention_type="dsa" requires "npu_dsa" in converters. '
             f"Got converters={resolved_converters!r}."

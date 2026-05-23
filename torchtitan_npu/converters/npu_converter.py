@@ -51,14 +51,14 @@ class NPUConverter(Configurable, ModelConverter):
             count = self._patch_cls.apply(model, self.model_name)
         except Exception as e:
             raise RuntimeError(
-                f"Failed to apply patch '{self._patch_name}' : {e}"
+                f"Failed to apply patch {self._patch_name!r} : {e}"
             ) from e
         if count > 0:
             logger.info(
-                f"[NPU-CONVERTER] Applied '{self._patch_name}' : {count} replacements"
+                f"[NPU-CONVERTER] Applied {self._patch_name!r} : {count} replacements"
             )
         else:
-            logger.warning(f"[NPU-CONVERTER] Applied no '{self._patch_name}' converter")
+            logger.warning(f"[NPU-CONVERTER] Applied no {self._patch_name!r} converter")
         return model
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -83,6 +83,6 @@ class NPUConverter(Configurable, ModelConverter):
             raise RuntimeError("Missing patch class for NPUConverter")
         if not self._patch_cls.is_compatible(None, self.model_name):
             raise ValueError(
-                f"Patch '{self._patch_name}' is NOT compatible with model '{self.model_name}' \n"
+                f"Patch {self._patch_name!r} is NOT compatible with model {self.model_name!r} \n"
                 f"Supported models: {self._supported_models}"
             )

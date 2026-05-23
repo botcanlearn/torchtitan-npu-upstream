@@ -130,7 +130,11 @@ def npu_grouped_experts_forward(
         if log_ar:
             setattr(npu_grouped_experts_forward, ar_logged_attr, True)
             post_ar = out.mean().item()
-            ratio = post_ar / pre_ar if pre_ar != 0 else float("inf")
+            ratio = (
+                post_ar / pre_ar  # pyrefly: ignore [unsupported-operation]
+                if pre_ar != 0
+                else float("inf")
+            )
             logger.info(
                 "[GMM-TP] all-reduce: pre_mean=%.6f, post_mean=%.6f, ratio=%s",
                 pre_ar,
