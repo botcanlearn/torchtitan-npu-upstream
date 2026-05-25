@@ -36,7 +36,7 @@ def _default_converters() -> list:
 
 def deepseek_v32_671b_4layers_debug() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./checkpoint/DeepSeekV3.2",
+        hf_assets_path="./checkpoint/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_4_layers"),
         debug=DebugConfig(print_config=True),
         model_converters=ModelConvertersContainer.Config(
@@ -82,7 +82,7 @@ def deepseek_v32_671b_4layers_debug() -> TrainerConfig:
             export_dtype="float32",
             async_mode="disabled",
             load_only=True,
-            initial_load_path="./checkpoint/DeepSeekV3.2",
+            initial_load_path="./checkpoint/DeepSeek-V3.2",
             initial_load_in_hf=False,
             initial_load_in_hf_quantized=False,
         ),
@@ -103,7 +103,7 @@ def deepseek_v32_671b_4layers_debug() -> TrainerConfig:
 
 def deepseek_v32_671b_61layers_4k_128die() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./checkpoint/DeepSeekV3.2",
+        hf_assets_path="./checkpoint/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_128die"),
         debug=DebugConfig(print_config=True),
         model_converters=ModelConvertersContainer.Config(
@@ -148,7 +148,7 @@ def deepseek_v32_671b_61layers_4k_128die() -> TrainerConfig:
             last_save_model_only=True,
             export_dtype="float32",
             async_mode="disabled",
-            initial_load_path="./checkpoint/DeepSeekV3.2",
+            initial_load_path="./checkpoint/DeepSeek-V3.2",
             initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
@@ -159,7 +159,7 @@ def deepseek_v32_671b_61layers_4k_128die() -> TrainerConfig:
 
 def deepseek_v32_671b_61layers_32k_128die() -> TrainerConfig:
     return TrainerConfig(
-        hf_assets_path="./checkpoint/DeepSeekV3.2",
+        hf_assets_path="./checkpoint/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_128die"),
         debug=DebugConfig(print_config=True),
         model_converters=ModelConvertersContainer.Config(
@@ -205,7 +205,7 @@ def deepseek_v32_671b_61layers_32k_128die() -> TrainerConfig:
             last_save_model_only=True,
             export_dtype="float32",
             async_mode="disabled",
-            initial_load_path="./checkpoint/DeepSeekV3.2",
+            initial_load_path="./checkpoint/DeepSeek-V3.2",
             initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(

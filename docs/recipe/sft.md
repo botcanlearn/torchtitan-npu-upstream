@@ -87,7 +87,7 @@ bash scripts/run_train.sh --parallelism.context_parallel_degree 4
 SFT 配置默认从 HuggingFace 格式加载预训练权重：
 
 ```bash
---checkpoint.initial_load_in_hf true \
+--checkpoint.initial_load_in_hf \
 --checkpoint.initial_load_path /path/to/Qwen3-30B-A3B
 ```
 
@@ -111,16 +111,17 @@ SFT 配置默认从 HuggingFace 格式加载预训练权重：
 --checkpoint.interval 100
 ```
 
-如仅需加载权重而不保存（如调试时），设置 `--checkpoint.load_only true`。
+如仅需加载权重而不保存（如调试时），设置 `--checkpoint.load_only`。
 
 ## 常见问题
 
 **Q: 数据集跑完一轮就停了？**
 
-默认 `dataloader.infinite=true`，数据集会无限循环。如果设为 false，数据遍历完一轮后训练会停止。可通过 CLI 覆盖：
+默认 `dataloader.infinite=true`，数据集会无限循环。如果设为 false，数据遍历完一轮后训练会停止。tyro 的 bool 参数通过 flag 设置，显式开启或关闭可使用：
 
 ```bash
---dataloader.infinite true
+--dataloader.infinite
+--dataloader.no-infinite
 ```
 
 **Q: 超长样本被丢弃了？**

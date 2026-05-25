@@ -49,7 +49,6 @@ python tests/smoke_tests/integration_test.py output_dir \
 | Argument | Default | Description |
 |------|--------|------|
 | `output_dir` | None (required) | Output directory for test results |
-| `--config_path` | `./tests/smoke_tests/base_test.toml` | Base config file path |
 | `--test_name` | `all` | Specific test case name |
 | `--ngpu` | `2` | Maximum GPU count |
 
@@ -75,8 +74,8 @@ OverrideDefinitions(
 OverrideDefinitions(
     [
         [
-            "--model.name your_model",
-            "--model.flavor your_flavor",
+            "--module your_model",
+            "--config your_config",
             "--parallelism.tensor_parallel_degree 2",
         ],
     ],
@@ -90,9 +89,11 @@ OverrideDefinitions(
 python tests/smoke_tests/integration_test.py ./outputs --test_name your_model_tp
 ```
 
-#### base_test.toml Configuration
+#### Config Registry Configuration
 
-`tests/smoke_tests/base_test.toml` is the base configuration for integration tests. All tests run based on this configuration file, and parameters in `override_args` override identically-named parameters in the base configuration.
+Integration tests no longer use `tests/smoke_tests/base_test.toml`. Each test passes
+`--module` and `--config` to `scripts/run_train.sh`, then appends nested tyro overrides
+such as `--training.steps 2` or `--parallelism.tensor_parallel_degree 2`.
 
 ### Model Parallel Commands
 ```bash

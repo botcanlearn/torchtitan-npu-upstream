@@ -6,7 +6,14 @@
 
 ## 实现原理
 
-参考[MindSpeed框架设计的SwapOptimizer特性](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/features/swap-optimizer.md)，我们在 `torchtitan` 框架的优化器构建逻辑中引入了自定义的 `SwapOptimizersContainer`，对原生的 `Adam` 和 `AdamW` 优化器的 `step` 方法进行了无缝拦截与替换，从而使能了优化器状态的动态显存管理。相关代码定义在`torchtitan_npu/patches/optimizer/swap_optimizer.py`。
+参考[MindSpeed框架设计的SwapOptimizer特性](https://gitcode.com/Ascend/MindSpeed/blob/master/docs/features/swap-optimizer.md)，我们在 `torchtitan` 框架的优化器构建逻辑中引入了自定义的 `SwapOptimizersContainer`，对原生的 `Adam` 和 `AdamW` 优化器的 `step` 方法进行了无缝拦截与替换，从而使能了优化器状态的动态显存管理。相关代码定义在 `torchtitan_npu/patches/optimizer/swap_optimizer.py`。
+
+当前配置路由统一到 NPU `OptimizerConfig`：
+
+- 模型的 `config_registry.py` 只使用 `torchtitan_npu.config.configs.OptimizerConfig` 描述优化器参数。
+- `torchtitan_npu/config/configs.py` 只承载参数定义，不维护 swap optimizer 的分支构建逻辑。
+- `SwapOptimizersContainer.Config.build()` 负责唯一的 swap 开关路由：`swap_optimizer=True` 时构造 `SwapOptimizersContainer`，`swap_optimizer=False` 时回退到上游基础 `OptimizersContainer`。
+- NPU `OptimizerConfig.build()` 由 swap optimizer patch 层适配，转换为 `SwapOptimizersContainer.Config.build()` 复用同一套路由逻辑。
 
 本特性主要遵循“按块加载 -> 异步更新 -> 及时卸载”的流水线机制，在确保训练精度的前提下，用多流通算重叠换取巨大的显存空间收益。具体拆解如下：
 
@@ -28,25 +35,48 @@
 
 ## 配置选项
 
-在训练任务的 TOML 配置文件（例如 `torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_debug.toml`，或实际启动训练时 `--job.config_file` 所指向的路径）中，找到对应的 `[optimizer]` 节，并添加以下配置以启用 Swap Optimizer：
+Swap Optimizer 配置在模型的 `config_registry.py` 中，统一使用
+`torchtitan_npu.config.configs.OptimizerConfig`。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `name` | str | "AdamW" | 使用的优化器类型。当前 Swap 特性拦截并支持 `Adam` 和 `AdamW`。 |
-| `swap_optimizer` | bool | false | 是否启用 Swap Optimizer 特性以进行显存流水线卸载。 |
+| `swap_optimizer` | bool | false | 是否启用 Swap Optimizer 特性以进行显存流水线卸载。为 false 时使用上游基础 optimizer container。 |
 | `swap_optimizer_times` | int | 16 | 切片划分次数。用于决定优化器参数卸载与加载时的分块大小。值越大，单次峰值显存占用越小，但可能增加系统的流调度开销。 |
 
 ### 配置示例
-首先在配置文件中使能本代码仓的自定义配置，随后在 `[optimizer]` 节中添加以下配置，为AdamW优化器开启SwapOptimizer特性并设置流水线切片参数：
 
-```toml
-[job]
-custom_config_module = "torchtitan_npu.config.custom_config"    # 使能本代码仓的自定义配置
+在 `torchtitan_npu/models/<model>/config_registry.py` 的配置函数中设置：
 
-[optimizer]
-name = "AdamW"
-lr = 3e-4
-weight_decay = 0.01
-swap_optimizer = true       # 启用 Swap Optimizer
-swap_optimizer_times = 16   # 设置流水切分次数
+```python
+from torchtitan_npu.config.configs import OptimizerConfig
+
+optimizer = OptimizerConfig(
+    name="AdamW",
+    lr=3e-4,
+    weight_decay=0.01,
+    swap_optimizer=True,
+    swap_optimizer_times=16,
+)
+```
+
+关闭 Swap Optimizer 时，可以省略 `swap_optimizer`，或显式设置为 `False`。
+此时构建流程会回退到上游基础 `OptimizersContainer`，不会构造
+`SwapOptimizersContainer`：
+
+```python
+optimizer = OptimizerConfig(
+    name="AdamW",
+    lr=3e-4,
+    weight_decay=0.01,
+    swap_optimizer=False,
+)
+```
+
+启动时也可以通过命令行覆盖同名字段：
+
+```bash
+bash scripts/run_train.sh \
+  --optimizer.swap_optimizer \
+  --optimizer.swap_optimizer_times 16
 ```

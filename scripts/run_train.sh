@@ -9,8 +9,8 @@
 
 NGPU=${NGPU:-"16"}
 export LOG_RANK=${LOG_RANK:-0}
-MODULE=${MODULE:-"torchtitan_npu.models.deepseek_v3"}
-CONFIG=${CONFIG:-"deepseek_v3_671b_debug"}
+MODULE=${MODULE:-"torchtitan_npu.models.deepseek_v32"}
+CONFIG=${CONFIG:-"deepseek_v32_671b_4layers_debug"}
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan_npu.entry"}
 COMM_MODE=${COMM_MODE:-""}
 

@@ -58,32 +58,49 @@ $$\gamma_{\text{adjusted}} = 0.2 \times \gamma \times \sqrt{\max(A, B)}$$
 
 ## 配置选项
 
-在训练任务的 TOML 配置文件中，找到对应的 `[optimizer]` 节，并添加以下配置以启用 Muon 优化器：
+Muon 配置写在模型的 `config_registry.py` 中，推荐使用
+`torchtitan_npu.patches.optimizer.muon_optimizer.MuonHybridOptimizersContainer.Config`。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `name` | str | "AdamW" | 优化器类型，设置为 "Muon" 启用本特性 |
 | `muon_lr` | float | None | Muon 专用学习率，若不设置则使用 base lr |
 | `muon_momentum` | float | 0.9 | Muon 的动量因子 |
-| `muon_enable_nesterov` | bool | False | 是否启用 Nesterov 动量 |
+| `muon_enable_nesterov` | bool | false | 是否启用 Nesterov 动量 |
 | `muon_ns_steps` | int | 5 | 步数参数，影响正交化计算的迭代次数 |
 | `muon_adjust_lr_fn` | str | "match_rms_adamw" | 学习率调整模式：`"original"` 或 `"match_rms_adamw"` |
 
 ### 配置示例
 
-```toml
-[job]
-custom_config_module = "torchtitan_npu.config.custom_config"    # 使能本代码仓的自定义配置
+```python
+from torchtitan_npu.patches.optimizer.muon_optimizer import (
+    MuonHybridOptimizersContainer,
+    MuonLRSchedulersContainer,
+)
 
-[optimizer]
-name = "Muon"                        # 使用 Muon 混合优化器
-lr = 3e-4                            # 基础学习率（AdamW 部分使用）
-muon_lr = 1e-3                       # Muon 专用学习率（可选）
-weight_decay = 0.01
-muon_momentum = 0.9                  # Muon 动量因子
-muon_enable_nesterov = false         # 是否启用 Nesterov 动量
-muon_ns_steps = 5                    # 正交化步数
-muon_adjust_lr_fn = "original"       # 使用独立的 lr 调度器
+optimizer = MuonHybridOptimizersContainer.Config(
+    name="Muon",
+    lr=3e-4,
+    muon_lr=1e-3,
+    weight_decay=0.01,
+    muon_momentum=0.9,
+    muon_enable_nesterov=False,
+    muon_ns_steps=5,
+    muon_adjust_lr_fn="original",
+)
+lr_scheduler = MuonLRSchedulersContainer.Config(
+    warmup_steps=2000,
+    decay_ratio=0.8,
+    decay_type="cosine",
+)
+```
+
+启动时也可以通过命令行覆盖同名字段：
+
+```bash
+bash scripts/run_train.sh \
+  --optimizer.name Muon \
+  --optimizer.muon_adjust_lr_fn original
 ```
 
 ### 注意事项

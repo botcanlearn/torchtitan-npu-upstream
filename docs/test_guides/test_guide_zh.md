@@ -49,7 +49,6 @@ python tests/smoke_tests/integration_test.py output_dir \
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `output_dir` | 无（必填） | 测试输出目录 |
-| `--config_path` | `./tests/smoke_tests/base_test.toml` | 基础配置文件路径 |
 | `--test_name` | `all` | 指定测试用例名称 |
 | `--ngpu` | `2` | 最大 GPU 数 |
 
@@ -75,8 +74,8 @@ OverrideDefinitions(
 OverrideDefinitions(
     [
         [
-            "--model.name your_model",
-            "--model.flavor your_flavor",
+            "--module your_model",
+            "--config your_config",
             "--parallelism.tensor_parallel_degree 2",
         ],
     ],
@@ -90,9 +89,10 @@ OverrideDefinitions(
 python tests/smoke_tests/integration_test.py ./outputs --test_name your_model_tp
 ```
 
-#### base_test.toml 配置文件
+#### Config Registry 配置
 
-`tests/smoke_tests/base_test.toml` 是集成测试的基础配置，所有测试都会基于这个配置文件运行，`override_args` 中的参数会覆盖基础配置中的同名参数。
+集成测试每个测试用例会向`scripts/run_train.sh` 传入 `--module` 和 `--config`，再追加 `tyro` 嵌套覆盖参数，例如
+`--training.steps 2` 或 `--parallelism.tensor_parallel_degree 2`。
 
 ### 模型并行专项命令
 ```bash

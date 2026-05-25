@@ -43,7 +43,9 @@
 
 ## 配置选项
 
-在训练任务的 TOML 配置文件中，通过 `[model]` 节的 `converters` 字段启用低精度 converter，并在对应的 `[quantize.linear.mx]` 和 `[quantize.grouped_mm.mx]` 节中设置详细参数。
+低精度训练通过 `ModelConvertersContainer.Config` 的
+`converters` 列表启用，在模型的 `config_registry.py` 中设置。NPU 侧会 patch 上游 `MXFP8Converter.Config`，使其支持
+`recipe_name`、`filter_fqns` 和 `fqns` 字段。
 
 ### 线性层低精度配置（`quantize.linear.mx`）
 
@@ -61,38 +63,42 @@
 
 ### 配置示例
 
-首先在配置文件中使能本代码仓的自定义配置，随后在 `[model]` 节中配置 `converters` 并添加对应的量化参数节：
+在模型的 `config_registry.py` 中配置 `model_converters` 并添加对应的量化参数：
 
 **示例一：仅对线性层启用低精度训练**
 
-```toml
-[job]
-custom_config_module = "torchtitan_npu.config.custom_config"    # 使能本代码仓的自定义配置
+```python
+from torchtitan.components.quantization.mx import MXFP8Converter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-[model]
-converters = ["quantize.linear.mx"]
-
-[quantize.linear.mx]
-recipe_name = "mxfp8"                     # 可选 "mxfp8" 或 "hif8"
-filter_fqns = ["output", "router.gate"]   # output 和 router.gate 层不做低精度替换
+model_converters = ModelConvertersContainer.Config(
+    converters=[
+        MXFP8Converter.Config(
+            recipe_name="mxfp8",
+            filter_fqns=["output", "router.gate"],
+        ),
+    ],
+)
 ```
 
 **示例二：同时对线性层和 MoE 专家层启用低精度训练**
 
-```toml
-[job]
-custom_config_module = "torchtitan_npu.config.custom_config"
+```python
+from torchtitan.components.quantization.mx import MXFP8Converter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-[model]
-# npu_gmm 必须在 quantize.grouped_mm.mx 之前
-converters = ["npu_gmm", "quantize.linear.mx", "quantize.grouped_mm.mx"]
+from torchtitan_npu.converters.registry import get_npu_converter_config
 
-[quantize.linear.mx]
-recipe_name = "mxfp8"                     # 可选 "mxfp8" 或 "hif8"
-filter_fqns = ["output", "router.gate"]
-
-[quantize.grouped_mm.mx]
-recipe_name = "mxfp8"                     # 可选 "mxfp8" 或 "hif8"
+model_converters = ModelConvertersContainer.Config(
+    converters=[
+        # npu_gmm 必须在 MXFP8Converter 之前
+        get_npu_converter_config("npu_gmm"),
+        MXFP8Converter.Config(
+            recipe_name="mxfp8",
+            filter_fqns=["output", "router.gate"],
+        ),
+    ],
+)
 ```
 
 ## 验证清单

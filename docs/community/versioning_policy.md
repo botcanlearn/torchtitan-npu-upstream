@@ -1,15 +1,16 @@
-# 版本策略（Versioning Policy）
+# 版本策略
 
 `torchtitan-npu` 采用“分支 + commit 基线”的方式与上游 `torchtitan` 保持对齐。
 本政策用于定义发布兼容性约束，以及分支同步信息的唯一事实来源（source of truth）。
 
 ## 发布兼容性表
 
-下表列出了已发布 `torchtitan-npu` 版本对应的上游 `torchtitan` 基线及关键运行时兼容范围。
+下表列出了已发布 `torchtitan-npu` 版本对应的上游 `torchtitan` 基线及关键依赖兼容范围。
 
-| torchtitan-npu | torchtitan | Python | Stable CANN | PyTorch/torch_npu |
-| --- | --- | --- | --- | --- |
-| v0.2.2 | v0.2.2 (73a0e6979dd10b6b1904098eb3c8f62c18ab87ce) | >= 3.10 | 8.0+ | 2.6+ / torch-npu matching CANN |
+| torchtitan-npu | torchtitan | Python | Stable CANN | PyTorch/torch_npu | triton-ascend |
+| --- | --- | --- | --- | --- | --- |
+| master | main (ac13e536c84e7f6647b14fa9375c3c8a8a2b8578) | 3.11.x | 9.0.0 | 2.12.0 / 2.12.0rc1 | 3.2.1 |
+| v0.2.2-dev | v0.2.2 (73a0e6979dd10b6b1904098eb3c8f62c18ab87ce) | 3.11.x | 9.0.0 | 2.10.0 / 2.10.0 |3.2.1 |
 
 对于活跃开发分支，请始终以 `分支同步表` 为准。
 
@@ -20,7 +21,7 @@
 
 | torchtitan_npu_branch | torchtitan_repo_url | torchtitan_branch | torchtitan_commit | updated_at | notes |
 | --- | --- | --- | --- | --- | --- |
-| master | https://github.com/pytorch/torchtitan.git | v0.2.2 | 73a0e6979dd10b6b1904098eb3c8f62c18ab87ce | 2026-03-11 | Baseline adapted to torchtitan v0.2.2 tag. Update after each sync. |
+| master | https://github.com/pytorch/torchtitan.git | main | ac13e536c84e7f6647b14fa9375c3c8a8a2b8578 | 2026-05-11 | f7d0133 breaking refactor: adapt to upstream dataclass ConfigManager/config_registry, remove TOML/custom_config flow for migrated models, flatten models layout. |
 
 格式规则：
 - `torchtitan_commit` 必须仅包含纯 commit hash。

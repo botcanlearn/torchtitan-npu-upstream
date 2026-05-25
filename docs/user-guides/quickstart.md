@@ -1,6 +1,7 @@
 # 快速上手
 
-参考 [软件安装](./installation.md) 准备环境后，按照如下步骤操作，在 NPU 平台上运行 torchtitan-npu。
+参考 [软件安装](./installation.md) 准备环境后，以DeepSeek-V3.2模型为例，按照如下步骤在 NPU 平台上运行
+torchtitan-npu。
 
 ## 数据准备
 
@@ -12,13 +13,15 @@
 
 ```bash
 # 从huggingface下载 DeepSeek V3.2 tokenizer https://huggingface.co/settings/tokens
-
 python scripts/download_hf_assets.py --repo_id deepseek-ai/DeepSeek-V3.2 --assets tokenizer
 ```
 
-2. 下载数据集 (以 [enwiki 数据集](https://huggingface.co/datasets/lsb/enwiki20230101) 为例)。
+将 `torchtitan_npu/models/deepseek_v32/config_registry.py` 中的 `hf_assets_path` 指向下载的路径。
 
-通过 huggingface 下载 [enwiki 的 parquet 数据](https://huggingface.co/datasets/lsb/enwiki20230101) 到 `./tests/assets`。
+
+2. 下载数据集。以 [enwiki 数据集](https://huggingface.co/datasets/lsb/enwiki20230101)
+   为例：
+
 ```bash
 cd ./tests/assets
 hf download lsb/enwiki20230101 --repo-type=dataset --local-dir .
@@ -26,33 +29,39 @@ cd ../..
 ```
 
 ## 配置 CANN 环境变量
+
 ```bash
 source /usr/local/Ascend/cann/set_env.sh
 ```
 
+如果环境中使用的是其他 CANN 安装路径，请按实际路径调整。
+
 ## 启动训练任务
 
-启动 torchtitan-npu 训练任务时，推荐使用以下脚本：单机环境使用 `scripts/run_train.sh`，多机环境使用 `scripts/run_train_multinodes.sh`。以下展示了一些常见任务的启动方式。
+启动 torchtitan-npu 训练任务时，推荐使用以下脚本：单机环境使用 `scripts/run_train.sh`，多机环境使用
+`scripts/run_train_multinodes.sh`。以下展示了一些常见任务的启动方式。
 
 ### 单机训练任务
 
-默认配置，以 8 NPU 启动 DeepSeek-V3.2 debug 模型训练任务：
+默认配置，以 16 NPU 启动 DeepSeek-V3.2 4层debug模型训练任务：
 ```bash
 bash scripts/run_train.sh
 ```
 
-自定义配置，以 16 NPU 启动 DeepSeek-V3.2 4 层模型训练任务：
+自定义配置，调整训练步数和全局 batch size：
+
 ```bash
-NGPU=16 CONFIG_FILE=./torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_4layers_debug.toml \
 bash scripts/run_train.sh \
-  --training.steps=100 \
-  --training.global_batch_size=32
+  --training.steps 100 \
+  --training.global_batch_size 32
 ```
 
 > [!NOTE]
-> * `CONFIG_FILE`: 指定模型 TOML 配置文件路径，需在该文件中预先配置好相关特性的使能。
-> * `NGPU`: 指定参与训练的 NPU 数量（默认为 8）。
-> * `--training.steps` 与 `--training.global_batch_size`：动态覆盖 toml 配置中 `[training]` 部分的 `steps` 与 `global_batch_size`。
+> * `MODULE`: 指定模型 Python 模块，例如 `torchtitan_npu.models.deepseek_v32`。
+> * `CONFIG`: 指定 `config_registry.py` 中的配置函数，例如 `deepseek_v32_671b_4layers_debug`。
+> * `NGPU`: 指定单节点参与训练的 NPU 数量，`scripts/run_train.sh` 默认值为 16。
+> * `--training.steps` 与 `--training.global_batch_size`: 动态覆盖 registry 配置中的字段。
+
 
 ### 多机训练任务
 
@@ -68,16 +77,15 @@ IPs=('192.168.xxx.xxx' '192.168.xxx.xxx') # 填入集群的所有IP
 LOCAL_HOST=`ifconfig|grep "inet 192.168"| awk '{print $2}'` # 将 "192.168" 替换为当前 IP
 ```
 
-在所有参与训练的节点上同时执行 `run_train_multinodes.sh`，以启动多机预训练任务。以 DeepSeek-V3.2 完整模型为例：
+在所有参与训练的节点上同时执行 `scripts/run_train_multinodes.sh`，以启动多机预训练任务。以 DeepSeek-V3.2 完整模型为例：
 ```bash
-CONFIG_FILE=./torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_61layers_4k_128die.toml \
-bash scripts/run_train_multinodes.sh \
-  --training.steps=500
+bash scripts/run_train_multinodes.sh
 ```
 
 > [!NOTE]
 > * 脚本会自动通过 `LOCAL_HOST` 匹配 `IPs` 数组以推导当前机器的 `NODE_RANK`。若提取规则错误导致未匹配成功，脚本将报错退出。
 > * 多机通信依赖相应的端口开放，请确保 `MASTER_PORT` (默认 6300) 以及 HCCL 通信基础端口 (默认 30000) 不被防火墙拦截。
+
 
 ### 排查启动报错:查看更多 rank 日志
 
@@ -91,23 +99,27 @@ bash scripts/run_train_multinodes.sh \
 > > 排查时建议覆盖本机全部rank。多机任务中,各节点日志会自动写入本节点 `logs/` 目录，需登录对应节点查看(同样默认只记录local rank 0)。
 
 ### torchtitan 仓库内置训练任务
-
 除了 torchtitan-npu 已经适配的模型外，还可以直接下载 torchtitan 代码，使用原生配置启动训练任务：
 
-1. 拉取 torchtitan 代码。
+1. 拉取 torchtitan 代码
 
 ```bash
-cd ..
-git clone -b v0.2.2 https://github.com/pytorch/torchtitan.git
+git clone https://github.com/pytorch/torchtitan.git
+git checkout ac13e536c84e7f6647b14fa9375c3c8a8a2b8578
 ```
-2. 将 torchtitan 源代码移动至 torchtitan-npu 项目中。
+
+2. 将 torchtitan 源代码移动至 torchtitan-npu 项目中
+
 ```bash
 cp ./torchtitan/torchtitan ./torchtitan-npu/ -r
 ```
 
 3. 在 torchtitan-npu 项目中，使用 torchtitan 原生 toml 配置文件，启动训练。以 llama3 的 debug_model 配置为例:
+
 ```bash
-cd torchtitan-npu
-CONFIG_FILE="../torchtitan/models/llama3/train_configs/debug_model.toml" \
+NGPU=8 \
+TRAIN_FILE=torchtitan_npu.entry \
+MODULE=llama3 \
+CONFIG=llama3_debugmodel \
 bash scripts/run_train.sh
 ```

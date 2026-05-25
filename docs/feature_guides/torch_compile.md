@@ -21,28 +21,26 @@ pip3 install -e ./python/
 cd -
 ```
 
-在训练任务的 TOML 配置文件（例如 `torchtitan_npu/models/deepseek_v3/train_configs/deepseek_v3_671b_debug.toml`，或实际启动训练时 `--job.config_file` 所指向的 TOML 配置文件）中，找到对应的 `[compile]` 节，添加以下配置以完整编译模型：
+编译配置在模型的 `config_registry.py` 中，对应`CompileConfig` 类：
 
-```toml
-[compile]
-# 启用编译
-enable = true
-# 编译完整模型，而不是只编译 loss 。
-components = ["model", "loss"]
+```python
+from torchtitan.config import CompileConfig
+
+compile = CompileConfig(
+    enable=True,
+    # 编译完整模型，而不是只编译loss
+    components=["model", "loss"],
+)
 ```
 
 启动训练任务前，设置以下环境变量：
 ```bash
 export TORCHINDUCTOR_SIZE_ASSERTS=0
-bash run_train.sh
+bash scripts/run_train.sh --compile.enable
 ```
 
 ## 支持范围
-torchtitan-npu 当前支持 DeepSeek-V3 模型的全流程编译。
-其他模型的 Codegen 处于待调试状态，启用 torch.compile时，需要引入补丁 `npu_bypass_triton_codegen` 以跳过 Codegen 流程：
-```toml
-[model]
-converters = [..., "npu_bypass_triton_codegen"]
+当前主线正在加速适配中。您可先在 `v0.2.2-dev` 分支体验该功能。
 ```
 
 ## 注意事项

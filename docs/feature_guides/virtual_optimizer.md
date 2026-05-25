@@ -48,25 +48,35 @@ state['exp_avg_sq'] = torch_npu.empty_with_swapped_memory(
 
 ## 配置选项
 
-在训练任务的 TOML 配置文件（例如 `torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_debug.toml`，或实际启动训练时 `--job.config_file` 所指向的路径）中，找到对应的 `[optimizer]` 节，并添加以下配置以启用 Virtual Optimizer：
+Virtual Optimizer 在模型的 `config_registry.py` 中配置，由
+`torchtitan_npu.config.configs.OptimizerConfig` 相关字段进行配置：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `Virtual_optimizer` | bool | False | 是否启用 Virtual Optimizer 特性以进行显存卸载。 |
-| `Virtual_optimizer_size` | float/str | 2.0 | 申请的虚拟内存空间大小，如果希望Swap掉所有的一二阶动量，可以设置为`all` |
+| `virtual_optimizer` | bool | false | 是否启用 Virtual Optimizer 特性以进行显存卸载。 |
+| `virtual_optimizer_size` | float/list[float]/str | None | 申请的虚拟内存空间大小。如果希望 swap 掉所有一二阶动量，可以设置为 `all`。 |
 
 
 ### 配置示例
-首先在配置文件中使能本代码仓的自定义配置，随后在 `[optimizer]` 节中添加以下配置，为AdamW优化器开启SwapOptimizer特性并设置流水线切片参数：
 
-```toml
-[job]
-custom_config_module = "torchtitan_npu.config.custom_config"    # 使能本代码仓的自定义配置
+在 `torchtitan_npu/models/<model>/config_registry.py` 的配置函数中设置：
 
-[optimizer]
-name = "AdamW"
-lr = 3e-4
-weight_decay = 0.01
-virtual_optimizer = true       # 启用 Virtual Optimizer
-virtual_optimizer_size = 'all'  # 设置申请的虚拟内存大小
+```python
+from torchtitan_npu.config.configs import OptimizerConfig
+
+optimizer = OptimizerConfig(
+    name="AdamW",
+    lr=3e-4,
+    weight_decay=0.01,
+    virtual_optimizer=True,
+    virtual_optimizer_size="all",
+)
+```
+
+启动时也可以通过命令行覆盖同名字段：
+
+```bash
+bash scripts/run_train.sh \
+  --optimizer.virtual_optimizer \
+  --optimizer.virtual_optimizer_size all
 ```
