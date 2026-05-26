@@ -82,6 +82,14 @@ if __name__ == "__main__":
 
         _patch_for_train_npu_memory()
 
+        npu_permute_enable = "npu_permute" in config.model.converters
+        npu_expert_parallel_enable = "npu_expert_parallel" in config.model.converters
+        if npu_permute_enable != npu_expert_parallel_enable:
+            raise RuntimeError(
+                "npu_permute and npu_expert_parallel must be used together. "
+                "Please enable both or disable both in config.model.converters."
+            )
+
     if config.model.name == "llama4":
         from torchtitan_npu.tools.checkpoint_patch import (
             patch_llama4_checkpoint_support,

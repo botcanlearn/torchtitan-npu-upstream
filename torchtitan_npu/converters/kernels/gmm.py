@@ -78,15 +78,17 @@ def npu_grouped_mm(x, weight, group_list):
 
 
 def _run_experts_grouped_mm(
-    w13: torch.Tensor,
+    w13: torch.Tensor | None,
     w2: torch.Tensor,
-    _w3: torch.Tensor,
+    _w3: torch.Tensor | None,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
     swiglu_limit: float | None = None,
+    routed_scores: torch.Tensor | None = None,
 ) -> torch.Tensor:
     offsets = num_tokens_per_expert.to(torch.int64)
-
+    if w13 is None:
+        raise ValueError("w13 cannot be None for grouped_mm experts")
     h = npu_grouped_mm(x.bfloat16(), w13.bfloat16().transpose(-2, -1), offsets)
     if swiglu_limit is not None:
         gate, up = h.chunk(2, -1)
@@ -94,6 +96,8 @@ def _run_experts_grouped_mm(
         gate = torch.clamp(gate, max=swiglu_limit)
         h = torch.cat([gate, up], dim=-1)
     h = torch_npu.npu_swiglu(h, dim=-1)
+    if routed_scores is not None:
+        h = h * routed_scores.to(h.dtype)
     out = npu_grouped_mm(h, w2.bfloat16().transpose(-2, -1), offsets).type_as(x)
 
     return out
@@ -103,6 +107,7 @@ def npu_grouped_experts_forward(
     self,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    routed_scores: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if isinstance(self.w2, DTensor):
         # Convert parameters from DTensors to plain Tensors, to work with
@@ -141,8 +146,10 @@ def npu_grouped_experts_forward(
     # XXX: Refactor this, only DSv4 inject this attribute to its experts.
     swiglu_limit = getattr(self, "swiglu_limit", None)
 
-    # pyrefly: ignore [bad-argument-type]
-    return run_experts_fn(w13, w2, None, x, num_tokens_per_expert, swiglu_limit)
+    # pyrefly: ignore[bad-argument-type]
+    return run_experts_fn(
+        w13, w2, None, x, num_tokens_per_expert, swiglu_limit, routed_scores
+    )
 
 
 def npu_grouped_experts_init_weights(self, init_std: float):

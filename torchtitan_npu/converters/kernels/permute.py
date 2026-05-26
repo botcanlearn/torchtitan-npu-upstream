@@ -13,12 +13,14 @@ from ..base_converter import BaseConverter
 from ..convert_utils import replace_methods
 from ..registry import register_npu_converter
 
+
 logger = logging.getLogger(__name__)
 
 
 def _npu_moe_forward_for_dsv32(self, x):
     bs, slen, dim = x.shape
     x = x.view(-1, dim)
+    total_tokens = x.shape[0]
 
     (top_scores, selected_experts_indices, num_tokens_per_expert) = self.router(
         x, self.expert_bias
@@ -35,7 +37,11 @@ def _npu_moe_forward_for_dsv32(self, x):
     indices = selected_experts_indices.view(-1, self.reorderer.top_k)
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
 
-    routed_output = self.experts(routed_input, num_tokens_per_expert)
+    routed_scores, _ = torch_npu.npu_moe_token_permute(
+        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
+    )
+
+    routed_output = self.experts(routed_input, num_tokens_per_expert, routed_scores)
 
     unpermuted = torch_npu.npu_moe_token_unpermute(
         routed_output,
@@ -43,14 +49,16 @@ def _npu_moe_forward_for_dsv32(self, x):
         # Mixing FP32 `topk_score` and BF16 `routed_output` causes
         # MoeTokenUnpermuteGrad to return NaN values. Cast the FP32
         # part to BF16 as a temporary workaround.
-        top_scores.to(x.dtype),
+        None,
     )
+    unpermuted = unpermuted.view(total_tokens, self.reorderer.top_k, dim).sum(dim=1)
     return (out + unpermuted).reshape(bs, slen, dim)
 
 
 def _npu_moe_forward_for_dsv4(self, x, input_ids):
     bs, slen, dim = x.shape
     x = x.view(-1, dim)
+    total_tokens = x.shape[0]
     input_ids_flat = input_ids.flatten() if input_ids is not None else None
 
     (top_scores, selected_experts_indices, num_tokens_per_expert) = self.router(
@@ -63,21 +71,25 @@ def _npu_moe_forward_for_dsv4(self, x, input_ids):
     indices = selected_experts_indices.view(-1, self.reorderer.top_k)
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
 
-    routed_output = self.experts(routed_input, num_tokens_per_expert)
+    routed_scores, _ = torch_npu.npu_moe_token_permute(
+        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
+    )
+
+    routed_output = self.experts(routed_input, num_tokens_per_expert, routed_scores)
 
     if self.shared_experts is not None:
         out = self.shared_experts(x)
     else:
         out = torch.zeros_like(x)
-
     unpermuted = torch_npu.npu_moe_token_unpermute(
         routed_output,
         sorted_indices,
         # Mixing FP32 `topk_score` and BF16 `routed_output` causes
         # MoeTokenUnpermuteGrad to return NaN values. Cast the FP32
         # part to BF16 as a temporary workaround.
-        top_scores.to(x.dtype),
+        None,
     )
+    unpermuted = unpermuted.view(total_tokens, self.reorderer.top_k, dim).sum(dim=1)
     return (out + unpermuted).reshape(bs, slen, dim)
 
 

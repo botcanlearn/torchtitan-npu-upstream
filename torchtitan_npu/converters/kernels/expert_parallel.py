@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 
 def _npu_moe_token_dispatch(
     self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
-) -> tuple[Tensor, Tensor]:
-    # annotate module input placements/sharding with input_layouts
-    routed_input, num_tokens_per_expert = inputs
+) -> tuple[Tensor, Tensor, Tensor]:
+    routed_input, num_tokens_per_expert, routed_scores = inputs
     ep_degree = device_mesh.shape[0]
     num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
 
@@ -67,6 +66,10 @@ def _npu_moe_token_dispatch(
         device_mesh.get_group(),
     )
 
+    routed_scores = all_to_all_single_autograd(
+        routed_scores, self.output_splits, self.input_splits, device_mesh.get_group()
+    )
+
     # NOTE: After this all-to-all, the routed input is put on proper EP rank.
     # However, the num_tokens_per_expert_group is not of the final target format
     # [#tokens for local expert 0, #tokens for local expert 1, ...]
@@ -97,9 +100,10 @@ def _npu_moe_token_dispatch(
         routed_input, indices
     )
 
-    num_tokens_per_expert_group = num_tokens_per_expert_group.view(ep_degree, -1).sum(0)
+    routed_scores, _ = torch_npu.npu_moe_token_permute(routed_scores, indices)
 
-    return routed_input, num_tokens_per_expert_group
+    num_tokens_per_expert_group = num_tokens_per_expert_group.view(ep_degree, -1).sum(0)
+    return routed_input, num_tokens_per_expert_group, routed_scores
 
 
 def _npu_moe_token_combine(

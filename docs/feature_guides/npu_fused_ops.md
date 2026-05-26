@@ -71,6 +71,8 @@ converters = [... "npu_gmm", ...] # 添加 `npu_gmm` 配置项
 ## Permute
 MoE 前向计算中，为了利用 [GMM](#gmmgrouped-matmul) 提升计算效率，token 需要根据 MoE Router 为每个 token 分配的专家，以特定顺序重排，输出重排列后的 token 及其对应的专家索引；计算完成后，再将结果恢复至原始 token 顺序。
 
+> 注：如需开启npu_permute，请同时开启npu_expert_parallel
+
 本 ModelConverter 将“重排”和“恢复”操作替换为基于 `npu_moe_token_permute` 和 `npu_moe_token_unpermute` 算子的实现。
 
 **配置示例**：
