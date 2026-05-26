@@ -61,9 +61,6 @@ pip install -e .
 快速启动大语言模型的训练任务，参见
 [快速上手文档](https://gitcode.com/cann/torchtitan-npu/blob/master/docs/user-guides/quickstart.md) 。
 
-云开发平台（2 die）单机最小可运行样例，参见
-[云平台开发指南](https://gitcode.com/cann/torchtitan-npu/blob/master/docs/user-guides/cloud_platform_development_guide.md) 。
-
 
 # 特性支持概览
 
