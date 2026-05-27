@@ -4,23 +4,28 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.distributed.expert_parallel import ExpertParallel
+from torchtitan.models.moe import MoE
 
-from torchtitan_npu.converters.kernels.expert_parallel import (
+from torchtitan_npu.converters.kernels.permute import (
+    _npu_moe_forward_for_dsv32,
     _npu_moe_token_combine,
     _npu_moe_token_dispatch,
-    ExpertParallelConverter,
+    PermuteKernel,
 )
 
 
-def test_expert_parallel_converter_apply():
-
+def test_permute_converter_applies_moe_forward_and_ep_hooks():
+    original_moe_forward = MoE.forward
     original_token_dispatch = ExpertParallel._token_dispatch
     original_token_combine = ExpertParallel._token_combine
 
-    counts = ExpertParallelConverter.apply(None, None)
+    counts = PermuteKernel.apply(None, "deepseek_v3")
 
-    assert counts == 2
+    # 1 MoE.forward replacement + 1 _token_dispatch + 1 _token_combine.
+    assert counts == 3
+    assert MoE.forward == _npu_moe_forward_for_dsv32
     assert ExpertParallel._token_dispatch == _npu_moe_token_dispatch
     assert ExpertParallel._token_combine == _npu_moe_token_combine
+    assert MoE.forward != original_moe_forward
     assert ExpertParallel._token_dispatch != original_token_dispatch
     assert ExpertParallel._token_combine != original_token_combine
