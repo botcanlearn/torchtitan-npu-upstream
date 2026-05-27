@@ -140,7 +140,7 @@ stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/los
 | Patches 目录 | `torchtitan_npu/patches/` |
 | Converters 目录 | `torchtitan_npu/converters/` |
 | Converter 注册表 | `torchtitan_npu/converters/registry.py` |
-| 自定义配置 | `torchtitan_npu/config/custom_config.py` |
+| 自定义配置 | `torchtitan_npu/config/config.py` |
 | 模型实现 | `torchtitan_npu/models/` |
 | 分布式工具 | `torchtitan_npu/distributed/` |
 | 训练辅助工具 | `torchtitan_npu/tools/` |

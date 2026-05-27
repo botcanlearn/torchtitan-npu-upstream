@@ -23,18 +23,22 @@ from torchtitan_npu.converters.npu_registry import get_model_converter_config
 from . import model_registry
 
 
+def _default_converters() -> list:
+    return [
+        get_model_converter_config("npu_rms_norm"),
+        get_model_converter_config("npu_rope"),
+        get_model_converter_config("npu_permute"),
+        get_model_converter_config("npu_gmm"),
+    ]
+
+
 def deepseek_v3_671b_debug() -> TrainerConfig:
     return TrainerConfig(
         hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_16die"),
         debug=DebugConfig(print_config=True),
         model_converters=ModelConvertersContainer.Config(
-            converters=[
-                get_model_converter_config("npu_rms_norm"),
-                get_model_converter_config("npu_rope"),
-                get_model_converter_config("npu_permute"),
-                get_model_converter_config("npu_gmm"),
-            ],
+            converters=_default_converters()
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -99,6 +103,9 @@ def deepseek_v3_671b_16die_debug() -> TrainerConfig:
         hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_16die"),
         debug=DebugConfig(print_config=True),
+        model_converters=ModelConvertersContainer.Config(
+            converters=_default_converters()
+        ),
         metrics=MetricsProcessor.Config(log_freq=10),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
@@ -156,6 +163,9 @@ def deepseek_v3_671b_61layers_4k_128die() -> TrainerConfig:
         hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug_128die"),
         debug=DebugConfig(print_config=True),
+        model_converters=ModelConvertersContainer.Config(
+            converters=_default_converters()
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="enwiki-eod"),
         optimizer=OptimizerConfig(
@@ -214,6 +224,9 @@ def deepseek_v3_smoketest() -> TrainerConfig:
         hf_assets_path="./tests/assets/tokenizer/deepseekv3_tokenizer",
         model_spec=model_registry("671B_debug"),
         debug=DebugConfig(print_config=True),
+        model_converters=ModelConvertersContainer.Config(
+            converters=_default_converters()
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
