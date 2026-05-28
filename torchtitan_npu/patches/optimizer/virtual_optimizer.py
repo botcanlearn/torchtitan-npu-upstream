@@ -219,47 +219,33 @@ def sanitize(obj):
 
 
 def _process_state_tensor(state, k):
-    """
-    Process optimizer state tensor before checkpoint save.
-    Safely handle DTensor and NPU swap tensors, move to CPU in standard format.
-    """
     tensor = state[k]
     local_t = unwrap_dtensor(tensor)
-
-    # Ensure tensor is in normal device memory (not swap)
     if local_t.device.type != "cpu":
-        # Create a standard device tensor to copy swap data out
-        standard_tensor = torch.empty_like(local_t, memory_format=torch.preserve_format)
-        standard_tensor.copy_(local_t)
+        device_t = torch.empty_like(local_t, memory_format=torch.preserve_format)
+        device_t.copy_(local_t)
+        if hasattr(device_t, "swap_tensor"):
+            object.__delattr__(device_t, "swap_tensor")
+        local_t = device_t
 
-        # Clean up swap marker attribute
-        if hasattr(standard_tensor, "swap_tensor"):
-            object.__delattr__(standard_tensor, "swap_tensor")
-        local_t = standard_tensor
+    cpu_t = local_t.cpu().clone()
+    if hasattr(cpu_t, "swap_tensor"):
+        object.__delattr__(cpu_t, "swap_tensor")
 
-    # Move to CPU and clone for safe serialization
-    cpu_tensor = local_t.cpu().clone()
-
-    # Clean swap attribute on CPU tensor
-    if hasattr(cpu_tensor, "swap_tensor"):
-        object.__delattr__(cpu_tensor, "swap_tensor")
-
-    # For plain tensors, directly replace
     if not isinstance(tensor, DTensor):
-        state[k] = cpu_tensor
+        state[k] = cpu_t
         return
 
-    # Rebuild DTensor with CPU local tensor and original distributed spec
     spec = DTensorSpec(
         tensor.device_mesh,
         tensor.placements,
         tensor_meta=TensorMeta(
-            shape=cpu_tensor.shape,
-            stride=cpu_tensor.stride(),
-            dtype=cpu_tensor.dtype,
+            shape=tensor.size(),
+            stride=tensor.stride(),
+            dtype=cpu_t.dtype,
         ),
     )
-    state[k] = DTensor(cpu_tensor, spec, requires_grad=cpu_tensor.requires_grad)
+    state[k] = DTensor(cpu_t.view_as(cpu_t), spec, requires_grad=cpu_t.requires_grad)
 
 
 def _save_original_states(self):
