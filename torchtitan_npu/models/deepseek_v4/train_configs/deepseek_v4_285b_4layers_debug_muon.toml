@@ -51,7 +51,7 @@ max_norm = 1.0
 steps = 10
 dataset = "c4_test"
 dataset_path = "./tests/assets/c4_test"
-num_mtp_modules = 0
+num_mtp_modules = 1
 
 [parallelism]
 data_parallel_replicate_degree = 1
