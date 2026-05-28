@@ -136,6 +136,13 @@ pip install -e .
       <td>❌</td>
       <td>✅</td>
     </tr>
+    <!-- 多模态模型 -->
+    <tr>
+      <td>多模态模型</td>
+      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/vlm.md">VLM debug model</a></td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
   </tbody>
 </table>
 

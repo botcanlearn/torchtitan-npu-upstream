@@ -15,9 +15,29 @@ from torchtitan.tools.logging import init_logger, logger
 
 import torchtitan_npu  # noqa: F401
 
+from torchtitan_npu.converters.registry import has_npu_converter
 from torchtitan_npu.patches.torchtitan.activation_checkpoint import (
     _patched_apply_full_ac,
 )
+
+
+_SKIP_FLEX_TO_SDPA_REWRITE_MODELS = {"vlm"}
+_INDUCTOR_NPU_EXT_MODELS = {"deepseek_v3", "deepseek_v4", "vlm"}
+_BYPASS_TRITON_CODEGEN = "npu_bypass_triton_codegen"
+
+
+def _has_model_converter(model_converters, name: str) -> bool:
+    if model_converters is None or not hasattr(model_converters, "converters"):
+        return False
+    return has_npu_converter(model_converters.converters, name)
+
+
+def _uses_inductor_npu_ext(model_name: str) -> bool:
+    return model_name in _INDUCTOR_NPU_EXT_MODELS
+
+
+def _compile_requires_bypass_triton_codegen(model_name: str) -> bool:
+    return not _uses_inductor_npu_ext(model_name)
 
 
 def main() -> None:
@@ -37,9 +57,15 @@ def main() -> None:
     from torchtitan.models.common import FlexAttention, ScaledDotProductAttention
     from torchtitan.models.common.decoder import Decoder
 
-    if config.model_spec and isinstance(
-        config.model_spec.model,  # pyrefly: ignore [missing-attribute]
-        Decoder.Config,
+    if (
+        config.model_spec
+        # Some models replace FlexAttention in their own parallelize path because
+        # they require model-specific dense masks instead of the default causal mask.
+        and model_name not in _SKIP_FLEX_TO_SDPA_REWRITE_MODELS
+        and isinstance(
+            config.model_spec.model,  # pyrefly: ignore [missing-attribute]
+            Decoder.Config,
+        )
     ):
         for layer_cfg in config.model_spec.model.layers:
             if isinstance(layer_cfg.attention.inner_attention, FlexAttention.Config):
@@ -64,13 +90,12 @@ def main() -> None:
         )
 
     if config.compile.enable:  # pyrefly: ignore [missing-attribute]
-        converter_names = []
-        if config.model_converters and hasattr(  # pyrefly: ignore [missing-attribute]
-            config.model_converters, "converters"
-        ):
-            converter_names = [c.name for c in config.model_converters.converters]
+        has_bypass_triton_codegen = _has_model_converter(
+            config.model_converters,  # pyrefly: ignore [missing-attribute]
+            _BYPASS_TRITON_CODEGEN,
+        )
 
-        if model_name in ("deepseek_v3", "deepseek_v4"):
+        if _uses_inductor_npu_ext(model_name):
             if model_name == "deepseek_v3":
                 # MLA performs shape inference according to the value tensor;
                 # patch the meta registration so dynamo traces the right shapes.
@@ -100,13 +125,13 @@ def main() -> None:
                     "See docs/torch_compile.md for installation instructions."
                 ) from e
 
-            if "npu_bypass_triton_codegen" in converter_names:
+            if has_bypass_triton_codegen:
                 raise RuntimeError(
                     f"{model_name} model with compile.enable=True should not use npu_bypass_triton_codegen. "
                     "Please remove 'npu_bypass_triton_codegen' from model.converters in your config."
                 )
         else:
-            if "npu_bypass_triton_codegen" not in converter_names:
+            if not has_bypass_triton_codegen:
                 raise RuntimeError(
                     f"{model_name} model with compile.enable=True requires npu_bypass_triton_codegen. "
                     "Please add 'npu_bypass_triton_codegen' to model.converters in your config."

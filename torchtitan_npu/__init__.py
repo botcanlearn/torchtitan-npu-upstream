@@ -39,7 +39,7 @@ def _apply_patches():
     from .converters import quant_converter  # noqa: F401
 
     # module injection: register NPU-only model variants
-    from .models import deepseek_v32, deepseek_v4  # noqa: F401
+    from .models import deepseek_v32, deepseek_v4, vlm  # noqa: F401
 
     # patching context_parallel utils
     from .patches.distributed import (  # noqa: F401  # noqa: F401, F811
@@ -70,11 +70,12 @@ def _apply_patches():
     from .tools import flight_recorder, profiling  # noqa: F401
 
     new_set = set(titan_models._supported_models)
-    new_set.update({"deepseek_v32", "deepseek_v4"})
+    new_set.update({"deepseek_v32", "deepseek_v4", "vlm"})
     titan_models._supported_models = frozenset(new_set)
 
     _inject_module("torchtitan.models.deepseek_v32", deepseek_v32)
     _inject_module("torchtitan.models.deepseek_v4", deepseek_v4)
+    _inject_module("torchtitan.models.vlm", vlm)
 
 
 def _inject_module(module_path: str, replacement_module):
