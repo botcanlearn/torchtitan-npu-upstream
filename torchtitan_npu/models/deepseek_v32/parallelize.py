@@ -47,9 +47,9 @@ from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
+from torchtitan_npu.converters import has_npu_converter
 from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
 from torchtitan_npu.converters.kernels.rms_norm import NPURMSNorm
-from torchtitan_npu.converters.registry import has_npu_converter
 from torchtitan_npu.models.deepseek_v32.model import (
     Attention,
     DSAIndexerLossLoggingHelper,

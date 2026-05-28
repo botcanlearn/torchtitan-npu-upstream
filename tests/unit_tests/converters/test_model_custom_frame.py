@@ -7,26 +7,23 @@ from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 import torch.nn as nn
-
 from torch.distributed.tensor.parallel import parallelize_module
 
+from torchtitan_npu.converters import (
+    ModelCustomConfig,
+    ParallelizePlanUpdater,
+    registry,
+    StateDictUpdater,
+)
 from torchtitan_npu.converters.framework.model_custom_config_converter import (
     ModelCustomConfigConverter,
 )
-
 from torchtitan_npu.converters.framework.parallelize_plan_update_wrapper import (
     apply_parallelize_plan_update,
 )
 from torchtitan_npu.converters.framework.state_dict_update_wrapper import (
     apply_state_dict_update,
 )
-
-from torchtitan_npu.converters.model_custom_interface import (
-    ModelCustomConfig,
-    ParallelizePlanUpdater,
-    StateDictUpdater,
-)
-from torchtitan_npu.converters.npu_registry import registry
 
 
 @contextmanager

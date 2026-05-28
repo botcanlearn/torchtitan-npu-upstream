@@ -5,7 +5,7 @@
 
 from contextlib import contextmanager
 
-from torchtitan_npu.converters.npu_registry import registry
+from torchtitan_npu.converters import registry
 
 
 @contextmanager

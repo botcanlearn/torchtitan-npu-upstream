@@ -14,7 +14,7 @@ from torchtitan_npu.converters.model_custom_interface import (
     ModelCustomConfig,
     ModelCustomConverter,
 )
-from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.models.deepseek_v4.model import LiCompute, LiLoss, SparseAttention
 from torchtitan_npu.ops.aclnn.builder import build_op
 

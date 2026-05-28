@@ -14,7 +14,7 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
 from torchtitan_npu.config.configs import ParallelismConfig
-from torchtitan_npu.converters.npu_registry import get_model_converter_config
+from torchtitan_npu.converters import get_model_converter_config
 from torchtitan_npu.models.qwen3 import model_registry
 
 

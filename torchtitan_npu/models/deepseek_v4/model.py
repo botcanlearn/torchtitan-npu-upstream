@@ -1460,9 +1460,9 @@ class DeepSeekV4Model(BaseModel):
             # (e.g. ``DeepSeekV4SFAKernelConfig``), not the kernel classes
             # themselves, so matching on ``type(c).__name__`` silently fails
             # after the f7d0133 config refactor. Use the registry helper which
-            # matches on the ``_patch_name`` attribute the converter registry
-            # attaches to each Config.
-            from torchtitan_npu.converters.registry import has_npu_converter
+            # matches on the ``_model_config.name`` attribute the converter
+            # registry attaches to each Config.
+            from torchtitan_npu.converters import has_npu_converter
 
             self.use_sfa = has_npu_converter(
                 trainer_config.model_converters.converters, "deepseek_v4_sfa"

@@ -17,6 +17,14 @@ def _apply_patches():
         return
     _initialized = True
 
+    # Must capture Trainer.init_distributed before any other patch
+    # modifies it, so apply this first.
+    from .patches.torchtitan.trainer_init_distributed import (
+        apply as _apply_init_distributed_patch,
+    )
+
+    _apply_init_distributed_patch()
+
     # patching optimizer before importing torchtitan.models
     from .patches.optimizer import swap_optimizer  # noqa: F401 # usort:skip
 

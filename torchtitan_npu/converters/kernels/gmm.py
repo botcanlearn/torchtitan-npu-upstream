@@ -24,7 +24,7 @@ from torchtitan_npu.converters.model_custom_interface import (
     ModelCustomConverter,
     StateDictUpdater,
 )
-from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.tools.weight_utils import _split_w13_for_mapping, fuse_experts
 
 logger = logging.getLogger(__name__)

@@ -93,7 +93,7 @@ DeepSeek-V3.2 `config_registry.py` 中的
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan_npu.config.configs import ParallelismConfig
-from torchtitan_npu.converters.npu_registry import get_model_converter_config
+from torchtitan_npu.converters import get_model_converter_config
 
 model_converters = ModelConvertersContainer.Config(
     converters=[

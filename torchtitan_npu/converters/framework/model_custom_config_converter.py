@@ -13,7 +13,9 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConverter
 
 from torchtitan_npu.converters.model_custom_interface import ModelCustomConfig
-from torchtitan_npu.converters.npu_registry import get_using_model_spec
+from torchtitan_npu.patches.torchtitan.trainer_init_distributed import (
+    get_using_model_spec,
+)
 
 from .parallelize_plan_update_wrapper import apply_parallelize_plan_update
 from .state_dict_update_wrapper import apply_state_dict_update

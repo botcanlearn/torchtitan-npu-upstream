@@ -18,7 +18,7 @@ from torchtitan_npu.patches.torchtitan.activation_checkpoint import (
 
 from ..convert_utils import replace_methods
 from ..model_custom_interface import ModelCustomConfig, ModelCustomConverter
-from ..npu_registry import register_model_converter
+from ..registry import register_model_converter
 
 
 logger = logging.getLogger(__name__)

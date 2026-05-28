@@ -20,7 +20,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.models.common.attention import ScaledDotProductAttention
 from torchtitan.tools.logging import logger
 
-from torchtitan_npu.converters.registry import has_npu_converter
+from torchtitan_npu.converters import has_npu_converter
 
 
 _orig_apply_cp_to_attention_module = titan_cp.apply_cp_to_attention_module

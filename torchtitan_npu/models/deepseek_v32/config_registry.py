@@ -19,7 +19,7 @@ from torchtitan_npu.config.configs import (
     TrainingConfig,
 )
 
-from torchtitan_npu.converters.npu_registry import get_model_converter_config
+from torchtitan_npu.converters import get_model_converter_config
 
 from . import model_registry
 

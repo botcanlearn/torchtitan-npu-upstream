@@ -197,8 +197,7 @@ class GMMStateDictUpdater(StateDictUpdater):
 # ──────────────────────────────────────────────────
 # 4. 声明配置 + 注册
 # ──────────────────────────────────────────────────
-from torchtitan_npu.converters.model_custom_config import ModelCustomConfig
-from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.converters import ModelCustomConfig, register_model_converter
 
 @register_model_converter("npu_gmm")                         # <-- 装饰器完成注册
 class GMMModelConfig(ModelCustomConfig):                     # <-- 声明配置
@@ -224,7 +223,7 @@ converters = ["npu_gmm"]
 
 | 组件 | 文件 | 职责 |
 |------|------|------|
-| `register_model_converter()` | `converters/npu_registry.py` | **注册装饰器**，将自定义配置注册到全局单例 `_ConverterRegistry`，并通过ModelConverter应用到模型 |
+| `register_model_converter()` | `converters/registry.py` | **注册装饰器**，将自定义配置注册到全局单例 `_ConverterRegistry`，并通过ModelConverter应用到模型 |
 | `ModelCustomConfig` | `converters/model_custom_interface.py` | **声明模型自定义配置**，描述自定义所需的补丁 |
 | `ModelCustomConfigConverter` | `converters/framework/model_custom_config_converter.py` | **配合自定义模型配置的ModelConverter**，继承 Configurable 和 ModelConverter，读取配置并应用到模型 |
 | `ModelCustomConverter` | `converters/model_custom_interface.py` | **执行Module替换的抽象基类**，开发者自定义子类，用于满足较为复杂的替换场景 |
@@ -233,6 +232,7 @@ converters = ["npu_gmm"]
 | `ParallelizePlanUpdateWrapper` | `converters/framework/parallelize_plan_update_wrapper.py` | 使用`ParallelizePlanUpdateWrapper`封装的方法替换`parallelize_module`并在执行时修改并行策略 |
 | `StateDictUpdateWrapper` | `converters/framework/state_dict_update_wrapper.py` | 运行时动态包装 `state_dict_adapter`，注入 `StateDictUpdater` 链 |
 | `_ConverterRegistry` | `converters/framework/model_custom_config_registry.py` | **全局注册单例**，管理 ModelCustomConfig 和动态生成的 Converter 类 |
+| `init_distributed_wrapper` / `get_using_model_spec()` | `patches/torchtitan/trainer_init_distributed.py` | **拦截 Trainer.init_distributed** 捕获 Trainer.Config，供 converter 读取 ModelSpec；由 `_apply_patches()` 显式调用 `apply()` 安装 |
 
 ### 3.2 类关系图
 
@@ -361,18 +361,22 @@ sequenceDiagram
 
 ### 4.2 模型入口阶段（Trainer.init_distributed 拦截）
 
+该拦截通过 `patches/torchtitan/trainer_init_distributed.py` 实现，
+由 `_apply_patches()` 在最早期调用 `apply()` 安装，确保在其它 patch 之前
+捕获原始的 `Trainer.init_distributed`。
+
 ```mermaid
 sequenceDiagram
     participant trainer as Trainer
     participant wrapper as init_distributed_wrapper
-    participant reg as npu_registry
+    participant patch as trainer_init_distributed
 
     trainer->>wrapper: init_distributed()
     wrapper->>wrapper: G_USING_TRAIN_CONFIG = self.config
-    wrapper->>trainer: _original_init_distributed(self)
+    wrapper->>trainer: _original_init_distributed(self, *args, **kwargs)
     trainer-->>trainer: 返回 ParallelDims
 
-    Note over trainer,reg: G_USING_TRAIN_CONFIG 存储 Trainer.Config，包含 model_spec
+    Note over trainer,patch: G_USING_TRAIN_CONFIG 存储 Trainer.Config，包含 model_spec
 ```
 
 ### 4.3 转换执行阶段（torchtitan 调用 convert 时）
@@ -383,7 +387,7 @@ sequenceDiagram
     participant mcc as ModelCustomConfigConverter
     participant config as ModelCustomConfig
     participant model as nn.Module (模型)
-    participant reg as npu_registry
+    participant reg as registry
     participant spec as ModelSpec
     participant cmc as ModelCustomConverter
     participant lpw as parallelize_plan_update_wrapper
@@ -391,7 +395,7 @@ sequenceDiagram
 
     tt->>mcc: convert(model)
 
-    mcc->>reg: get_using_model_spec()
+    mcc->>patch: get_using_model_spec()
     reg-->>mcc: model_spec
 
     mcc->>config: model_converter

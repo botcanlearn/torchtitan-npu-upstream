@@ -49,7 +49,7 @@ stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/los
 
 2. **理解 patch 生效机制。** 所有 patch 在 `torchtitan_npu/__init__.py` 的 `_apply_patches()` 中注册，包导入即生效。新增 patch 必须在此函数中添加对应 import。
 
-3. **Converter 遵循注册表模式。** 自定义算子转换必须通过 `torchtitan_npu/converters/registry.py` 注册。不要在模型文件中硬编码算子替换逻辑。
+3. **Converter 遵循注册表模式。** 自定义算子转换必须通过 `torchtitan_npu/converters/registry.py` 的 `@register_model_converter()` 注册。不要在模型文件中硬编码算子替换逻辑。
 
 4. **上游同步是常态。** 本仓需定期跟踪上游 torchtitan 变更。同步基线信息维护在 `docs/source/community/versioning_policy.md` 的分支同步表。每次同步后必须更新此表。
 

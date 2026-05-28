@@ -87,12 +87,12 @@ model_converters = ModelConvertersContainer.Config(
 from torchtitan.components.quantization.mx import MXFP8Converter
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-from torchtitan_npu.converters.registry import get_npu_converter_config
+from torchtitan_npu.converters import get_model_converter_config
 
 model_converters = ModelConvertersContainer.Config(
     converters=[
         # npu_gmm 必须在 MXFP8Converter 之前
-        get_npu_converter_config("npu_gmm"),
+        get_model_converter_config("npu_gmm"),
         MXFP8Converter.Config(
             recipe_name="mxfp8",
             filter_fqns=["output", "router.gate"],

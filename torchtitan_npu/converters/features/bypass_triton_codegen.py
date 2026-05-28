@@ -14,7 +14,7 @@ from torch._inductor.lowering import lowerings
 from torchtitan_npu.patches.torch._inductor.graph import graphlowering_call_function
 from ..convert_utils import find_functions
 from ..model_custom_interface import ModelCustomConfig, ModelCustomConverter
-from ..npu_registry import register_model_converter
+from ..registry import register_model_converter
 
 logger = logging.getLogger(__name__)
 

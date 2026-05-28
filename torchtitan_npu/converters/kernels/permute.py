@@ -27,7 +27,7 @@ from torchtitan_npu.converters.model_custom_interface import (
     ModelCustomConverter,
     ParallelizePlanUpdater,
 )
-from torchtitan_npu.converters.npu_registry import register_model_converter
+from torchtitan_npu.converters.registry import register_model_converter
 
 logger = logging.getLogger(__name__)
 
