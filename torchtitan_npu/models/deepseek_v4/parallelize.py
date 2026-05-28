@@ -40,11 +40,8 @@ from torchtitan.models.common import moe as moe_module
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
-from torchtitan_npu.models.deepseek_v4.model import (
-    apply_rotary_emb,
-    Attention,
-    DSAIndexerLossLoggingHelper,
-)
+from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
+from torchtitan_npu.models.deepseek_v4.model import apply_rotary_emb, Attention
 
 logger = logging.getLogger(__name__)
 

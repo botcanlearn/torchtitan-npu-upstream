@@ -32,7 +32,6 @@ def _apply_patches():
 
     # patching torchtitan
     from torchtitan_npu.patches.torchtitan import (  # noqa: F401
-        activation_checkpoint,
         expert_parallel,
         hf_datasets,
         loss,

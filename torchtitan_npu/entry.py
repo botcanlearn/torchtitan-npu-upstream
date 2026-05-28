@@ -8,21 +8,15 @@ import os
 
 import torch
 
-import torchtitan.distributed.activation_checkpoint as activation_checkpoint_module
-
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
 
 import torchtitan_npu  # noqa: F401
 
 from torchtitan_npu.converters.registry import has_npu_converter
-from torchtitan_npu.patches.torchtitan.activation_checkpoint import (
-    _patched_apply_full_ac,
-)
-
 
 _SKIP_FLEX_TO_SDPA_REWRITE_MODELS = {"vlm"}
-_INDUCTOR_NPU_EXT_MODELS = {"deepseek_v3", "deepseek_v4", "vlm"}
+_INDUCTOR_NPU_EXT_MODELS = {"deepseek_v3", "deepseek_v4", "deepseek_v32", "vlm"}
 _BYPASS_TRITON_CODEGEN = "npu_bypass_triton_codegen"
 
 
@@ -83,11 +77,6 @@ def main() -> None:
         logger.warning(
             "There might be performance issues with activation checkpointing and torch.compile enabled!"
         )
-    else:
-        apply_full_ac_attr = "_apply_full_ac"
-        setattr(
-            activation_checkpoint_module, apply_full_ac_attr, _patched_apply_full_ac
-        )
 
     if config.compile.enable:  # pyrefly: ignore [missing-attribute]
         has_bypass_triton_codegen = _has_model_converter(
@@ -137,13 +126,13 @@ def main() -> None:
                     "Please add 'npu_bypass_triton_codegen' to model.converters in your config."
                 )
 
-    if model_name == "deepseek_v32":
+    if model_name in ("deepseek_v32", "deepseek_v4"):
         from torchtitan_npu.train import (
             _patch_init_for_dsa_set_loss_scale,
-            _patch_train_step_for_dsv32_indexer_loss,
+            _patch_train_step_for_dsa_indexer_loss,
         )
 
-        _patch_train_step_for_dsv32_indexer_loss()
+        _patch_train_step_for_dsa_indexer_loss()
         _patch_init_for_dsa_set_loss_scale()
 
     if model_name == "llama4":

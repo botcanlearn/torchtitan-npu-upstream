@@ -15,6 +15,8 @@ from torchtitan_npu.converters.model_custom_interface import (
     ModelCustomConverter,
 )
 from torchtitan_npu.converters.registry import register_model_converter
+
+from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
 from torchtitan_npu.models.deepseek_v4.model import LiCompute, LiLoss, SparseAttention
 from torchtitan_npu.ops.aclnn.builder import build_op
 
@@ -359,7 +361,6 @@ class SparseLightningIndexerGradKLLossWrapper(torch.autograd.Function):
         key_index,
         weights,
         sparse_indices,
-        loss_tracker,
         scale_value,
         cmp_ratio,
         actual_seq_qlen,
@@ -368,13 +369,16 @@ class SparseLightningIndexerGradKLLossWrapper(torch.autograd.Function):
         sparse_mode,
         pre_tokens,
         next_tokens,
+        layer_number=None,
+        num_layers=0,
     ):
         ctx.save_for_backward(
             query, key, query_index, key_index, weights, sparse_indices
         )
-        ctx.loss_tracker = loss_tracker
         ctx.scale_value = scale_value
         ctx.cmp_ratio = cmp_ratio
+        ctx.layer_number = layer_number
+        ctx.num_layers = num_layers
         ctx.actual_seq_qlen = actual_seq_qlen
         ctx.actual_seq_klen = actual_seq_klen
         ctx.layout = layout
@@ -430,8 +434,11 @@ class SparseLightningIndexerGradKLLossWrapper(torch.autograd.Function):
         d_weights = d_weights * grad_scale
         loss = loss * token_scale * loss_scale
 
-        ctx.loss_tracker(loss[0])
-        return None, None, d_query_index, d_key_index, d_weights, *([None] * 10)
+        if ctx.layer_number is not None:
+            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                loss[0], ctx.layer_number, ctx.num_layers
+            )
+        return None, None, d_query_index, d_key_index, d_weights, *([None] * 11)
 
 
 # Wrapper for autograd.Function to support default/keyword argument
@@ -443,7 +450,6 @@ def npu_sparse_lightning_indexer_grad_kl_loss(
     weights,
     sparse_indices,
     *,
-    loss_tracker,
     scale_value,
     cmp_ratio,
     actual_seq_qlen=None,
@@ -452,6 +458,8 @@ def npu_sparse_lightning_indexer_grad_kl_loss(
     sparse_mode=3,
     pre_tokens=2147483647,
     next_tokens=2147483647,
+    layer_number=None,
+    num_layers=0,
 ):
     return SparseLightningIndexerGradKLLossWrapper.apply(
         query,
@@ -460,7 +468,6 @@ def npu_sparse_lightning_indexer_grad_kl_loss(
         key_index,
         weights,
         sparse_indices,
-        loss_tracker,
         scale_value,
         cmp_ratio,
         actual_seq_qlen,
@@ -469,6 +476,8 @@ def npu_sparse_lightning_indexer_grad_kl_loss(
         sparse_mode,
         pre_tokens,
         next_tokens,
+        layer_number,
+        num_layers,
     )
 
 
@@ -505,9 +514,10 @@ class NpuLiLoss(LiLoss):
             k_indexer.unsqueeze(2),
             weights,
             sparse_indices.unsqueeze(2),
-            loss_tracker=self.save_loss,
             scale_value=self.softmax_scale,
             cmp_ratio=self.compress_ratio,
+            layer_number=self.layer_id,
+            num_layers=self.n_layers,
         )
 
 

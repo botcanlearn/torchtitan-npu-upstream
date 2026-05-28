@@ -50,10 +50,8 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan_npu.converters import has_npu_converter
 from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
 from torchtitan_npu.converters.kernels.rms_norm import NPURMSNorm
-from torchtitan_npu.models.deepseek_v32.model import (
-    Attention,
-    DSAIndexerLossLoggingHelper,
-)
+from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
+from torchtitan_npu.models.deepseek_v32.model import Attention
 
 logger = logging.getLogger(__name__)
 
