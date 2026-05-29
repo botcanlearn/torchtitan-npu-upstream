@@ -66,9 +66,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.hc_ffn_base": "layers.{}.hc_ffn_base",
             "layers.{}.hc_ffn_fn": "layers.{}.hc_ffn_fn",
             "layers.{}.hc_ffn_scale": "layers.{}.hc_ffn_scale",
-            "hc_head_base": "hc_head_base",
-            "hc_head_fn": "hc_head_fn",
-            "hc_head_scale": "hc_head_scale",
+            "hc_head_base": "hc_head.hc_head_base",
+            "hc_head_fn": "hc_head.hc_head_fn",
+            "hc_head_scale": "hc_head.hc_head_scale",
             "norm.weight": "norm.weight",
             "head.weight": "output.weight",
         }

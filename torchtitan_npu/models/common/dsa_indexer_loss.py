@@ -81,7 +81,7 @@ class DSAIndexerLossLoggingHelper:
         """Save the DSA indexer loss for logging.
         Args:
             loss (torch.Tensor): The loss tensor.
-            layer_number (int): Layer index of the loss.
+            layer_number (int): 0-based layer index of the loss.
             num_layers (int): The number of total layers.
         """
         # Skip DSA indexer loss logging if layer_number is None.
@@ -91,7 +91,15 @@ class DSAIndexerLossLoggingHelper:
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
             tracker["values"] = torch.zeros(num_layers, device=loss.device)
-        tracker["values"][layer_number - 1] += (
+
+        layer_number = int(layer_number)
+        if not 0 <= layer_number < num_layers:
+            raise ValueError(
+                f"DSA indexer layer_number must be in [0, {num_layers}), "
+                f"got {layer_number}."
+            )
+
+        tracker["values"][layer_number] += (
             loss.to_local().detach() if isinstance(loss, DTensor) else loss.detach()
         )
 
@@ -99,7 +107,9 @@ class DSAIndexerLossLoggingHelper:
     def clean_loss_in_tracker():
         """Clear the DSA indexer losses."""
         tracker = DSAIndexerLossLoggingHelper.tracker
-        tracker["values"].zero_()
+        values = tracker.get("values")
+        if values is not None:
+            values.zero_()
 
     @staticmethod
     def track_dsa_indexer_metrics(total_acc_steps: int):
@@ -108,8 +118,11 @@ class DSAIndexerLossLoggingHelper:
         if "values" not in tracker:
             return
         das_indexer_losses = tracker["values"]
-        das_indexer_num_layers = das_indexer_losses.shape[0]
-        loss = das_indexer_losses.sum() / das_indexer_num_layers / total_acc_steps
+        valid = das_indexer_losses != 0
+        if torch.count_nonzero(valid).item() == 0:
+            DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
+            return
+        loss = (das_indexer_losses[valid] / total_acc_steps).mean()
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
         logger.info(f"indexer loss: {loss.item()}")
 

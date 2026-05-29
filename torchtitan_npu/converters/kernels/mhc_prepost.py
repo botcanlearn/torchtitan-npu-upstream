@@ -152,10 +152,7 @@ class NpuHcHead(HcHead):
     def forward(
         self,
         x: Tensor,
-        hc_fn: Tensor,
-        hc_scale: Tensor,
-        hc_base: Tensor,
-    ):
+    ) -> Tensor:
         r"""Lightweight MHC Pre-Aggregation Function (Head forward).
 
 
@@ -168,12 +165,6 @@ class NpuHcHead(HcHead):
             self: Module instance containing hc_mult, hc_eps attributes
             x (torch.Tensor):
                 Input tensor of shape `[B, S, N, D]`. Will be flattened to `[B, S, N*D]` internally.
-            hc_fn (torch.Tensor):
-                Projection weight matrix of shape `[n, n * D]`.
-            hc_scale (torch.Tensor):
-                Branch Alpha parameters of shape `[1]`.
-            hc_base (torch.Tensor):
-                Branch Beta parameters of shape `[n]`.
 
 
         Returns:
@@ -184,9 +175,9 @@ class NpuHcHead(HcHead):
 
         y = MHCPreOnlyTriton.apply(
             x,  # x
-            hc_fn,  # weight
-            hc_scale,  # branch_alpha
-            hc_base,  # branch_beta
+            self.hc_head_fn,  # weight
+            self.hc_head_scale,  # branch_alpha
+            self.hc_head_base,  # branch_beta
             None,  # norm_gamma
             False,  # mhc_use_gamma
             self.hc_eps,  # eps

@@ -9,6 +9,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -246,7 +247,10 @@ def parallelize_deepseek_v4(
         )
 
     # patch the indexer loss tracking with distributed version to get the synchronized indexer loss metric
-    apply_distributed_indexer_loss_tracking(parallel_dims)
+    model_args = cast(Any, model).model_args
+    apply_distributed_indexer_loss_tracking(
+        parallel_dims, model_args.n_layers, model_args.compress_ratios
+    )
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -417,33 +421,53 @@ def apply_non_moe_tp(
         PrepareModuleInputOutput,
     )
     hc_head_plan = prepare_module_input_output(
-        input_layouts=(Shard(1), Replicate(), Replicate(), Replicate()),
-        desired_input_layouts=(Replicate(), Replicate(), Replicate(), Replicate()),
-        use_local_input=True,
+        input_layouts=(Shard(1),),
+        desired_input_layouts=(Replicate(),),
+        use_local_input=False,
         output_layouts=(Replicate()),
         desired_output_layouts=(Shard(1)),
         use_local_output=False,
     )
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-            "hc_head": hc_head_plan,
-        },
-    )
-    _register_distributed_parameter(model, "hc_head_fn", tp_mesh, [Replicate()])
-    _register_distributed_parameter(model, "hc_head_base", tp_mesh, [Replicate()])
-    _register_distributed_parameter(model, "hc_head_scale", tp_mesh, [Replicate()])
+    tok_embeddings = getattr(model, "tok_embeddings", None)
+    norm = getattr(model, "norm", None)
+    output = getattr(model, "output", None)
+    hc_head = getattr(model, "hc_head", None)
+
+    root_parallelize_plan: dict[str, Any] = {}
+    if tok_embeddings is not None:
+        root_parallelize_plan["tok_embeddings"] = rowwise_parallel(
+            input_layouts=Replicate(),
+            output_layouts=Shard(1),
+        )
+    if norm is not None:
+        root_parallelize_plan["norm"] = SequenceParallel()
+    if output is not None:
+        root_parallelize_plan["output"] = colwise_parallel(
+            input_layouts=Shard(1),
+            output_layouts=Shard(-1) if loss_parallel else Replicate(),
+            use_local_output=not loss_parallel,
+        )
+    if hc_head is not None:
+        root_parallelize_plan["hc_head"] = hc_head_plan
+
+    if root_parallelize_plan:
+        parallelize_module(model, tp_mesh, root_parallelize_plan)
+
+    if hc_head is not None:
+        if not isinstance(hc_head, nn.Module):
+            raise RuntimeError("DeepSeekV4 TP expected hc_head to be an nn.Module.")
+        for param_name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
+            if getattr(hc_head, param_name, None) is None:
+                raise RuntimeError(
+                    f"DeepSeekV4 TP expected hc_head.{param_name} "
+                    "when hc_head is present."
+                )
+            _register_distributed_parameter(
+                hc_head,
+                param_name,
+                tp_mesh,
+                [Replicate()],
+            )
 
     attention_kernel_plan_ratio1 = PrepareModuleInputOutputWithBwdAllReduce(
         bwd_allreduce_inputs=(False, True, False, False, False),
@@ -992,7 +1016,11 @@ def apply_compile(model: nn.Module, compile_config, ep_enabled: bool):
     logger.info("Compiling each TransformerBlock with torch.compile")
 
 
-def apply_distributed_indexer_loss_tracking(parallel_dims: ParallelDims):
+def apply_distributed_indexer_loss_tracking(
+    parallel_dims: ParallelDims,
+    num_layers: int,
+    compress_ratios: tuple[int, ...],
+):
     """
     Dynamically patch track_dsa_indexer_metrics to support 3D/4D parallelism
     synchronization efficiently using a single global communication step.
@@ -1004,38 +1032,47 @@ def apply_distributed_indexer_loss_tracking(parallel_dims: ParallelDims):
     and Context Parallel (CP) groups, to obtain the globally accurate metric.
     """
 
-    # pyrefly: ignore [invalid-decorator]
-    @staticmethod
+    # Pre-compute which layer indices have an indexer (compress_ratio == 4).
+    # This is static model structure info — same on every rank — so it can be
+    # used as a safe early-return guard and as an index into the values tensor
+    # without introducing any cross-rank divergence.
+    valid_indices = [
+        i
+        for i in range(num_layers)
+        if i < len(compress_ratios) and compress_ratios[i] == 4
+    ]
+
+    # Normalization factor: each valid layer is computed by every rank in its
+    # PP stage.  world_size / pp == dp * tp * cp (ranks per PP stage).
+    norm_factor = dist.get_world_size() // max(parallel_dims.pp, 1)
+
+    def _new_empty_tracker_tensor() -> torch.Tensor:
+        device = torch.device("npu", cast(Any, torch).npu.current_device())
+        return torch.zeros(num_layers, device=device)
+
     def distributed_track_dsa_indexer_metrics(total_acc_steps: int):
-        tracker = DSAIndexerLossLoggingHelper.tracker
-        if "values" not in tracker:
+        # valid_indices is derived from model config — identical on all ranks,
+        # so this early return fires uniformly and cannot cause a hang.
+        if not valid_indices:
+            DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
             return
 
-        # 1. Clone the tensor to avoid modifying the underlying tracker.
-        # Shape is always [total_num_layers], so tensor size is consistent across all ranks.
-        dsa_indexer_losses = tracker["values"].clone()
+        tracker = DSAIndexerLossLoggingHelper.tracker
+        values = tracker.get("values")
+        if values is None:
+            dsa_indexer_losses = _new_empty_tracker_tensor()
+        else:
+            dsa_indexer_losses = values.clone()
 
+        # all_reduce is unconditional so every rank participates, even those
+        # on PP stages that have no indexer layers (their values are zeros).
         if dist.is_initialized():
-            # 2. Perform a SINGLE global All-Reduce (AVG).
-            # This averages the tensor across all ranks in the world.
-            # For any specific layer, only the ranks in its corresponding PP stage have non-zero values.
-            # Therefore, the global sum for a layer is exactly the sum across its non-PP domains.
-            dist.all_reduce(dsa_indexer_losses, op=dist.ReduceOp.AVG)
+            dist.all_reduce(dsa_indexer_losses, op=dist.ReduceOp.SUM)
 
-            # 3. Correct the mathematical expectation for Pipeline Parallelism (PP).
-            # A global AVG divides the sum by WORLD_SIZE.
-            # However, the valid non-zero values only come from (WORLD_SIZE // PP_DEGREE) ranks.
-            # By multiplying the result by PP_DEGREE, we recover the exact mathematical
-            # average across the non-PP domains (FSDP, TP, CP, etc.).
-            pp_degree = parallel_dims.pp if parallel_dims.pp_enabled else 1
-            dsa_indexer_losses *= pp_degree
+        loss = dsa_indexer_losses[valid_indices].mean() / (
+            norm_factor * total_acc_steps
+        )
 
-        # 4. Calculate the final aggregated loss.
-        # Divide by total gradient accumulation steps to get the true average per step.
-        dsa_indexer_num_layers = torch.count_nonzero(dsa_indexer_losses).item()
-        loss = dsa_indexer_losses.sum() / dsa_indexer_num_layers / total_acc_steps
-
-        # 5. Clean the tracker and log the metric
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
         logger.info(f"indexer loss: {loss.item()}")
 

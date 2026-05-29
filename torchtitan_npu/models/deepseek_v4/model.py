@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import scipy
 import torch
@@ -1138,24 +1139,33 @@ class HcHead(Module):
     class Config(Module.Config):
         norm_eps: float
         hc_eps: float
+        hc_mult: int
+        dim: int
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.norm_eps = config.norm_eps
         self.hc_eps = config.hc_eps
+        hc_mult = config.hc_mult
+        hc_dim = hc_mult * config.dim
+        # The MHC head parameters live on the module (not the root model) so that
+        # pipeline-parallel module splitting keeps them only on the last stage and
+        # tensor-parallel registration can find them under ``hc_head.*`` (which is
+        # also the FQN the state-dict adapter maps to). They stay in fp32.
+        self.hc_head_fn = nn.Parameter(
+            torch.empty(hc_mult, hc_dim, dtype=torch.float32)
+        )
+        self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
+        self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
-    ):
+    def forward(self, x: torch.Tensor):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, hc_fn) * rsqrt
-        pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
+        mixes = F.linear(x, self.hc_head_fn) * rsqrt
+        pre = (
+            torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        )
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype)
 
@@ -1354,15 +1364,13 @@ class DeepSeekV4Model(BaseModel):
                 ).build()
         self.norm = RMSNorm.Config(dim=model_args.dim, eps=self.norm_eps).build()
         self.hc_eps = model_args.hc_eps
-        self.hc_mult = hc_mult = model_args.hc_mult
-        hc_dim = hc_mult * model_args.dim
-        origin_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float32)
-        self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim))
-        self.hc_head_base = nn.Parameter(torch.empty(hc_mult))
-        self.hc_head_scale = nn.Parameter(torch.empty(1))
-        torch.set_default_dtype(origin_dtype)
-        self.hc_head = HcHead.Config(norm_eps=self.norm_eps, hc_eps=self.hc_eps).build()
+        self.hc_mult = model_args.hc_mult
+        self.hc_head = HcHead.Config(
+            norm_eps=self.norm_eps,
+            hc_eps=self.hc_eps,
+            hc_mult=model_args.hc_mult,
+            dim=model_args.dim,
+        ).build()
         self.model_args = model_args
         self.tok_embeddings = Embedding.Config(
             num_embeddings=model_args.vocab_size,
@@ -1404,18 +1412,20 @@ class DeepSeekV4Model(BaseModel):
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, seq_len, vocab_size).
         """
-        seq_len = tokens.shape[1]
-        seq_len -= self.model_args.num_mtp_modules
+        raw_tokens = None
         if self.tok_embeddings is not None:
+            raw_tokens = tokens
+            seq_len = tokens.shape[1] - self.model_args.num_mtp_modules
             input_ids = tokens[:, :seq_len].detach().long()
             h = self.tok_embeddings(tokens[:, :seq_len])
             h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
         else:
-            input_ids = tokens[:, :seq_len].detach().long()
-            h = tokens[:, :seq_len]
+            h = tokens
+            input_ids = self._normalize_pp_input_ids(input_ids)
+            seq_len = h.shape[1]
         # Main model calculate
-        layer_id = 0
         for layer in self.layers.values():
+            layer_id = cast(Any, layer).layer_id
             if layer_id < self.model_args.n_layers:
                 h = layer(
                     h,
@@ -1423,27 +1433,30 @@ class DeepSeekV4Model(BaseModel):
                     (
                         self.freqs_cis
                         # pyrefly: ignore [bad-index]
-                        if self.model_args.compress_ratios[layer.layer_id] > 1
+                        if self.model_args.compress_ratios[layer_id] > 1
                         else self.freqs_cis_wo_compressor
                     ),
                     self.hadamard_mat,
                     attention_masks,
                     positions=positions,
                 )
-            else:
-                break
-            layer_id += 1
-        h = (
-            self.hc_head(h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
-            if self.hc_head is not None
-            else h
-        )
+        if self.output is None:
+            return h
+
+        self._validate_last_stage_hc_head()
+        h = self.hc_head(h)
         prev_embed = h
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h.float()) if self.output is not None else h
         if self.model_args.num_mtp_modules <= 0:
             return output
         else:
+            if raw_tokens is None:
+                raise RuntimeError(
+                    "DeepSeekV4 PP with MTP is not supported by the current "
+                    "input_ids kwargs forwarding path. Please set "
+                    "training.num_mtp_modules=0 when PP is enabled."
+                )
             output_list = [None] * (1 + self.model_args.num_mtp_modules)
             # pyrefly: ignore [unsupported-operation]
             output_list[0] = output
@@ -1451,7 +1464,7 @@ class DeepSeekV4Model(BaseModel):
             for mtp_layer_id in range(self.model_args.num_mtp_modules):
                 token_offset_id = mtp_layer_id + 1
                 token_end_idx = token_offset_id + seq_len
-                token_offset = tokens[:, token_offset_id:token_end_idx]
+                token_offset = raw_tokens[:, token_offset_id:token_end_idx]
                 input_offset = self.tok_embeddings(  # pyrefly: ignore [not-callable]
                     token_offset
                 )
@@ -1466,13 +1479,7 @@ class DeepSeekV4Model(BaseModel):
                     attention_masks,
                     positions=positions,
                 )
-                h = (
-                    self.hc_head(
-                        h, self.hc_head_fn, self.hc_head_scale, self.hc_head_base
-                    )
-                    if self.hc_head is not None
-                    else h
-                )
+                h = self.hc_head(h) if self.hc_head is not None else h
                 prev_embed = h
                 h = self.norm(h) if self.norm is not None else h
                 output = self.output(h.float()) if self.output is not None else h
@@ -1498,12 +1505,10 @@ class DeepSeekV4Model(BaseModel):
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             nn.init.trunc_normal_(self.norm.weight, mean=1, std=0.02)
-        if self.hc_head_fn is not None:
-            nn.init.trunc_normal_(self.hc_head_fn, mean=0.0, std=0.02)
-        if self.hc_head_base is not None:
-            nn.init.trunc_normal_(self.hc_head_base, mean=0.0, std=0.02)
-        if self.hc_head_scale is not None:
-            nn.init.trunc_normal_(self.hc_head_scale, mean=0.0, std=0.02)
+        if self.hc_head is not None:
+            nn.init.trunc_normal_(self.hc_head.hc_head_fn, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(self.hc_head.hc_head_base, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(self.hc_head.hc_head_scale, mean=0.0, std=0.02)
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
@@ -1513,4 +1518,28 @@ class DeepSeekV4Model(BaseModel):
                 std=final_out_std,
                 a=-cutoff_factor * final_out_std,
                 b=cutoff_factor * final_out_std,
+            )
+
+    def _normalize_pp_input_ids(self, input_ids: torch.Tensor | None) -> torch.Tensor:
+        if not isinstance(input_ids, torch.Tensor) or input_ids.ndim != 2:
+            raise RuntimeError(
+                "DeepSeekV4 PP stage requires input_ids kwargs with shape [B, S]."
+            )
+        return input_ids.detach().long()
+
+    def _validate_last_stage_hc_head(self) -> None:
+        hc_head = self.hc_head
+        if hc_head is None:
+            raise RuntimeError(
+                "DeepSeekV4 PP last stage requires hc_head before norm/output."
+            )
+        missing = [
+            name
+            for name in ("hc_head_fn", "hc_head_base", "hc_head_scale")
+            if getattr(hc_head, name, None) is None
+        ]
+        if missing:
+            raise RuntimeError(
+                "DeepSeekV4 PP last stage requires hc_head.* parameters before "
+                f"norm/output, missing {missing}."
             )

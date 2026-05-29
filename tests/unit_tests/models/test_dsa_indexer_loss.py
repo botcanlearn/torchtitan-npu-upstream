@@ -149,7 +149,7 @@ def test_logging_helper_save_and_clean():
 
     DSAIndexerLossLoggingHelper.tracker.clear()
     loss = torch.tensor(0.123)
-    DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss, layer_number=1, num_layers=4)
+    DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss, layer_number=0, num_layers=4)
     assert "values" in DSAIndexerLossLoggingHelper.tracker
     assert DSAIndexerLossLoggingHelper.tracker["values"][0].item() == pytest.approx(
         0.123
