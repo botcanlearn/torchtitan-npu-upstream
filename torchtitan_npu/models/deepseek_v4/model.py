@@ -1199,7 +1199,15 @@ class MTPModule(DeepSeekV4TransformerBlock):
             out_features=model_args.dim,
             bias=False,
         ).build()
-        self.hc_mult = hc_mult = model_args.hc_mult
+        self.mtp_hc_head = HcHead.Config(
+            norm_eps=model_args.norm_eps,
+            hc_eps=model_args.hc_eps,
+            hc_mult=model_args.hc_mult,
+            dim=model_args.dim,
+        ).build()
+        self.mtp_norm = RMSNorm.Config(
+            dim=model_args.dim, eps=model_args.norm_eps
+        ).build()
 
     # pyrefly: ignore [bad-param-name-override]
     def forward(
@@ -1243,11 +1251,14 @@ class MTPModule(DeepSeekV4TransformerBlock):
         x = self.ffn_norm(x)
         x = self.moe(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
-        return x
+        x = self.mtp_hc_head(x)
+        prev_embed = x
+        x = self.mtp_norm(x) if self.mtp_norm is not None else x
+        return prev_embed, x
 
     def init_weights(self, buffer_device: torch.device):
         super().init_weights(buffer_device=buffer_device)
-        for norm in (self.enorm, self.hnorm):
+        for norm in (self.enorm, self.hnorm, self.mtp_norm):
             nn.init.trunc_normal_(norm.weight, mean=1, std=0.02)
         nn.init.trunc_normal_(self.e_proj.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.h_proj.weight, mean=0.0, std=0.02)
@@ -1469,7 +1480,7 @@ class DeepSeekV4Model(BaseModel):
                     token_offset
                 )
                 layer_id = mtp_layer_id + self.model_args.n_layers
-                h = self.layers[str(layer_id)](
+                prev_embed, h = self.layers[str(layer_id)](
                     input_offset,
                     prev_embed,
                     input_ids,
@@ -1479,9 +1490,6 @@ class DeepSeekV4Model(BaseModel):
                     attention_masks,
                     positions=positions,
                 )
-                h = self.hc_head(h) if self.hc_head is not None else h
-                prev_embed = h
-                h = self.norm(h) if self.norm is not None else h
                 output = self.output(h.float()) if self.output is not None else h
                 output_list[mtp_layer_id + 1] = output
         return output_list
