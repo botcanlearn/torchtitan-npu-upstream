@@ -27,7 +27,7 @@ The goals are simple:
 ## What "Smoke" Means Here
 In this repository, smoke tests are not import checks. They are integration-style checks over real execution paths.
 
-`build.sh -s` runs two parts by default:
+`bash .ci/smoke_test.sh` runs two parts by default:
 - Core smoke: minimal end-to-end training path validation
 - Extended smoke: local feature and model-parallel smoke suites
 
@@ -52,13 +52,13 @@ Avoid:
 - Decorative section comments with no real meaning
 
 ## Build Entry Points
-- `build.sh -u`: run all unit tests
-- `build.sh -s`: run all smoke tests
+- `bash .ci/unit_test.sh`: run all unit tests
+- `bash .ci/smoke_test.sh`: run all smoke tests
 
 Useful variants:
-- `ONLY_CORE_SMOKE=true build.sh -s`
-- `ONLY_EXTENDED_SMOKE=true build.sh -s`
-- `ONLY_UPSTREAM_SMOKE=true build.sh -s`
+- `ONLY_CORE_SMOKE=true bash .ci/smoke_test.sh`
+- `ONLY_EXTENDED_SMOKE=true bash .ci/smoke_test.sh`
+- `ONLY_UPSTREAM_SMOKE=true bash .ci/smoke_test.sh`
 
 ## Pre-Submission Checklist
 1. Is the test in the right directory?
