@@ -29,6 +29,8 @@ from torchtitan_npu.converters.model_custom_interface import (
 )
 from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.distributed.process_group import is_fake_process_group
+from torchtitan_npu.models.deepseek_v4.moe import MoE as DeepSeekV4MoE
+
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ def _npu_moe_forward(self, x):
 
     bs, slen, dim = x.shape
     x = x.view(-1, dim)
+    total_tokens = x.shape[0]
 
     # Bypass self.router() entirely.  NoParallel / TP hooks on the gate
     # module convert inputs to DTensors, which then crash when mixed with
@@ -114,8 +117,15 @@ def _npu_moe_forward(self, x):
 
     indices = selected_experts_indices.view(-1, self.reorderer.top_k)
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
+    routed_scores, _ = torch_npu.npu_moe_token_permute(
+        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
+    )
 
-    routed_output = self.experts(routed_input, num_tokens_per_expert)
+    routed_output = self.experts(
+        routed_input,
+        num_tokens_per_expert,
+        routed_scores,
+    )
 
     unpermuted = torch_npu.npu_moe_token_unpermute(
         routed_output,
@@ -123,8 +133,9 @@ def _npu_moe_forward(self, x):
         # Mixing FP32 `topk_score` and BF16 `routed_output` causes
         # MoeTokenUnpermuteGrad to return NaN values. Cast the FP32
         # part to BF16 as a temporary workaround.
-        top_scores.to(x.dtype),
+        None,
     )
+    unpermuted = unpermuted.view(total_tokens, self.reorderer.top_k, dim).sum(dim=1)
     return (out + unpermuted).reshape(bs, slen, dim)
 
 
@@ -145,12 +156,73 @@ class NpuMoE(MoE):
         return _npu_moe_forward(self, x)
 
 
+class NpuDeepSeekV4MoE(DeepSeekV4MoE):
+    def __init__(
+        self,
+        parent: DeepSeekV4MoE,
+    ):
+        # Shallow copy of parent's __dict__ is intentional here:
+        # - MoE attributes are primarily PyTorch modules and buffers (weights should be shared)
+        # - Avoids complex dependency on MoE.__init__ parameters (moe_args, dim, hidden_dim)
+        # - Parent instance already has all attributes properly initialized
+        # Note: If MoE had mutable non-module attributes requiring independent state,
+        # we would need explicit attribute copying instead
+        self.__dict__.update(parent.__dict__)
+
+    def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        return _npu_moe_forward_for_dsv4(self, x, input_ids)
+
+
+def _npu_moe_forward_for_dsv4(self, x, input_ids):
+    bs, slen, dim = x.shape
+    x = x.view(-1, dim)
+    total_tokens = x.shape[0]
+    input_ids_flat = input_ids.flatten() if input_ids is not None else None
+    bias = getattr(self, "expert_bias", None)
+    (top_scores, selected_experts_indices, num_tokens_per_expert) = self.router(
+        x, input_ids_flat, bias
+    )
+
+    with torch.no_grad():
+        self.tokens_per_expert.add_(num_tokens_per_expert)
+
+    indices = selected_experts_indices.view(-1, self.reorderer.top_k)
+    routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
+
+    routed_scores, _ = torch_npu.npu_moe_token_permute(
+        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
+    )
+
+    routed_output = self.experts(
+        routed_input,
+        num_tokens_per_expert,
+        routed_scores,
+    )
+
+    if self.shared_experts is not None:
+        out = self.shared_experts(x)
+    else:
+        out = torch.zeros_like(x)
+
+    unpermuted = torch_npu.npu_moe_token_unpermute(
+        routed_output,
+        sorted_indices,
+        # Mixing FP32 `topk_score` and BF16 `routed_output` causes
+        # MoeTokenUnpermuteGrad to return NaN values. Cast the FP32
+        # part to BF16 as a temporary workaround.
+        None,
+    )
+    unpermuted = unpermuted.view(total_tokens, self.reorderer.top_k, dim).sum(dim=1)
+    return (out + unpermuted).reshape(bs, slen, dim)
+
+
 class NpuPermuteConverter(ModelCustomConverter):
     def convert(self, model: nn.Module):
         for name, module in model.named_modules():
-            if not isinstance(module, MoE):
-                continue
-            replace_module_with_name(model, name, NpuMoE(module))
+            if isinstance(module, MoE):
+                replace_module_with_name(model, name, NpuMoE(module))
+            if isinstance(module, DeepSeekV4MoE):
+                replace_module_with_name(model, name, NpuDeepSeekV4MoE(module))
 
 
 class NpuExpertParallel(ExpertParallel):
@@ -191,11 +263,12 @@ class NpuExpertParallel(ExpertParallel):
             self.output_splits = output_splits.tolist()
         return num_tokens_per_expert_group, self.output_splits
 
+    # pyrefly: ignore [bad-override]
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # annotate module input placements/sharding with input_layouts
-        routed_input, num_tokens_per_expert = inputs
+        routed_input, num_tokens_per_expert, routed_scores = inputs
         ep_degree = device_mesh.shape[0]
         num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
 
@@ -211,6 +284,14 @@ class NpuExpertParallel(ExpertParallel):
                 self.input_splits,
                 device_mesh.get_group(),
             )
+
+            if routed_scores is not None:
+                routed_scores = all_to_all_single_autograd(
+                    routed_scores,
+                    self.output_splits,
+                    self.input_splits,
+                    device_mesh.get_group(),
+                )
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
         # However, the num_tokens_per_expert_group is not of the final target format
@@ -235,12 +316,14 @@ class NpuExpertParallel(ExpertParallel):
         routed_input, self.permuted_indices = torch_npu.npu_moe_token_permute(
             routed_input, indices
         )
+        if routed_scores is not None:
+            routed_scores, _ = torch_npu.npu_moe_token_permute(routed_scores, indices)
 
         num_tokens_per_expert_group = num_tokens_per_expert_group.view(
             ep_degree, -1
         ).sum(0)
 
-        return routed_input, num_tokens_per_expert_group
+        return routed_input, num_tokens_per_expert_group, routed_scores
 
     def _token_combine(
         self, mod: nn.Module, routed_output: torch.Tensor, device_mesh: DeviceMesh

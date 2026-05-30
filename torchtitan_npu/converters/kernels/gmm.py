@@ -46,16 +46,18 @@ def npu_grouped_mm(x, weight, group_list):
 
 
 def _run_experts_grouped_mm(
-    w13: torch.Tensor,
+    w13: torch.Tensor | None,
     w2: torch.Tensor,
-    _w3: torch.Tensor,
+    _w3: torch.Tensor | None,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
     swiglu_limit: float | None = None,
+    routed_scores: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # pyrefly: ignore [missing-attribute]
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int64)
-
+    if w13 is None:
+        raise ValueError("w13 cannot be None for grouped_mm experts")
     h = npu_grouped_mm(x.bfloat16(), w13.bfloat16().transpose(-2, -1), offsets)
     # DSv4 injects ``swiglu_limit`` on its GroupedExperts to bound gate/up before
     # the swiglu activation. Without this clamp the bf16 grouped_mm output can
@@ -67,6 +69,8 @@ def _run_experts_grouped_mm(
         gate = torch.clamp(gate, max=swiglu_limit)
         h = torch.cat([gate, up], dim=-1)
     h = torch_npu.npu_swiglu(h, dim=-1)
+    if routed_scores is not None:
+        h = h * routed_scores.to(h.dtype)
     out = npu_grouped_mm(h, w2.bfloat16().transpose(-2, -1), offsets).type_as(x)
 
     return out
@@ -76,6 +80,7 @@ def npu_grouped_experts_forward(
     self,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    routed_scores: torch.Tensor | None = None,
 ) -> torch.Tensor:
     is_tp = False
     if isinstance(self.w2, DTensor):
@@ -111,7 +116,9 @@ def npu_grouped_experts_forward(
     swiglu_limit = getattr(self, "swiglu_limit", None)
 
     # pyrefly: ignore [bad-argument-type]
-    out = _run_experts_grouped_mm(w13, w2, None, x, num_tokens_per_expert, swiglu_limit)
+    out = _run_experts_grouped_mm(
+        w13, w2, None, x, num_tokens_per_expert, swiglu_limit, routed_scores
+    )
 
     if is_tp and tp_group is not None:
         import torch.distributed as dist
@@ -190,8 +197,11 @@ class NpuGroupedExperts(GroupedExperts):
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        routed_scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return npu_grouped_experts_forward(self, x, num_tokens_per_expert)
+        return npu_grouped_experts_forward(
+            self, x, num_tokens_per_expert, routed_scores
+        )
 
     def init_weights(self, init_std: float):
         npu_grouped_experts_init_weights(self, init_std)

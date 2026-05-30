@@ -66,6 +66,8 @@ get_model_converter_config("npu_dsa")
 
 由于各专家执行结构相同的矩阵乘法，为了将同类矩阵运算合并为一次算子调用，提升计算效率，本ModelConverter 引入分组矩阵乘法（GMM）算子 `npu_grouped_matmul`。该算子接收 [Permute](#permute) 模块输出的重排后 token 及对应的专家索引，在一次调用中并行计算所有专家的同一线性层，如所有专家的 `w1`。
 
+> 注：使用npu_gmm的同时请开启npu_permute配合使用。
+
 **配置示例**：
 ```python
 get_model_converter_config("npu_gmm")

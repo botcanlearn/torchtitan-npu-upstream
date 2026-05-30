@@ -36,6 +36,7 @@ def deepseek_v32_smoketest() -> TrainerConfig:
                 get_model_converter_config("npu_rms_norm"),
                 get_model_converter_config("npu_rope"),
                 get_model_converter_config("npu_permute"),
+                get_model_converter_config("npu_gmm"),
             ],
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
