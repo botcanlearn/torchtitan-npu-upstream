@@ -84,42 +84,53 @@ def test_mtp_mapping_round_trip_preserves_each_mtp_layer_index():
     model_args = _make_model_args(n_layers=4, num_mtp_modules=2)
     adapter = DeepSeekV4StateDictAdapter(model_args, hf_assets_path=None)
 
-    # --- from_hf_mtp: head.weight and tok_emb are skipped ---
-    head_w = torch.randn(3, 4)
-    embed_w = torch.randn(5, 6)
     hf_input_dict = {
-        "head.weight": head_w,
-        "embed.weight": embed_w,
-        "mtp.0.head.weight": head_w,
-        "mtp.1.head.weight": head_w,
-        "mtp.0.emb.tok_emb.weight": embed_w,
-        "mtp.1.emb.tok_emb.weight": embed_w,
+        "mtp.0.enorm.weight": torch.randn(2),
+        "mtp.1.hnorm.weight": torch.randn(2),
         "mtp.0.e_proj.weight": torch.randn(2, 2),
         "mtp.1.h_proj.weight": torch.randn(2, 2),
+        "mtp.0.norm.weight": torch.randn(2),
+        "mtp.1.hc_head_fn": torch.randn(2),
+        "mtp.0.hc_head_base": torch.randn(2),
+        "mtp.1.hc_head_scale": torch.randn(2),
     }
 
     from_hf_dict = adapter.from_hf_mtp(hf_input_dict)
-    assert not any("mtp.0.head.weight" in k for k in from_hf_dict)
-    assert not any("mtp.1.head.weight" in k for k in from_hf_dict)
-    assert not any("tok_emb.weight" in k for k in from_hf_dict)
-    assert "head.weight" in from_hf_dict
-    assert "embed.weight" in from_hf_dict
+    assert "layers.4.enorm.weight" in from_hf_dict
+    assert "layers.5.hnorm.weight" in from_hf_dict
     assert "layers.4.e_proj.weight" in from_hf_dict
     assert "layers.5.h_proj.weight" in from_hf_dict
+    assert "layers.4.norm.weight" in from_hf_dict
+    assert "layers.5.hc_head_fn" in from_hf_dict
+    assert "layers.4.hc_head_base" in from_hf_dict
+    assert "layers.5.hc_head_scale" in from_hf_dict
 
     to_hf_dict = adapter.to_hf_mtp(from_hf_dict)
     assert set(to_hf_dict.keys()) == set(hf_input_dict.keys())
-    assert torch.equal(to_hf_dict["head.weight"], head_w)
-    assert torch.equal(to_hf_dict["embed.weight"], embed_w)
+    assert torch.equal(
+        to_hf_dict["mtp.0.enorm.weight"], hf_input_dict["mtp.0.enorm.weight"]
+    )
+    assert torch.equal(
+        to_hf_dict["mtp.1.hnorm.weight"], hf_input_dict["mtp.1.hnorm.weight"]
+    )
     assert torch.equal(
         to_hf_dict["mtp.0.e_proj.weight"], hf_input_dict["mtp.0.e_proj.weight"]
     )
     assert torch.equal(
         to_hf_dict["mtp.1.h_proj.weight"], hf_input_dict["mtp.1.h_proj.weight"]
     )
-    for mtp_idx in range(model_args.num_mtp_modules):
-        assert torch.equal(to_hf_dict[f"mtp.{mtp_idx}.head.weight"], head_w)
-        assert torch.equal(to_hf_dict[f"mtp.{mtp_idx}.emb.tok_emb.weight"], embed_w)
+    assert torch.equal(
+        to_hf_dict["mtp.0.norm.weight"], hf_input_dict["mtp.0.norm.weight"]
+    )
+    assert torch.equal(
+        to_hf_dict["mtp.1.hc_head_fn"], hf_input_dict["mtp.1.hc_head_fn"]
+    )
+    assert torch.equal(
+        to_hf_dict["mtp.0.hc_head_base"], hf_input_dict["mtp.0.hc_head_base"]
+    )
+    assert torch.equal(
+        to_hf_dict["mtp.1.hc_head_scale"], hf_input_dict["mtp.1.hc_head_scale"]
+    )
 
 
 def test_split_w13_for_mapping_preserves_values_instead_of_placeholders():

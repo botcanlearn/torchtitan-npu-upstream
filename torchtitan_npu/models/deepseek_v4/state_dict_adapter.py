@@ -201,14 +201,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 new_state_dict[f"mtp.{mtp_idx}.{suffix}"] = tensor
             else:
                 new_state_dict[key] = tensor
-        if "head.weight" in state_dict:
-            for mtp_idx in range(mtp_count):
-                new_state_dict[f"mtp.{mtp_idx}.head.weight"] = state_dict["head.weight"]
-        if "embed.weight" in state_dict:
-            for mtp_idx in range(mtp_count):
-                new_state_dict[f"mtp.{mtp_idx}.emb.tok_emb.weight"] = state_dict[
-                    "embed.weight"
-                ]
         return new_state_dict
 
     def to_hf_deepseekv4(self, state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -315,9 +307,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
             mtp_idx = int(match.group(1))
             suffix = match.group(2)
-            # pyrefly: ignore [redundant-condition]
-            if suffix == "head.weight" or suffix == "emb.tok_emb.weight":
-                continue  # skip mtp head weight since it's merged into the last layer's output projection
             if 0 <= mtp_idx < mtp_count:
                 new_state_dict[f"layers.{base + mtp_idx}.{suffix}"] = tensor
             else:
