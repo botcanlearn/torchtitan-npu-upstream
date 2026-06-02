@@ -190,8 +190,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             else:
                 new_key = key
             new_state_dict[new_key] = tensor
-        new_state_dict["mtp.0.head.weight"] = state_dict["head.weight"]
-        new_state_dict["mtp.0.emb.tok_emb.weight"] = state_dict["embed.weight"]
         return new_state_dict
 
     def to_hf_new(self, state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -302,9 +300,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             if match:
                 num = int(match.group(1))
                 rest = match.group(2)
-                # pyrefly: ignore [redundant-condition]
-                if "head.weight" in rest or "tok_emb" in rest:
-                    continue  # skip mtp head weight since it's merged into the last layer's output projection
                 # pyrefly: ignore [missing-attribute]
                 new_key = f"layers.{self.model_args.n_layers}.{rest}"
             else:
