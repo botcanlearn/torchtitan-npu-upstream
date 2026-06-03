@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.config import ActivationCheckpointConfig, CompileConfig, DebugConfig
@@ -12,6 +11,7 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan_npu.config.configs import (
+    CheckpointConfig,
     OptimizerConfig,
     ParallelismConfig,
     ProfilingConfig,
@@ -76,7 +76,7 @@ def deepseek_v4_285b_debug_4_layers() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             load_step=0,
@@ -136,7 +136,7 @@ def deepseek_v4_285b_43layers_4k_128die() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             load_step=0,
@@ -202,7 +202,7 @@ def deepseek_v4_pro_debug_16_layers() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             load_step=0,
@@ -272,7 +272,7 @@ def deepseek_v4_pro_debug_61_layers_4k_384die() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             load_step=0,
@@ -337,7 +337,7 @@ def deepseek_v4_smoketest() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(enable=False),
+        checkpoint=CheckpointConfig(enable=False),
         activation_checkpoint=ActivationCheckpointConfig(mode="none"),
         compile=CompileConfig(enable=False, components=["model", "loss"]),
         profiling=ProfilingConfig(enable_profiling=False),

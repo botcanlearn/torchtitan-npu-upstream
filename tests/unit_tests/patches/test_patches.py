@@ -2,12 +2,95 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import pickle
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from torchtitan_npu.patches.quantization import quantize
 from torchtitan_npu.patches.torch import clip_grad
+
+
+@pytest.mark.parametrize("async_mode", ["disabled", "async", "async_with_pinned_mem"])
+def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(
+    monkeypatch, tmp_path, async_mode
+):
+    from torch.distributed.checkpoint.filesystem import FileSystemWriter
+    from torchtitan.components.checkpoint import AsyncMode
+
+    from torchtitan_npu.patches.torch import checkpoint
+
+    mode = AsyncMode(async_mode)
+    stager = object()
+    upload_future = object()
+    async_response = checkpoint.AsyncSaveResponse(
+        staging_completion=object(),
+        upload_completion=upload_future,
+    )
+    captured = {}
+
+    def fake_dcp_save(*args, storage_writer=None, **kwargs):
+        captured["writer"] = storage_writer
+        captured["kwargs"] = kwargs
+        return "saved"
+
+    def fake_dcp_async_save(*args, storage_writer=None, async_stager=None, **kwargs):
+        captured["writer"] = storage_writer
+        captured["async_stager"] = async_stager
+        captured["kwargs"] = kwargs
+        return async_response
+
+    manager = SimpleNamespace(
+        pg=None,
+        stager=stager,
+        _npu_checkpoint_sync_files=False,
+        _npu_checkpoint_drop_page_cache_after_save=True,
+    )
+
+    monkeypatch.setattr(checkpoint.dcp, "save", fake_dcp_save)
+    monkeypatch.setattr(checkpoint.dcp, "async_save", fake_dcp_async_save)
+
+    result = checkpoint._patched_checkpoint_manager_dcp_save(
+        manager, {}, str(tmp_path / "checkpoint"), mode
+    )
+    writer = captured["writer"]
+
+    assert isinstance(writer, FileSystemWriter)
+    assert writer.sync_files is False
+    writer_with_options: Any = writer
+    assert writer_with_options._npu_drop_page_cache_after_save is True
+
+    restored_writer = pickle.loads(pickle.dumps(writer))
+    restored_writer_with_options: Any = restored_writer
+    assert restored_writer.sync_files is False
+    assert restored_writer_with_options._npu_drop_page_cache_after_save is True
+
+    if mode == AsyncMode.DISABLED:
+        assert result == "saved"
+        assert "async_stager" not in captured
+        assert writer.per_thread_copy_ahead > 0
+    elif mode == AsyncMode.ASYNC:
+        assert result is upload_future
+        assert writer.per_thread_copy_ahead == 0
+        assert captured["async_stager"] is not None
+        assert captured["async_stager"] is not writer
+        assert (
+            captured["async_stager"]._config.use_pinned_memory,
+            captured["async_stager"]._config.use_shared_memory,
+            captured["async_stager"]._config.use_async_staging,
+            captured["async_stager"]._config.use_non_blocking_copy,
+        ) == (False, False, False, False)
+    else:
+        assert result is async_response
+        assert writer.per_thread_copy_ahead == 0
+        assert captured["async_stager"] is stager
+        assert (
+            captured["kwargs"]["async_checkpointer_type"]
+            is checkpoint.AsyncCheckpointerType.PROCESS
+        )
 
 
 def test_register_quantize_module_handler_registers_handler():

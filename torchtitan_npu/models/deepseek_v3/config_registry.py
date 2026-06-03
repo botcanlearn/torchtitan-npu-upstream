@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.config import ActivationCheckpointConfig, DebugConfig
@@ -12,6 +11,7 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan_npu.config.configs import (
+    CheckpointConfig,
     OptimizerConfig,
     ParallelismConfig,
     ProfilingConfig,
@@ -71,7 +71,7 @@ def deepseek_v3_671b_debug() -> TrainerConfig:
             context_parallel_degree=1,
             enable_custom_context_parallel=True,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="./checkpoints/DeepSeek-V3",
             interval=500,
@@ -137,7 +137,7 @@ def deepseek_v3_671b_16die_debug() -> TrainerConfig:
             expert_parallel_degree=4,
             expert_tensor_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             interval=500,
             last_save_model_only=True,
@@ -198,7 +198,7 @@ def deepseek_v3_671b_61layers_4k_128die() -> TrainerConfig:
             expert_parallel_degree=128,
             expert_tensor_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             interval=500,
             last_save_model_only=True,
@@ -256,7 +256,7 @@ def deepseek_v3_smoketest() -> TrainerConfig:
             context_parallel_degree=1,
             enable_custom_context_parallel=True,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
         ),
         activation_checkpoint=ActivationCheckpointConfig(

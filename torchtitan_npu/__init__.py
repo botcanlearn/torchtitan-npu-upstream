@@ -66,6 +66,7 @@ def _apply_patches():
     # async_tp
     # patching torch
     from .patches.torch import (  # noqa: F401
+        checkpoint,
         clip_grad,
         distributed_tensor_api,
         micro_pipeline_tp,

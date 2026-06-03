@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.config import ActivationCheckpointConfig
@@ -12,6 +11,8 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan_npu.config.configs import (
+    CheckpointConfig,
+    OptimizerConfig,
     ParallelismConfig,
     ProfilingConfig,
     TrainerConfig,
@@ -19,7 +20,6 @@ from torchtitan_npu.config.configs import (
 )
 from torchtitan_npu.converters import get_model_converter_config
 from torchtitan_npu.models.deepseek_v32 import model_registry
-from torchtitan_npu.patches.optimizer.swap_optimizer import SwapOptimizersContainer
 
 
 def deepseek_v32_smoketest() -> TrainerConfig:
@@ -41,7 +41,7 @@ def deepseek_v32_smoketest() -> TrainerConfig:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
-        optimizer=SwapOptimizersContainer.Config(
+        optimizer=OptimizerConfig(
             name="AdamW",
             lr=1e-5,
             eps=1e-6,
@@ -67,7 +67,7 @@ def deepseek_v32_smoketest() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(enable=False),
+        checkpoint=CheckpointConfig(enable=False),
         activation_checkpoint=ActivationCheckpointConfig(mode="none"),
         profiling=ProfilingConfig(enable_profiling=False),
     )

@@ -36,13 +36,13 @@
 ## 配置选项
 
 Swap Optimizer 配置在模型的 `config_registry.py` 中，统一使用
-`torchtitan_npu.config.configs.OptimizerConfig`。
+`torchtitan_npu.config.configs.OptimizerConfig`，也可在启动训练时通过 CLI 覆盖。
 
 | 配置项 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `name` | str | "AdamW" | 使用的优化器类型。当前 Swap 特性拦截并支持 `Adam` 和 `AdamW`。 |
-| `swap_optimizer` | bool | false | 是否启用 Swap Optimizer 特性以进行显存流水线卸载。为 false 时使用上游基础 optimizer container。 |
-| `swap_optimizer_times` | int | 16 | 切片划分次数。用于决定优化器参数卸载与加载时的分块大小。值越大，单次峰值显存占用越小，但可能增加系统的流调度开销。 |
+| `name` | str | `"AdamW"` | 使用的优化器类型。当前 Swap 特性拦截并支持 `Adam` 和 `AdamW`。 |
+| `swap_optimizer` | bool | `false` | 是否启用 Swap Optimizer 特性以进行显存流水线卸载。为 `false` 时使用上游基础 optimizer container。 |
+| `swap_optimizer_times` | int | `16` | 切片划分次数。用于决定优化器参数卸载与加载时的分块大小。值越大，单次峰值显存占用越小，但可能增加系统的流调度开销。 |
 
 ### 配置示例
 
@@ -50,7 +50,6 @@ Swap Optimizer 配置在模型的 `config_registry.py` 中，统一使用
 
 ```python
 from torchtitan_npu.config.configs import OptimizerConfig
-
 optimizer = OptimizerConfig(
     name="AdamW",
     lr=3e-4,
@@ -77,6 +76,16 @@ optimizer = OptimizerConfig(
 
 ```bash
 bash scripts/run_train.sh \
-  --optimizer.swap_optimizer \
-  --optimizer.swap_optimizer_times 16
+  --optimizer.swap-optimizer \
+  --optimizer.swap-optimizer-times 16
 ```
+
+## Swap Optimizer 与 Checkpoint
+
+Swap Optimizer 已支持与 TorchTitan DCP checkpoint 组合使用。保存时会等待
+pending swap/offload 完成，并从 CPU cache 保存真实 Adam/AdamW optimizer
+state；加载时会恢复 CPU cache 并重建 device 侧 zero-storage placeholder，
+用于继续训练。
+
+DTensor 参数会保留 device mesh、placements 和全局 shape/stride metadata，
+保存 checkpoint 时不会把 CPU cache tensor 回搬到 NPU。

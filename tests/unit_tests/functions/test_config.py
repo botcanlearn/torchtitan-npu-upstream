@@ -3,6 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from torchtitan_npu.config.configs import (
+    CheckpointConfig,
     OptimizerConfig,
     ParallelismConfig,
     ProfilingConfig,
@@ -69,3 +70,4 @@ def test_trainer_config_uses_custom_config_types_by_default():
     assert isinstance(trainer_config.parallelism, ParallelismConfig)
     assert isinstance(trainer_config.training, TrainingConfig)
     assert isinstance(trainer_config.profiling, ProfilingConfig)
+    assert isinstance(trainer_config.checkpoint, CheckpointConfig)

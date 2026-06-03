@@ -32,6 +32,7 @@ Usage in npu config_registry functions:
 from dataclasses import dataclass, field
 from typing import Literal
 
+from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ParallelismConfig as _BaseParallelismConfig,
@@ -161,6 +162,29 @@ class ProfilingConfig(_BaseProfilingConfig):
 
 
 @dataclass(kw_only=True, slots=True)
+class CheckpointConfig(CheckpointManager.Config):
+    """Checkpoint config with NPU-specific writer and cache controls."""
+
+    sync_files: bool = True
+    """
+    Whether FileSystemWriter fsyncs checkpoint files before returning.
+    Disabling this can reduce checkpoint latency but weakens crash consistency.
+    """
+
+    drop_page_cache_after_save: bool = False
+    """
+    Whether to ask Linux to drop checkpoint file pages from host page cache after writing.
+    This reduces host memory pressure for large checkpoints without changing checkpoint files.
+    """
+
+    empty_cache_after_save: bool = True
+    """
+    Whether to clear the NPU caching allocator after checkpoint save returns.
+    This helps release temporary checkpoint buffers before training resumes.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
 class TrainerConfig(Trainer.Config):
     """Top-level NPU training config.
 
@@ -173,3 +197,4 @@ class TrainerConfig(Trainer.Config):
     parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)  # type: ignore[assignment]
     training: TrainingConfig = field(default_factory=TrainingConfig)  # type: ignore[assignment]
     profiling: ProfilingConfig = field(default_factory=ProfilingConfig)  # type: ignore[assignment]
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)  # type: ignore[assignment]

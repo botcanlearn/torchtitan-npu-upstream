@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
@@ -13,7 +12,7 @@ from torchtitan.hf_datasets.text_datasets import ChatDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
-from torchtitan_npu.config.configs import ParallelismConfig
+from torchtitan_npu.config.configs import CheckpointConfig, ParallelismConfig
 from torchtitan_npu.converters import get_model_converter_config
 from torchtitan_npu.models.qwen3 import model_registry
 
@@ -72,7 +71,7 @@ def sft_qwen3_30ba3b_math() -> Trainer.Config:
         metrics=MetricsProcessor.Config(
             log_freq=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=True,
             folder="checkpoint",
             load_only=False,

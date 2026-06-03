@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.config import ActivationCheckpointConfig, DebugConfig
@@ -12,6 +11,7 @@ from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan_npu.config.configs import (
+    CheckpointConfig,
     OptimizerConfig,
     ParallelismConfig,
     ProfilingConfig,
@@ -74,7 +74,7 @@ def deepseek_v32_671b_4layers_debug() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             interval=10000,
@@ -141,7 +141,7 @@ def deepseek_v32_671b_61layers_4k_128die() -> TrainerConfig:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             interval=10000,
@@ -198,7 +198,7 @@ def deepseek_v32_671b_61layers_32k_128die() -> TrainerConfig:
             context_parallel_degree=8,
             enable_custom_context_parallel=True,
         ),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointConfig(
             enable=False,
             folder="checkpoint",
             interval=10000,
