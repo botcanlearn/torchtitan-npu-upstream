@@ -48,7 +48,7 @@ from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
 from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
-from torchtitan_npu.models.deepseek_v4.model import Attention
+from torchtitan_npu.models.deepseek_v4.model import Attention, MoE as DeepSeekV4MoE
 
 logger = logging.getLogger(__name__)
 
@@ -885,6 +885,8 @@ def _compile_moe_transformer_block(
             continue
         if isinstance(submod, Attention):
             _compile_children_except(submod, {"inner_attention"}, compile_config)
+        elif isinstance(submod, DeepSeekV4MoE):
+            _compile_children_except(submod, {"experts"}, compile_config)
         else:
             setattr(
                 block,
