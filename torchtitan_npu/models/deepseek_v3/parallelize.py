@@ -17,13 +17,6 @@ from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.protocols import ModelConvertersContainer
 
 
-def _is_ulysses_enabled(parallelism: ParallelismConfig) -> bool:
-    return (
-        getattr(parallelism, "enable_custom_context_parallel", False)
-        and parallelism.context_parallel_degree > 1
-    )
-
-
 def parallelize_deepseekv3(
     model: DeepSeekV3Model,
     *,
@@ -35,46 +28,32 @@ def parallelize_deepseekv3(
     ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
-    def _call_upstream_parallelize():
-        return titan_deepseekv3_parallelize.parallelize_deepseekv3(
-            model,
-            parallel_dims=parallel_dims,
-            training=training,
-            model_converters=model_converters,
-            parallelism=parallelism,
-            compile_config=compile_config,
-            ac_config=ac_config,
-            dump_folder=dump_folder,
-        )
+    _upstream_kwargs = dict(
+        parallel_dims=parallel_dims,
+        training=training,
+        model_converters=model_converters,
+        parallelism=parallelism,
+        compile_config=compile_config,
+        ac_config=ac_config,
+        dump_folder=dump_folder,
+    )
 
-    if parallel_dims.cp_enabled and _is_ulysses_enabled(parallelism):
-        cp_mesh = parallel_dims.get_mesh("cp")
-        model_config = model.model_config if hasattr(model, "model_config") else None
-
-        # pyrefly: ignore [missing-attribute, not-callable]
-        n_heads = model_config.layers[0].attention.n_heads if model_config else 128
-        cp_degree = cp_mesh.size()
-
+    if parallel_dims.cp_enabled:
+        cp_degree = parallel_dims.cp
+        first_layer = next(iter(model.layers.values()))
+        n_heads = first_layer.attention.n_heads  # pyrefly: ignore [missing-attribute]
         if n_heads % cp_degree != 0:
             raise ValueError(
                 f"[Ulysses CP] n_heads={n_heads} must be divisible by "
                 f"context_parallel_degree={cp_degree}."
             )
 
-        from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+        from torchtitan_npu.distributed.context_parallel.registry import (
+            apply_cp_to_attention_module as apply_cp,
+        )
 
-        orig_apply_cp = titan_deepseekv3_parallelize.apply_cp_to_attention_module
+        titan_deepseekv3_parallelize.apply_cp_to_attention_module = apply_cp
 
-        def _force_ulysses_cp(attention_modules, cp_mesh):
-            apply_cp_to_attention_module(
-                attention_modules,
-                cp_mesh,
-            )
-
-        titan_deepseekv3_parallelize.apply_cp_to_attention_module = _force_ulysses_cp
-        try:
-            return _call_upstream_parallelize()
-        finally:
-            titan_deepseekv3_parallelize.apply_cp_to_attention_module = orig_apply_cp
-
-    return _call_upstream_parallelize()
+    return titan_deepseekv3_parallelize.parallelize_deepseekv3(
+        model, **_upstream_kwargs
+    )

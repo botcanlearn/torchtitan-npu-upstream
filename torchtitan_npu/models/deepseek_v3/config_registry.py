@@ -69,7 +69,6 @@ def deepseek_v3_671b_debug() -> TrainerConfig:
             expert_parallel_degree=2,
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
-            enable_custom_context_parallel=True,
         ),
         checkpoint=CheckpointConfig(
             enable=False,
@@ -254,7 +253,6 @@ def deepseek_v3_smoketest() -> TrainerConfig:
             expert_parallel_degree=1,
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
-            enable_custom_context_parallel=True,
         ),
         checkpoint=CheckpointConfig(
             enable=False,

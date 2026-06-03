@@ -14,12 +14,6 @@ def _single_rank_parallel_dims():
     return build_parallel_dims()
 
 
-def test_context_parallel_module_import():
-    from torchtitan_npu.distributed.context_parallel import dsa_cp
-
-    assert dsa_cp is not None
-
-
 @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
 def test_auto_calculates_dp_shard():
     parallel_dims = ParallelDims(

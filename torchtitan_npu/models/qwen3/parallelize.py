@@ -37,34 +37,26 @@ def parallelize_qwen3(
         ac_config=ac_config,
         dump_folder=dump_folder,
     )
-    if parallel_dims.cp_enabled:
-        from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 
-        orig_apply_cp = titan_qwen3_parallelize.apply_cp_to_attention_module
-        n_heads = next(  # pyrefly: ignore [missing-attribute]
-            iter(model.layers.values())
-        ).attention.n_heads
+    if parallel_dims.cp_enabled:
         cp_degree = parallel_dims.cp
+        first_layer = next(iter(model.layers.values()))
+        n_heads = first_layer.attention.n_heads  # pyrefly: ignore [missing-attribute]
         if n_heads % cp_degree != 0:
             raise ValueError(
                 f"[Ulysses CP] n_heads={n_heads} must be divisible by "
                 f"context_parallel_degree={cp_degree}."
             )
 
-        def _apply_ulysses_cp(attention_modules, cp_mesh):
-            return apply_cp_to_attention_module(
-                attention_modules,
-                cp_mesh,
-            )
-
-        titan_qwen3_parallelize.apply_cp_to_attention_module = _apply_ulysses_cp
         logger.info(
             f"[Ulysses CP] Qwen3 Ulysses CP enabled: "
             f"cp_degree={cp_degree}, n_heads={n_heads}"
         )
-        try:
-            return titan_qwen3_parallelize.parallelize_qwen3(model, **_upstream_kwargs)
-        finally:
-            titan_qwen3_parallelize.apply_cp_to_attention_module = orig_apply_cp
+
+        from torchtitan_npu.distributed.context_parallel.registry import (
+            apply_cp_to_attention_module as apply_cp,
+        )
+
+        titan_qwen3_parallelize.apply_cp_to_attention_module = apply_cp
 
     return titan_qwen3_parallelize.parallelize_qwen3(model, **_upstream_kwargs)

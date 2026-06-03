@@ -225,8 +225,6 @@ def dsa_forward(
         q_indexer,
         k_indexer,
         weights,
-        actual_seq_lengths_query=None,
-        actual_seq_lengths_key=None,
         layout_query="BSND",
         layout_key="BSND",
         sparse_count=index_topk,
@@ -248,19 +246,12 @@ def dsa_forward(
         k, [self.config.kv_lora_rank, self.config.qk_rope_head_dim], dim=-1
     )
 
-    bsz = q.shape[0]
-    actual_seq_len = torch.full(
-        (bsz,), q_nope.shape[1], dtype=torch.int32, device=q_nope.device
-    )
-
     output, softmax_max, softmax_sum, *_ = torch_npu.npu_sparse_flash_attention(
         q_nope,
         k_nope,
         v,
         sparse_indices=topk_indices.to(torch.int32),
         block_table=None,
-        actual_seq_lengths_query=actual_seq_len,
-        actual_seq_lengths_kv=actual_seq_len,
         query_rope=q_pe,
         key_rope=k_pe,
         scale_value=scale,

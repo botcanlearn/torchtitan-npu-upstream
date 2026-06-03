@@ -98,13 +98,19 @@ class OptimizerConfig(OptimizersContainer.Config):
 
 @dataclass(kw_only=True, slots=True)
 class ParallelismConfig(_BaseParallelismConfig):
-    """Parallelism config with NPU-specific Ulysses CP toggle."""
+    """Parallelism config with NPU-specific CP load balancer override."""
 
-    enable_custom_context_parallel: bool = False
+    context_parallel_load_balancer: str | None = None
     """
-    Whether to use a custom context parallel implementation.
-    When True and context_parallel_degree > 1, Ulysses-style CP is applied
-    to attention modules (DeepSeek-V3 family).
+    NPU override of the upstream default (``"headtail"``).
+
+    The NPU Ulysses CP (DeepSeek-V3/V32/V4) rebuilds the full sequence via an
+    all-to-all and applies a standard contiguous causal mask, which is
+    incompatible with the head/tail (or ptrr) sequence reordering: the
+    reordered sequence breaks causality and degrades accuracy. ``None``
+    disables load balancing (contiguous CP sharding), which is also optimal
+    for Ulysses since every rank already does equal full-sequence attention.
+    To opt back into a reordering balancer, set it explicitly.
     """
 
 

@@ -3,18 +3,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
+"""Ulysses Context Parallel — ParallelStyle with pre/post hooks.
+
+Pre-hook:  all_to_all on Q/K/V to swap heads ↔ sequence across CP ranks.
+Post-hook: reverse all_to_all on the output.
+
+No forward replacement — the original module's internal transpose works
+correctly with the all-to-all'd tensor shapes.
+"""
+
+from functools import partial
+from typing import Any
 
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor.parallel import parallelize_module, ParallelStyle
 
 from torchtitan.models.common.attention import ScaledDotProductAttention
 
+from .registry import register_cp_strategy
+
 
 class AllToAll(torch.autograd.Function):
-    """
-    All-to-all operation with proper gradient handling.
-    Performs all-to-all in forward and backward passes.
+    """All-to-all with scatter on one dim and gather on another.
+
+    Forward:  ``chunk(scatter_dim)`` → ``dist.all_to_all`` → ``cat(gather_dim)``.
+    Backward: reverse — chunk on the forward's gather_dim, all-to-all in
+              reverse direction, cat on the forward's scatter_dim.
     """
 
     @staticmethod
@@ -25,110 +41,83 @@ class AllToAll(torch.autograd.Function):
         ctx.gather_dim = gather_dim
 
         world_size = mesh.size()
-
-        # Split along scatter_dim
         input_list = [
             t.contiguous()
             for t in list(input_tensor.chunk(world_size, dim=scatter_dim))
         ]
         output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
-
-        # All-to-all
-        torch.distributed.all_to_all(output_list, input_list, group=mesh.get_group())
-        # Concatenate along gather_dim
+        dist.all_to_all(output_list, input_list, group=mesh.get_group())
         output = torch.cat(output_list, dim=gather_dim)
         return output
 
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
-        # All-to-all in reverse: swap scatter and gather dims
         world_size = ctx.mesh.size()
 
-        # Backward of "Concatenate along gather_dim" - split along forward's gather_dim
         grad_list = [
             t.contiguous()
             for t in list(grad_output.chunk(world_size, dim=ctx.gather_dim))
         ]
         grad_output_list = [torch.empty_like(grad_list[0]) for _ in range(world_size)]
-
-        # Reversed all-to-all
-        torch.distributed.all_to_all(
-            grad_output_list, grad_list, group=ctx.mesh.get_group()
-        )
-
-        # Backward of "Split along scatter_dim" - concatenate along forward's scatter_dim
+        dist.all_to_all(grad_output_list, grad_list, group=ctx.mesh.get_group())
         grad_input = torch.cat(grad_output_list, dim=ctx.scatter_dim)
-
         return grad_input, None, None, None
 
 
 def all_to_all(input_tensor, mesh, scatter_dim, gather_dim):
-    """
-    Wrapper for all-to-all operation.
-
-    Args:
-        input_tensor: Input tensor
-        mesh: Device mesh for CP group
-        scatter_dim: Dimension to scatter (split and distribute)
-        gather_dim: Dimension to gather (collect and concatenate)
-    """
+    """Safe wrapper around ``AllToAll``."""
     return AllToAll.apply(input_tensor, mesh, scatter_dim, gather_dim)
 
 
-def patch_ulysses_for_context_parallel(*, cp_mesh: DeviceMesh) -> None:
+class UlyssesCP(ParallelStyle):
+    """Ulysses Context Parallel — all-to-all head/sequence swap.
+
+    Applies to ``ScaledDotProductAttention`` modules.  The module's internal
+    transpose between BSND ↔ BNSD works correctly with the all-to-all'd shapes.
     """
-    Patch ScaledDotProductAttention.forward to a Ulysses CP-aware implementation.
 
-    Called from apply_cp_to_attention_module when attention_type == "ulysses".
-    Replaces the class-level forward so every instance automatically performs
-    AllToAll before and after the SDPA kernel.
+    @staticmethod
+    def _pre_hook(
+        module: torch.nn.Module,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        mesh: DeviceMesh,
+    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        q = all_to_all(args[0], mesh, scatter_dim=2, gather_dim=1)
+        k = all_to_all(args[1], mesh, scatter_dim=2, gather_dim=1)
+        v = all_to_all(args[2], mesh, scatter_dim=2, gather_dim=1)
+        return (q, k, v) + args[3:], kwargs
 
-    New ScaledDotProductAttention.forward receives Q/K/V in [B, S, H, D] (BSND)
-    layout and internally transposes to [B, H, S, D] (BNSD) before calling SDPA.
-    We insert AllToAll after the internal transpose so that:
-      - Before A2A:  [B, n_heads,      seq // CP, head_dim]  (BNSD)
-      - After A2A:   [B, n_heads // CP, seq,       head_dim]  (BNSD)
-      - After SDPA:  [B, n_heads // CP, seq,       head_dim]  (BNSD)
-      - After A2A:   [B, n_heads,       seq // CP, head_dim]  (BNSD)
-    Then the original transpose back to BSND continues as normal.
-    """
-    ScaledDotProductAttention.cp_mesh = cp_mesh  # pyrefly: ignore [not-callable]
-    orig_forward = ScaledDotProductAttention.forward
+    @staticmethod
+    def _post_hook(
+        module: torch.nn.Module,
+        args: tuple[Any, ...],
+        output: Any,
+        mesh: DeviceMesh,
+    ) -> Any:
+        return all_to_all(output, mesh, scatter_dim=1, gather_dim=2)
 
-    @functools.wraps(orig_forward)
-    def patched_forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        *,
-        scale: float | None = None,
-        enable_gqa: bool = False,
-        is_causal: bool = True,
-        **kwargs,
-    ):
-        # Transpose to (bs, heads, seq, dim) for SDPA — same as original
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-
-        # Ulysses AllToAll: swap heads dim (1) and seq dim (2)
-        q = all_to_all(q, self.cp_mesh, scatter_dim=1, gather_dim=2)
-        k = all_to_all(k, self.cp_mesh, scatter_dim=1, gather_dim=2)
-        v = all_to_all(v, self.cp_mesh, scatter_dim=1, gather_dim=2)
-
-        from torch.nn.attention import sdpa_kernel
-
-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            out = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa
+    def _apply(
+        self, module: torch.nn.Module, device_mesh: DeviceMesh
+    ) -> torch.nn.Module:
+        if not isinstance(module, ScaledDotProductAttention):
+            raise TypeError(
+                f"UlyssesCP expects ScaledDotProductAttention, got {type(module).__name__}"
             )
+        module.register_forward_pre_hook(
+            partial(self._pre_hook, mesh=device_mesh), with_kwargs=True
+        )
+        module.register_forward_hook(partial(self._post_hook, mesh=device_mesh))
+        return module
 
-        # Reverse AllToAll: swap seq dim (2) and heads dim (1)
-        out = all_to_all(out, self.cp_mesh, scatter_dim=2, gather_dim=1)
 
-        # Transpose back to (bs, seq, heads, dim) — same as original
-        return out.transpose(1, 2)
+def _detect_ulysses(module: torch.nn.Module) -> bool:
+    return isinstance(module, ScaledDotProductAttention)
 
-    ScaledDotProductAttention.forward = (
-        patched_forward  # pyrefly: ignore [bad-assignment]
-    )
+
+def _apply_ulysses(module: torch.nn.Module, cp_mesh: DeviceMesh) -> None:
+    parallelize_module(module, cp_mesh, UlyssesCP())
+
+
+register_cp_strategy(_detect_ulysses, _apply_ulysses)

@@ -208,23 +208,9 @@ def parallelize_deepseekv32(
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
     if parallel_dims.cp_enabled:
-        from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-
-        cp_attn_type = attn_type
-        if attn_type == "sdpa":
-            if has_npu_converter(model_converters.converters, "npu_dsa"):
-                cp_attn_type = "dsa"
-                logger.info(
-                    "CP: npu_dsa converter is active, overriding attn_type 'sdpa' -> 'dsa' "
-                    "for context parallel to avoid DTensor dispatcher intercepting "
-                    "npu_lightning_indexer."
-                )
-            else:
-                raise ValueError(
-                    "CP on deepseek_v32 requires 'npu_dsa' converter when attn_type='sdpa'."
-                )
-
-        logger.info(f"CP: deepseek_v32 route={cp_attn_type}")
+        from torchtitan_npu.distributed.context_parallel.registry import (
+            apply_cp_to_attention_module,
+        )
 
         apply_cp_to_attention_module(
             [
@@ -232,18 +218,6 @@ def parallelize_deepseekv32(
                 for block in model.layers.values()  # pyrefly: ignore [not-callable]
             ],
             parallel_dims.get_mesh("cp"),
-            attention_type=cp_attn_type,  # pyrefly: ignore [unexpected-keyword]
-            # ``job_config`` was the legacy bag passed through to the dsa /
-            # ulysses CP validators; under the new framework we do not have
-            # the full Trainer.Config here. CP path needs Phase 2.5 follow-up
-            # to pass the specific sub-args (parallelism / converters)
-            # explicitly. Default flavors run with cp=1 so this branch is
-            # currently unreachable.
-            model_args=model.model_args,  # pyrefly: ignore [unexpected-keyword]
-            tp_mesh=parallel_dims.get_mesh("tp")  # pyrefly: ignore [unexpected-keyword]
-            if parallel_dims.tp_enabled
-            else None,
-            converters=model_converters.converters,  # pyrefly: ignore [unexpected-keyword]
         )
 
     # Check if using DeepEP for MoE communication
@@ -353,12 +327,7 @@ def apply_non_moe_tp(
     """Apply tensor parallelism."""
 
     # whether the npu_dsa kernel is enabled
-    parallel_cfg = parallelism
-    use_cp = (
-        # pyrefly: ignore [missing-attribute]
-        parallel_cfg.enable_custom_context_parallel
-        and parallel_cfg.context_parallel_degree > 1
-    )
+    use_cp = parallelism.context_parallel_degree > 1
     enable_npu_dsa = has_npu_converter(model_converters.converters, "npu_dsa") or use_cp
     # ``enable_mla_absorb`` lives on the per-layer Attention.Config in the new
     # Config tree. v32 layers share attention shape so layers[0] is canonical.

@@ -125,35 +125,3 @@ def test_parallelize_without_cp_calls_upstream_directly():
         ac_config=mock_upstream.call_args[1]["ac_config"],
         dump_folder="/tmp/test",
     )
-
-
-def test_parallelize_with_cp_patches_and_restores_apply_cp():
-    """When cp_enabled=True and n_heads is divisible by cp_degree,
-    parallelize_qwen3 should:
-    1. Replace apply_cp_to_attention_module with Ulysses variant
-    2. Call upstream parallelize_qwen3
-    3. Restore the original apply_cp_to_attention_module afterwards
-    """
-    import torchtitan.models.qwen3.parallelize as titan_qwen3_parallelize
-
-    from torchtitan_npu.models.qwen3.parallelize import parallelize_qwen3
-
-    orig_apply_cp = titan_qwen3_parallelize.apply_cp_to_attention_module
-
-    mock_model = MagicMock()
-    mock_model.layers = {0: SimpleNamespace(attention=SimpleNamespace(n_heads=32))}
-
-    mock_parallel_dims = MagicMock()
-    mock_parallel_dims.cp_enabled = True
-    mock_parallel_dims.cp = 4
-    mock_parallel_dims.tp_enabled = False
-
-    result, _ = _call_parallelize_qwen3_with_mock_upstream(
-        titan_qwen3_parallelize,
-        parallelize_qwen3,
-        mock_model,
-        mock_parallel_dims,
-    )
-
-    assert result is not None
-    assert titan_qwen3_parallelize.apply_cp_to_attention_module is orig_apply_cp

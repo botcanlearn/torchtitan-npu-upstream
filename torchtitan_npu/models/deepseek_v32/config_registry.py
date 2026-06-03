@@ -196,7 +196,6 @@ def deepseek_v32_671b_61layers_32k_128die() -> TrainerConfig:
             expert_parallel_degree=64,
             expert_tensor_parallel_degree=1,
             context_parallel_degree=8,
-            enable_custom_context_parallel=True,
         ),
         checkpoint=CheckpointConfig(
             enable=False,

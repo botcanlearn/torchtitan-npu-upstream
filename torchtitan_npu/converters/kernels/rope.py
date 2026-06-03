@@ -33,6 +33,32 @@ def _complex_to_interleaved_cos_sin(
     return cos, sin
 
 
+def _select_freqs_cis(
+    freqs_cis_local: torch.Tensor,
+    positions: torch.Tensor | None,
+    seqlen: int,
+) -> torch.Tensor:
+    """Select per-position complex ``freqs_cis`` as ``(seqlen, dim//2)``.
+
+    NPU's gather/index kernels reject complex64, so index the *real* view
+    (interleaved [real, imag] in the last dim) and convert back.
+
+    The fused NPU interleaved RoPE op (``aclnnRotaryPositionEmbeddingV2``)
+    only supports cos/sin broadcast over the batch dim, i.e. positions
+    shared across batch. CP load balancing reorders sequential positions
+    identically for every row, so a per-batch ``positions`` tensor
+    ``(bsz, seqlen)`` carries the same row for all batch entries; use the
+    first row. (Per-document positions under CP differ per row and are not
+    supported by the fused op.)
+    """
+    if positions is None:
+        return freqs_cis_local[0:seqlen]
+    pos = positions[0] if positions.dim() > 1 else positions
+    freqs_cis_real = torch.view_as_real(freqs_cis_local)
+    gathered = freqs_cis_real[pos]
+    return torch.view_as_complex(gathered.contiguous())
+
+
 def _wrap_dtensor_like(
     out_local: torch.Tensor, original_tensor: torch.Tensor, is_dt: bool
 ) -> torch.Tensor:
@@ -106,26 +132,7 @@ def npu_apply_rotary_emb_complex(
     if isinstance(positions, DTensor):
         positions = positions.to_local()
     seqlen = xq_local.shape[1]
-    if positions is None:
-        freqs_cis = freqs_cis_local[0:seqlen]
-    elif positions.size(0) == 1:
-        # NOTE: Indexing into the full freqs_cis table by absolute
-        # positions. Use the real view to avoid complex64 indexing
-        # issues on NPU.
-        freqs_cis_real = torch.view_as_real(freqs_cis_local)
-        freqs_cis_real = freqs_cis_real[positions.squeeze(0)]
-        freqs_cis = torch.view_as_complex(freqs_cis_real)
-    else:
-        freqs_cis_expanded = freqs_cis_local[None, :, None, :].expand(
-            xq_local.shape[0], -1, -1, -1
-        )
-        freqs_cis = torch.gather(
-            freqs_cis_expanded,
-            dim=1,
-            index=positions.unsqueeze(-1)
-            .unsqueeze(-1)
-            .expand(-1, -1, 1, freqs_cis.shape[-1]),
-        ).squeeze(2)
+    freqs_cis = _select_freqs_cis(freqs_cis_local, positions, seqlen)
 
     xq_f = xq_local.float()
     xk_f = xk_local.float()
@@ -161,26 +168,7 @@ def npu_apply_rotary_emb_single_complex(
     if isinstance(positions, DTensor):
         positions = positions.to_local()
     seqlen = x_local.shape[1]
-    if positions is None:
-        freqs_cis = freqs_cis_local[0:seqlen]
-    elif positions.size(0) == 1:
-        # NOTE: Indexing into the full freqs_cis table by absolute
-        # positions. Use the real view to avoid complex64 indexing
-        # issues on NPU.
-        freqs_cis_real = torch.view_as_real(freqs_cis_local)
-        freqs_cis_real = freqs_cis_real[positions.squeeze(0)]
-        freqs_cis = torch.view_as_complex(freqs_cis_real)
-    else:
-        freqs_cis_expanded = freqs_cis_local[None, :, None, :].expand(
-            x_local.shape[0], -1, -1, -1
-        )
-        freqs_cis = torch.gather(
-            freqs_cis_expanded,
-            dim=1,
-            index=positions.unsqueeze(-1)
-            .unsqueeze(-1)
-            .expand(-1, -1, 1, freqs_cis.shape[-1]),
-        ).squeeze(2)
+    freqs_cis = _select_freqs_cis(freqs_cis_local, positions, seqlen)
 
     x_f = x_local.float()
 

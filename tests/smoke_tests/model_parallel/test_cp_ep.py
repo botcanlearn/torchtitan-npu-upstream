@@ -175,18 +175,6 @@ if MULTI_RANK_AVAILABLE:
             _assert_mesh_partition(self.device_type, ("tp", "ep"), "tp", (32, 64))
 
 
-def test_dsa_cp_context(npu_device):
-    try:
-        from torchtitan_npu.distributed.context_parallel.dsa_cp import (
-            AscendDSAContextParallelContext,
-        )
-
-        assert AscendDSAContextParallelContext is not None
-
-    except ImportError:
-        pytest.skip("DSA CP module not available")
-
-
 def test_memory_efficiency_parallel(npu_device):
     # Create model
     model = nn.Sequential(
@@ -210,20 +198,3 @@ def test_memory_efficiency_parallel(npu_device):
 
     # Verify memory usage
     assert peak_mem > initial_mem, "Memory should increase during forward/backward"
-
-
-def test_valid_parallel_config():
-    try:
-        from torchtitan_npu.config.configs import ParallelismConfig
-
-        valid_configs = [
-            {"enable_custom_context_parallel": False},
-            {"enable_custom_context_parallel": True},
-        ]
-
-        for config in valid_configs:
-            parallelism = ParallelismConfig(**config)
-            assert parallelism is not None
-
-    except ImportError:
-        pytest.skip("NPU config module not available")

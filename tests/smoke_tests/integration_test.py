@@ -240,7 +240,6 @@ def _cp_tests() -> List[OverrideDefinitions]:
                     f"--module {_DEEPSEEK_V3_MODULE}",
                     f"--config {_DEEPSEEK_V3_CONFIG}",
                     "--parallelism.context_parallel_degree 2",
-                    "--parallelism.enable_custom_context_parallel",
                 ]
             ],
             "DeepSeek V3 CP Ulysses",

@@ -20,18 +20,6 @@ def test_optimizer_defaults_expose_swap_config():
     assert config.name == "AdamW"
 
 
-def test_parallelism_defaults_expose_custom_context_config():
-    config = ParallelismConfig()
-
-    assert config.enable_custom_context_parallel is False
-
-
-def test_parallelism_accepts_custom_context_override():
-    config = ParallelismConfig(enable_custom_context_parallel=True)
-
-    assert config.enable_custom_context_parallel is True
-
-
 def test_training_defaults_expose_npu_memory_ratio():
     config = TrainingConfig()
 
@@ -41,13 +29,11 @@ def test_training_defaults_expose_npu_memory_ratio():
 def test_trainer_config_accepts_custom_sections():
     trainer_config = TrainerConfig(
         optimizer=OptimizerConfig(swap_optimizer=True, swap_optimizer_times=8),
-        parallelism=ParallelismConfig(enable_custom_context_parallel=True),
         training=TrainingConfig(torch_npu_memory_ratio=0.8),
     )
 
     assert trainer_config.optimizer.swap_optimizer is True
     assert trainer_config.optimizer.swap_optimizer_times == 8
-    assert trainer_config.parallelism.enable_custom_context_parallel is True
     assert trainer_config.training.torch_npu_memory_ratio == 0.8
 
 

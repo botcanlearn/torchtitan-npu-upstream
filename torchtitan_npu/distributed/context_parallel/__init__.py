@@ -3,7 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from . import compressor_attention_cp  # noqa: F401
+from . import compressor_attention_cp, sparse_attention_cp, ulysses_cp  # noqa: F401
 from .registry import apply_cp_to_attention_module, register_cp_strategy
 
 __all__ = [
