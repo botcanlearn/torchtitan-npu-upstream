@@ -1346,14 +1346,6 @@ class DeepSeekV4Model(BaseModel):
                     f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
                 )
             self.max_seq_len = seq_len
-
-            attn_type = getattr(self, "attn_type", "sdpa")
-            if (
-                trainer_config.parallelism.context_parallel_degree > 1
-                and attn_type != "sdpa"
-            ):
-                raise NotImplementedError("CP support is only supported for SDPA.")
-
             self.moe_args.debug_force_load_balance = (
                 trainer_config.debug.moe_force_load_balance
             )

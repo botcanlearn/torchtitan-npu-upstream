@@ -47,6 +47,7 @@ from torchtitan.models.common import moe as moe_module
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
+from torchtitan_npu.converters.registry import has_npu_converter
 from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
 from torchtitan_npu.models.deepseek_v4.model import Attention, MoE as DeepSeekV4MoE
 
@@ -224,14 +225,6 @@ def parallelize_deepseek_v4(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_type={attn_type!r}. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
-
     # patch the indexer loss tracking with distributed version to get the synchronized indexer loss metric
     model_args = cast(Any, model).model_args
     apply_distributed_indexer_loss_tracking(
@@ -263,6 +256,23 @@ def parallelize_deepseek_v4(
             ac_config=ac_config,
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
+
+    if parallel_dims.cp_enabled:
+        from torchtitan_npu.distributed.context_parallel.registry import (
+            apply_cp_to_attention_module,
+        )
+
+        if not has_npu_converter(model_converters.converters, "deepseek_v4_sfa"):
+            raise NotImplementedError(
+                "Context parallel is supported only when DSv4 fusion kernels "
+                "are enabled, please add `deepseek_v4_sfa` to converters."
+            )
+
+        apply_cp_to_attention_module(
+            # pyrefly: ignore[missing-attribute, not-callable]
+            [block.attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+        )
 
     # Check if using DeepEP for MoE communication
     if parallelism.expert_parallel_comm_backend == "deepep":
@@ -375,15 +385,6 @@ def apply_non_moe_tp(
 ):
     """Apply tensor parallelism."""
 
-    # whether the npu_dsa kernel is enabled
-    parallel_cfg = parallelism
-    use_cp = (
-        # pyrefly: ignore [missing-attribute]
-        parallel_cfg.enable_custom_context_parallel
-        and parallel_cfg.context_parallel_degree > 1
-    )
-    converter_names = {type(c).__name__.lower() for c in model_converters.converters}
-    enable_npu_dsa = ("npu_dsa" in converter_names) or use_cp
     enable_activation_checkpoint = ac_config.mode in [
         "full",
         "selective",
