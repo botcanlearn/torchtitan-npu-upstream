@@ -1,4 +1,4 @@
-# 多Token预测特性（Multi Token Prediction， MTP）
+# 多Token预测特性（Multi Token Prediction，MTP）
 
 在大规模语言模型的训练与推理优化中，MTP 通过单次前向传播同时预测多个连续目标 Token，大幅提升模型训练效率与数据利用率。传统单 Token 预测仅能学习逐词依赖关系，MTP 则通过扩展预测长度、引入辅助损失函数，显著加速模型收敛速度，尤其在长文本、代码、多轮对话等任务上效果显著。
 torchtitan_npu在DeepSeek-V3.2模型的基础上进一步适配了MTP训练特性，实现了可配置长度的MTP训练，同时支持FSDP2/EP/TP等分布式训练。
