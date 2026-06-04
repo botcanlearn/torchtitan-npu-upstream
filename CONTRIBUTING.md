@@ -7,7 +7,7 @@
 请注意以下原则，以确保 PR 顺利合入：
 
 1. Fork 仓库，从 `master` 创建你的分支，从 Fork 仓库提交 PR。
-2. 若新增/修改代码可能影响现有功能，请补充或更新 UT 测试。详见 [测试文档](./docs/test_guides/test_design_zh.md) 。
+2. 若新增/修改代码可能影响现有功能，请补充或更新 UT 测试。详见 [测试文档](./docs/test_guides/test_design.md) 。
 3. 确保格式检查通过（`pre-commit run --all-files`）。详见 [Lint 指南](./docs/lint_guide.md) 。
 4. 确保同步更新文档（`README.md` / `docs/`）。
 5. 确保所有单元测试和冒烟测试通过。

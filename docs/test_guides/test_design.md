@@ -1,67 +1,64 @@
-# Test Design
+# 测试设计
 
-## Purpose
-This document explains the current test layering in `torchtitan-npu` and helps contributors decide where a new test should live.
+## 文档目的
+这份文档说明 `torchtitan-npu` 当前的测试分层，帮助开发者判断测试新用例应该放在哪一层。
 
-The goals are simple:
-- Keep unit tests fast and hardware-independent
-- Keep smoke tests focused on real execution paths
-- Make test placement easy to understand for new contributors
+测试目标：
+- 单元测试保持快速、硬件无关
+- 冒烟测试聚焦真实执行链路
+- 让开发者更容易判断测试该写在哪里
 
-## Test Layers
-| Layer | Directory | NPU Required | Use Cases |
+## 测试分层
+| 分层 | 目录 | 是否需要 NPU | 适用场景 |
 |---|---|---|---|
-| Function UT | `tests/unit_tests/functions/` | No | Pure functions, config parsing, helpers, validation logic |
-| Module UT | `tests/unit_tests/modules/` | No | Wrappers, checkpoint logic, distributed initialization logic |
-| Converter UT | `tests/unit_tests/converters/` | No | Converter registration, replacement, and mapping logic |
-| Patch UT | `tests/unit_tests/patches/` | No | Patch activation, wiring, and small patch behavior |
-| Feature Smoke | `tests/smoke_tests/features/` | Yes | Real NPU feature paths, fused ops, wrapper execution chains |
-| Model Parallel Smoke | `tests/smoke_tests/model_parallel/` | Yes | CP/TP/EP behavior, mesh setup, DTensor, model-parallel scenarios |
+| 函数级单元测试 | `tests/unit_tests/functions/` | 否 | 纯函数、配置解析、小工具、参数校验 |
+| 模块级单元测试 | `tests/unit_tests/modules/` | 否 | wrapper、checkpoint、分布式初始化等模块逻辑 |
+| 转换器单元测试 | `tests/unit_tests/converters/` | 否 | converter 注册、替换、映射逻辑 |
+| 补丁单元测试 | `tests/unit_tests/patches/` | 否 | patch 激活、接线和小范围行为验证 |
+| 特性冒烟测试 | `tests/smoke_tests/features/` | 是 | 真实 NPU 特性链路、融合算子、wrapper 执行链 |
+| 模型并行冒烟测试 | `tests/smoke_tests/model_parallel/` | 是 | CP/TP/EP、mesh、DTensor、模型并行场景 |
 
-## How to Choose a Layer
-- If the test can run without NPU, prefer UT
-- If the value of the test depends on real NPU execution, use smoke
-- If the change is about mesh, shard, placement, or DTensor behavior, use model-parallel smoke
-- If the change is about a small helper or pure transformation, keep it in UT
+## 怎么判断放哪层
+- 不需要 NPU 就能验证的，优先放单元测试
+- 必须依赖真实 NPU 才有意义的，放冒烟测试
+- 涉及 mesh、shard、placement、DTensor 的，放模型并行冒烟测试
+- 只是小工具或纯转换逻辑的，放单元测试
 
-## What "Smoke" Means Here
-In this repository, smoke tests are not import checks. They are integration-style checks over real execution paths.
+## 本仓里的 Smoke 是什么
+这里的 smoke 不是简单的导入检查，而是对真实执行链路做集成式验证。
 
-`bash .ci/smoke_test.sh` runs two parts by default:
-- Core smoke: minimal end-to-end training path validation
-- Extended smoke: local feature and model-parallel smoke suites
+`bash .ci/smoke_test.sh` 会先跑 torchtitan-npu 集成 smoke（`run_torchtitan_npu_smoke`，
+内部驱动 `integration_test.py`），再跑 `pytest tests/smoke_tests`。
 
-Upstream smoke is kept as a separate targeted entry. It is heavier, takes longer, and may be affected by low-level hardware issues, so it is not part of the default smoke path.
 
-## Rules for Adding Tests
-1. Prefer real behavior validation over import-only checks.
-2. Do not add placeholder tests that only make the suite look larger.
-3. Keep UT fully hardware-independent.
-4. Use smoke only when the behavior matters on real NPU.
-5. If a test depends on external artifacts or a special runtime setup, state that clearly.
+## 新增测试的基本规则
+1. 优先验证真实行为，不要只做导入检查。
+2. 不要用 placeholder 测试充数。
+3. 单元测试必须保持硬件无关。
+4. 只有在真实 NPU 上才有意义的行为，才放到 smoke。
+5. 如果测试依赖外部产物或特殊运行环境，要写清楚。
 
-## Readability Guidelines
-- Use test names that describe behavior and expected outcome directly
-- Keep setup short and easy to scan
-- Use blank lines to separate Arrange, Act, and Assert when it helps readability
-- Let assertions show the exact behavior being protected
+## 可读性要求
+- 测试名直接表达“行为 + 预期结果”
+- setup 尽量简短
+- 必要时用空行区分 Arrange、Act、Assert
+- 断言要直接体现这个测试在保护什么
 
-Avoid:
-- Long per-test docstrings
-- Comments that just restate the test name
-- Decorative section comments with no real meaning
+避免：
+- 很长的测试函数 docstring
+- 只是重复测试名的注释
+- 没有实际意义的分隔线注释
 
-## Build Entry Points
-- `bash .ci/unit_test.sh`: run all unit tests
-- `bash .ci/smoke_test.sh`: run all smoke tests
+## 执行入口
+- `bash .ci/unit_test.sh`：运行全部单元测试
+- `bash .ci/smoke_test.sh`：运行全部冒烟测试
 
-Useful variants:
-- `ONLY_CORE_SMOKE=true bash .ci/smoke_test.sh`
-- `ONLY_EXTENDED_SMOKE=true bash .ci/smoke_test.sh`
-- `ONLY_UPSTREAM_SMOKE=true bash .ci/smoke_test.sh`
+常用定向命令：
+- `python tests/smoke_tests/integration_test.py <输出目录> --test_name <name>`：单独跑某个集成用例
+- `python3 -m pytest tests/smoke_tests/model_parallel/`：直接跑模型并行 smoke
 
-## Pre-Submission Checklist
-1. Is the test in the right directory?
-2. Does it validate real behavior instead of a placeholder path?
-3. Can a new contributor understand the test quickly?
-4. If the change affects test execution or test usage, did you update the docs?
+## 提交前自查
+1. 测试是不是放在正确目录？
+2. 验证的是不是实际行为，而不是占位路径？
+3. 其他开发者能不能很快看懂这条测试？
+4. 如果改动影响了测试入口或使用方式，文档有没有同步更新？

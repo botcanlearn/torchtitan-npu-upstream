@@ -149,7 +149,7 @@ layer_plan = {
 # ──────────────────────────────────────────────────
 # 2. 并行计划修改器（可选）
 # ──────────────────────────────────────────────────
-from torchtitan_npu.converters.parallelize_plan_updater import ParallelizePlanUpdater
+from torchtitan_npu.converters.model_custom_interface import ParallelizePlanUpdater
 
 class GMMParallelizePlanUpdater(ParallelizePlanUpdater):
     @classmethod
@@ -170,7 +170,7 @@ class GMMParallelizePlanUpdater(ParallelizePlanUpdater):
 # ──────────────────────────────────────────────────
 # 3. 权重格式转换器（可选）
 # ──────────────────────────────────────────────────
-from torchtitan_npu.converters.state_dict_updater import StateDictUpdater
+from torchtitan_npu.converters.model_custom_interface import StateDictUpdater
 
 class GMMStateDictUpdater(StateDictUpdater):
     @classmethod

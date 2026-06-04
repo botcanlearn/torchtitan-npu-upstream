@@ -1,75 +1,69 @@
-# Test Guide
+# 测试使用指南
 
-## Core Commands
-### Unit Tests
+## 常用命令
+### 单元测试
 ```bash
-# Run all unit tests and generate reports
-bash .ci/unit_test.sh --generate-report
+# 运行全部单元测试（带 NPU patch 的 torchtitan 上游 UT + 本仓 torchtitan-npu UT）
+bash .ci/unit_test.sh
 
-# Run only local `torchtitan-npu` unit tests
-RUN_TORCHTITAN_UT=false bash .ci/unit_test.sh --generate-report
+# 只运行本仓 `torchtitan-npu` 的单元测试（直接用 pytest）
+python3 -m pytest -v --tb=short tests/unit_tests
 ```
 
-### Smoke Tests
+### 冒烟测试
 ```bash
-# Run the default smoke suite (core + extended)
-bash .ci/smoke_test.sh --generate-report
-
-# Run only core smoke
-ONLY_CORE_SMOKE=true bash .ci/smoke_test.sh --generate-report
-
-# Run only extended smoke
-ONLY_EXTENDED_SMOKE=true bash .ci/smoke_test.sh --generate-report
-
-# Run only upstream smoke
-ONLY_UPSTREAM_SMOKE=true bash .ci/smoke_test.sh --generate-report
+# 运行 smoke 套件（torchtitan-npu 集成 smoke + tests/smoke_tests）
+bash .ci/smoke_test.sh
 ```
 
-### Integration Test
+> 注意：`.ci/smoke_test.sh` 中 `run_torchtitan_smoke`（上游集成 smoke 路径）当前被注释掉，
+> 因此默认运行只执行 torchtitan-npu 集成 smoke 和 `pytest tests/smoke_tests`。
 
-`tests/smoke_tests/integration_test.py` is the entry point for end-to-end integration tests, used to validate:
-- New model functionality support
-- Feature compatibility
-- Parallelism strategy compatibility
+### 集成测试 (Integration Test)
 
-#### Running
+`tests/smoke_tests/integration_test.py` 是端到端集成测试入口，用于验证：
+- 新增模型功能支持情况
+- 特性兼容性
+- 并行策略兼容性
+
+#### 运行方式
 
 ```bash
-# Via .ci/smoke_test.sh (runs core + extended smoke by default)
-ONLY_CORE_SMOKE=true bash .ci/smoke_test.sh --generate-report
+# 通过 .ci/smoke_test.sh 运行（集成 smoke 是套件的一部分）
+bash .ci/smoke_test.sh
 
-# Run integration_test.py directly
+# 独立运行 integration_test.py
 python tests/smoke_tests/integration_test.py output_dir \
     --test_name all \
     --ngpu 2
 ```
 
-#### Command-line Arguments
+#### 命令行参数
 
-| Argument | Default | Description |
+| 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `output_dir` | None (required) | Output directory for test results |
-| `--test_name` | `all` | Specific test case name |
-| `--ngpu` | `2` | Maximum GPU count |
+| `output_dir` | 无（必填） | 测试输出目录 |
+| `--test_name` | `all` | 指定测试用例名称 |
+| `--ngpu` | `2` | 最大 GPU 数 |
 
-#### OverrideDefinitions Usage
+#### OverrideDefinitions 使用说明
 
-`OverrideDefinitions` is the configuration class for defining integration test cases:
+`OverrideDefinitions` 是定义集成测试用例的配置类：
 
 ```python
 OverrideDefinitions(
-    override_args=[[...]],  # Required: command-line argument list
-    test_descr="...",        # Required: test description
-    test_name="...",         # Required: test name
-    ngpu=2,                  # Optional: required GPU count
-    disabled=False,          # Optional: whether disabled
+    override_args=[[...]],  # 必填：命令行参数列表
+    test_descr="...",        # 必填：测试描述
+    test_name="...",         # 必填：测试名称
+    ngpu=2,                  # 可选：所需 GPU 数
+    disabled=False,          # 可选：是否禁用
 )
 ```
 
-#### Steps to Add a New Test Case
+#### 新增测试用例步骤
 
-1. Open `tests/smoke_tests/integration_test.py`
-2. Add a new configuration to the `smoke_cases` list in `generate_smoke_tests()`:
+1. 打开 `tests/smoke_tests/integration_test.py`
+2. 在 `generate_smoke_tests()` 函数的 `smoke_cases` 列表中添加新配置：
 ```python
 OverrideDefinitions(
     [
@@ -84,52 +78,47 @@ OverrideDefinitions(
     ngpu=2,
 )
 ```
-3. Run tests to verify:
+3. 运行测试验证：
 ```bash
 python tests/smoke_tests/integration_test.py ./outputs --test_name your_model_tp
 ```
 
-#### Config Registry Configuration
+#### Config Registry 配置
 
-Integration tests no longer use `tests/smoke_tests/base_test.toml`. Each test passes
-`--module` and `--config` to `scripts/run_train.sh`, then appends nested tyro overrides
-such as `--training.steps 2` or `--parallelism.tensor_parallel_degree 2`.
+集成测试每个测试用例会向`scripts/run_train.sh` 传入 `--module` 和 `--config`，再追加 `tyro` 嵌套覆盖参数，例如
+`--training.steps 2` 或 `--parallelism.tensor_parallel_degree 2`。
 
-### Model Parallel Commands
+### 模型并行专项命令
 ```bash
-# Basic model-parallel smoke
+# 基础模型并行冒烟测试
 python3 -m pytest -v tests/smoke_tests/model_parallel/
 
-# Multi-rank model-parallel smoke
+# 多进程模型并行冒烟测试
 RUN_MODEL_PARALLEL_MULTI_RANK=true torchrun --nproc_per_node=4 -m pytest -v tests/smoke_tests/model_parallel/
 ```
 
-## When to Use Which Command
-| Command | Use It When |
+## 什么时候用哪个命令
+| 命令 | 适用场景 |
 |---|---|
-| `.ci/unit_test.sh` | You changed hardware-independent logic such as converters, config, helpers, or patches |
-| `.ci/smoke_test.sh` | You changed real NPU execution paths or wrapper behavior and want the default core + extended smoke set |
-| `ONLY_CORE_SMOKE=true` | You changed the minimal training path (i.e., end-to-end integration tests defined in integration_test) |
-| `ONLY_EXTENDED_SMOKE=true` | You changed local feature or model-parallel behavior |
-| `ONLY_UPSTREAM_SMOKE=true` | You changed logic that depends on reused torchtitan upstream integration, or want to run the heavier upstream smoke path separately |
+| `.ci/unit_test.sh` | 修改的是硬件无关逻辑，比如 converter、config、helper、patch |
+| `.ci/smoke_test.sh` | 修改的是真实 NPU 执行链路或 wrapper 行为，需要跑集成 smoke |
+| `python tests/smoke_tests/integration_test.py ... --test_name <name>` | 需要单独跑某个端到端集成测试用例 |
+| `python3 -m pytest tests/smoke_tests/model_parallel/` | 修改了模型并行行为 |
 
-## Quick Decision Rule
-- Changed only hardware-independent logic: start with `.ci/unit_test.sh`
-- Changed NPU feature paths or wrappers: run `.ci/smoke_test.sh`
-- Changed training-path wiring: at least run `ONLY_CORE_SMOKE=true .ci/smoke_test.sh`
-- Changed model-parallel behavior: run `ONLY_EXTENDED_SMOKE=true .ci/smoke_test.sh`
-- Upstream integration compatibility needs a separate check: run `ONLY_UPSTREAM_SMOKE=true .ci/smoke_test.sh`
+## 快速判断
+- 只改了硬件无关逻辑：先跑 `.ci/unit_test.sh`
+- 改了 NPU 特性链路或 wrapper：跑 `.ci/smoke_test.sh`
+- 改了训练主链路接线：用 `integration_test.py --test_name <name>` 定向跑对应用例
+- 改了模型并行行为：跑 `pytest tests/smoke_tests/model_parallel/`
 
-## Test Reports
-- Output directory: `test_reports/`
-- Common artifacts:
-  - `*.xml`: JUnit results
-  - `*.html`: HTML reports when `--generate-report` is enabled
-  - `coverage/`: UT coverage reports
-  - `README.md`: generated index of report artifacts
+## 测试报告
+- 输出目录：`test_reports/`
+- 常见产物：
+  - `smoke_test.log`：torchtitan-npu 集成 smoke 日志
+  - `integration_tests/`：集成测试结果目录
 
-## Quick Tips
-1. Start with the smallest command that matches your change.
-2. Prefer `.ci/unit_test.sh` when NPU is not required.
-3. Use targeted smoke variants instead of full smoke when possible.
-4. Update docs when test layout or execution changes.
+## 使用建议
+1. 先跑和改动最匹配的最小命令。
+2. 不依赖 NPU 的改动，优先跑 `.ci/unit_test.sh`。
+3. 能用 `integration_test.py --test_name <name>` 定向跑单个用例时，就不要默认全量跑 smoke。
+4. 如果测试布局或执行方式变了，记得同步更新文档。

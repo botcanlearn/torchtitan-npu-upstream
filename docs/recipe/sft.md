@@ -78,7 +78,7 @@ torchtitan-npu 为 Qwen3 提供了 Ulysses 风格的 CP 实现。在配置中设
 bash scripts/run_train.sh --parallelism.context_parallel_degree 4
 ```
 
-关于 Ulysses CP 的实现原理和约束条件，详见[自定义 Context Parallel 特性文档](parallelism/custom_cp.md)。
+关于 Ulysses CP 的实现原理和约束条件，详见[自定义 Context Parallel 特性文档](../feature_guides/parallelism/custom_cp.md)。
 
 ## 权重加载与保存
 
@@ -99,7 +99,7 @@ SFT 配置默认从 HuggingFace 格式加载预训练权重：
 
 ```bash
 --checkpoint.initial_load_path /path/to/your/model \
---model.hf_assets_path /path/to/your/model
+--hf_assets_path /path/to/your/model
 ```
 
 ### 保存训练后的权重
