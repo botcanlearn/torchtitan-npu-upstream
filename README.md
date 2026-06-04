@@ -29,14 +29,14 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 # 最新消息
 
 ---
-- [May. 2026]: 🚀 **DeepSeek-V4 支持CP序列切分**:基于 ParallelStyle 方式实现 DeepSeek-V4-Flash 模型 64K 序列切分功能支持。
-- [May. 2026]: 🚀 **[DeepSeek-V4-Pro 模型续训练支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseekv4/README.md)**:基于纯FSDP + 大EP极简切分，使能AutoFuse特性，达成训练入图。
-- [Apr. 2026]: 🚀 **[DeepSeek-V4-Flash 续训练 0day 支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseekv4/README.md)**:基于纯FSDP + 大EP极简切分，使能AutoFuse特性，达成训练入图，开箱即优。
-- [Apr. 2026]: 🚀 **【重要特性支持】算子自动融合**:基于AscendC AutoFuse的能力，支持torch.compile + Inductor后端的算子自动融合。
-- [Apr. 2026]: 🚀 **torchtitan‑npu 正式开源**:在 NPU 上支持 4D 并行等 torchtitan 原生特性，并引入 Swap Optimizer 等 NPU 亲和优化。
+- [May. 2026]: 🚀 **DeepSeek-V4 支持CP序列切分**：基于 ParallelStyle 方式实现 DeepSeek-V4-Flash 模型 64K 序列切分功能支持。
+- [May. 2026]: 🚀 **[DeepSeek-V4-Pro 模型续训练支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseekv4/README.md)**：基于纯FSDP + 大EP极简切分，使能AutoFuse特性，达成训练入图。
+- [Apr. 2026]: 🚀 **[DeepSeek-V4-Flash 续训练 0day 支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseekv4/README.md)**：基于纯FSDP + 大EP极简切分，使能AutoFuse特性，达成训练入图，开箱即优。
+- [Apr. 2026]: 🚀 **【重要特性支持】算子自动融合**：基于AscendC AutoFuse的能力，支持torch.compile + Inductor后端的算子自动融合。
+- [Apr. 2026]: 🚀 **torchtitan‑npu 正式开源**：在 NPU 上支持 4D 并行等 torchtitan 原生特性，并引入 Swap Optimizer 等 NPU 亲和优化。
 
 ***
-* [TorchTitan-NPU 0day支持DeepSeekV4续训练，助力训练场景轻松入图，开箱即优](https://gitcode.com/cann/cann-recipes-train/blob/master/docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md)
+* [TorchTitan-NPU 0day支持DeepSeek-V4续训练，助力训练场景轻松入图，开箱即优](https://gitcode.com/cann/cann-recipes-train/blob/master/docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md)
 
 # Roadmap
 
@@ -89,7 +89,7 @@ pip install -e .
       <td>✅</td>
     </tr>
     <tr>
-      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/parallelism/custom_cp.md">自定义 CP (DeepSeek V3.2 CP/SDPA Ulysses CP)</a></td>
+      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/parallelism/custom_cp.md">自定义 CP (DeepSeek-V3.2 CP/SDPA Ulysses CP)</a></td>
       <td>❌</td>
       <td>✅</td>
     </tr>
@@ -147,7 +147,7 @@ torchtitan-npu/
 │   ├── config/         # 对Config的补丁
 │   ├── converters/     # 基于torchtitan ModelConverter机制的补丁
 │   ├── distributed/    # 自定义分布式代码
-│   ├── models/         # 基于torchtitan-npu的模型 (如Deepseek-V3.2)
+│   ├── models/         # 基于torchtitan-npu的模型 (如DeepSeek-V3.2)
 │   ├── patches/        # 其他补丁
 │   ├── tools/          # 工具补丁
 │   ├── entry.py        # 启动训练
@@ -167,11 +167,11 @@ torchtitan-npu/
 System: Atlas 800T A3
 | Model              | Number of NPUs | Precision | GBS | Local BS | Sequence Length | FSDP | TP  | PP  | CP  | EP  | Throughput (tokens/p/s) | MFU |
 | :----------------- | :------------- | :-------- | :-- | :------- | :-------------- | :--- | :-- | :-- | :-- | :-- | :----------- | :-- |
-| [DeepSeek-V4-Flash](https://gitcode.com/cann/torchtitan-npu/blob/master/torchtitan_npu/models/deepseek_v4/train_configs/deepseek_v4_285b_43layers_4k_128die.toml) | 64             | BF16      | 1024  | 1       | 4096            | 128   | 1   | 1   | 1   | 128  | 1110          | 29.07% |
-| [DeepSeek-V3.2-671B](https://gitcode.com/cann/torchtitan-npu/blob/master/torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_61layers_32k_128die.toml) | 64             | BF16      | 128  | 1       | 32768           | 4    | 4   | 1   | 8  | 64  | 103           | / |
-| [DeepSeek-V3.2-671B](https://gitcode.com/cann/torchtitan-npu/blob/master/torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_61layers_4k_128die.toml) | 64             | BF16      | 512  | 1        | 4096            | 32   | 4   | 1   | 1   | 64  | 146           | / |
-| [DeepSeek-V3-671B](https://gitcode.com/cann/torchtitan-npu/blob/master/torchtitan_npu/models/deepseek_v3/train_configs/deepseek_v3_671b_61layers_4k_128die.toml)   | 64             | BF16      | 1024 | 1       | 4096            | 32   | 4   | 1   | 1   | 128  | 546          | / |
-| [DeepSeek-V3-671B + compile(Autofuse)](https://gitcode.com/cann/torchtitan-npu/blob/master/torchtitan_npu/models/deepseek_v3/train_configs/deepseek_v3_671b_61layers_4k_128die.toml)   | 64             | BF16      | 1024 | 1       | 4096            | 32   | 4   | 1   | 1   | 128  |     576      | / |
+| [DeepSeek-V4-Flash](https://gitcode.com/cann/torchtitan-npu/blob/v0.2.2-dev/torchtitan_npu/models/deepseek_v4/train_configs/deepseek_v4_285b_43layers_4k_128die.toml) | 64             | BF16      | 1024  | 1       | 4096            | 128   | 1   | 1   | 1   | 128  | 1110          | 29.07% |
+| [DeepSeek-V3.2-671B](https://gitcode.com/cann/torchtitan-npu/blob/v0.2.2-dev/torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_61layers_32k_128die.toml) | 64             | BF16      | 128  | 1       | 32768           | 4    | 4   | 1   | 8  | 64  | 103           | / |
+| [DeepSeek-V3.2-671B](https://gitcode.com/cann/torchtitan-npu/blob/v0.2.2-dev/torchtitan_npu/models/deepseek_v32/train_configs/deepseek_v32_671b_61layers_4k_128die.toml) | 64             | BF16      | 512  | 1        | 4096            | 32   | 4   | 1   | 1   | 64  | 146           | / |
+| [DeepSeek-V3-671B](https://gitcode.com/cann/torchtitan-npu/blob/v0.2.2-dev/torchtitan_npu/models/deepseek_v3/train_configs/deepseek_v3_671b_61layers_4k_128die.toml)   | 64             | BF16      | 1024 | 1       | 4096            | 32   | 4   | 1   | 1   | 128  | 546          | / |
+| [DeepSeek-V3-671B + compile(Autofuse)](https://gitcode.com/cann/torchtitan-npu/blob/v0.2.2-dev/torchtitan_npu/models/deepseek_v3/train_configs/deepseek_v3_671b_61layers_4k_128die.toml)   | 64             | BF16      | 1024 | 1       | 4096            | 32   | 4   | 1   | 1   | 128  |     576      | / |
  > 注：以上MoE模型的性能数据均开启负载均衡配置moe_force_load_balance=true。
 
 # 免责声明

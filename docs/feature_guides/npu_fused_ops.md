@@ -33,9 +33,9 @@ converters = ["npu_dsa", "npu_rms_norm", "npu_permute", "npu_gmm"]
 
 DSA 是DeepSeek-V3.2中引入的一种特殊注意力机制，主要由图中的两个模块构成：**Lightning Indexer** 筛选出少量高价值token的索引；这些索引被用于高效的 **稀疏 Attention 计算** (图中 Multi-Query Attention部分)。
 
-针对 DeepSeek V3.2 模型的 Attention 模块，将以上两种核心组件替换为对应的 NPU 融合算子。具体对应关系如下：
+针对 DeepSeek-V3.2 模型的 Attention 模块，将以上两种核心组件替换为对应的 NPU 融合算子。具体对应关系如下：
 
-| DeepSeek V3.2 Attention 组件              | NPU融合算子                                 |
+| DeepSeek-V3.2 Attention 组件              | NPU融合算子                                 |
 | ----------------------------------------- | ------------------------------------------- |
 | Lightning Indexer 前向计算                | `npu_lightning_indexer`                     |
 | Lightning Indexer 反向计算（梯度 + Loss） | `npu_sparse_lightning_indexer_grad_kl_loss` |
@@ -51,7 +51,7 @@ converters = [... "npu_dsa", ...] # 添加 `npu_dsa` 配置项
 
 -----------
 
-## GMM（Grouped MatMul）
+## GMM(Grouped MatMul)
 
 在 MoE 模块中，每个专家执行前馈网络（FFN）运算：如 Swiglu FFN：输入先经过升维变换 `w1`，再通过激活函数，最后经过降维变换 `w2` 得到输出。
 

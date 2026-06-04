@@ -4,7 +4,7 @@
 
 ## 数据准备
 
-1. 下载 Tokenizer [（以 DeepSeekV3.2 网络为例）](https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main)。
+1. 下载 Tokenizer [（以 DeepSeek-V3.2 网络为例）](https://huggingface.co/deepseek-ai/DeepSeek-V3.2/tree/main)。
 
 新建 "deepseekv3.2-tokenizer" 目录，将 `tokenizer.json` 和 `tokenizer_config.json` 文件下载至该目录。
 
