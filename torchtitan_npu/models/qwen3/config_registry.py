@@ -9,6 +9,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import ActivationCheckpointConfig, TrainingConfig
 from torchtitan.hf_datasets.text_datasets import ChatDataLoader
+from torchtitan.models.qwen3.config_registry import qwen3_0_6b as _upstream_qwen3_0_6b
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
@@ -82,3 +83,19 @@ def sft_qwen3_30ba3b_math() -> Trainer.Config:
             mode="selective",
         ),
     )
+
+
+def qwen3_06b_test() -> Trainer.Config:
+    config = _upstream_qwen3_0_6b()
+    config.model_spec = model_registry("0.6B")
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            get_model_converter_config("npu_rms_norm"),
+            get_model_converter_config("npu_rope"),
+        ],
+    )
+    config.dataloader.dataset = "c4_test"
+    config.lr_scheduler.warmup_steps = 20
+    config.training.steps = 100
+    config.checkpoint.initial_load_in_hf = True
+    return config
