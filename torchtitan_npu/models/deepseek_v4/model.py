@@ -337,6 +337,20 @@ class GetAttnScores(Module):
         attn = attn.sum(dim=1)
         return attn
 
+    def forward_sparse(
+        self,
+        query,
+        selected_key,
+        selected_mask,
+        attn_scale,
+    ):
+        attn = torch.einsum("bshd,bskd->bshk", query, selected_key) * attn_scale
+        attn.masked_fill_(~selected_mask.unsqueeze(2), torch.finfo(attn.dtype).min)
+        attn = F.softmax(attn, dim=-1, dtype=torch.float32)
+        attn.masked_fill_(~selected_mask.unsqueeze(2), 0.0)
+        attn = attn.sum(dim=2)
+        return attn
+
 
 class LiLoss(Module):
     @dataclass(kw_only=True, slots=True)
@@ -371,27 +385,23 @@ class LiLoss(Module):
         weights,
         compress_topk_idxs,
         index_score,
-        attention_masks,
         offset,
     ):
         compress_topk_idxs = torch.where(
             compress_topk_idxs == -1, compress_topk_idxs, compress_topk_idxs - offset
         )
-        main_attn_dist = self.get_attn_scores(
-            q.transpose(1, 2).detach(),
-            kv_compress.unsqueeze(1).detach(),
-            attention_masks,
-            self.n_heads,
+        valid_topk_mask = compress_topk_idxs != -1
+        gather_idxs = compress_topk_idxs.clamp_min(0)
+        selected_kv = torch.gather(
+            kv_compress.detach().unsqueeze(1).expand(-1, q.size(1), -1, -1),
+            dim=2,
+            index=gather_idxs.unsqueeze(-1).expand(-1, -1, -1, kv_compress.size(-1)),
+        )
+        selected_main_attn_dist = self.get_attn_scores.forward_sparse(
+            q.detach(),
+            selected_kv,
+            valid_topk_mask,
             self.softmax_scale,
-        )
-        # torch.gather rejects the -1 marking masked slots; clamp to 0 to make it
-        # legal, then zero those slots since index 0 is a real, attended position.
-        sentinel_idx = compress_topk_idxs.clamp(min=0)
-        selected_main_attn_dist = torch.gather(
-            main_attn_dist, dim=-1, index=sentinel_idx
-        )
-        selected_main_attn_dist = selected_main_attn_dist.masked_fill(
-            compress_topk_idxs < 0, 0.0
         )
         loss = self.compute_dsa_indexer_loss(
             selected_main_attn_dist,
@@ -738,7 +748,7 @@ class InnerAttention(Module):
             if layer_id < args.n_layers
             else args.mtp_layer_compress_ratio
         )
-        self.use_sfa = args.use_sfa
+        self.use_smla = args.use_smla
 
         self.attn_sink = nn.Parameter(torch.empty(args.n_heads, dtype=torch.float32))
         self.sparse_attn = SparseAttention.Config(layer_id=layer_id, args=args).build()
@@ -765,7 +775,7 @@ class InnerAttention(Module):
         seqlen: int,
         attention_masks=None,
     ):
-        offset = 0 if self.use_sfa else kv.size(1)
+        offset = 0 if self.use_smla else kv.size(1)
         compress_topk_idxs = index_score = None
         has_li = (
             self.compress_ratio > 1
@@ -789,7 +799,6 @@ class InnerAttention(Module):
                 weights,
                 compress_topk_idxs,
                 index_score,
-                attention_masks,
                 offset,
             )
             o = DSAIndexerLossAutoScaler.apply(o, loss)
@@ -1326,7 +1335,7 @@ class DeepSeekV4Model(BaseModel):
         beta_fast: int = 32
         beta_slow: int = 1
         n_layers: int = 4
-        use_sfa: bool = False
+        use_smla: bool = False
         num_mtp_modules: int = 0
         mtp_layer_compress_ratio: int = 1
 
@@ -1352,15 +1361,15 @@ class DeepSeekV4Model(BaseModel):
             self.moe_args.load_balance_coeff = self.load_balance_coeff
             self.moe_args.n_hash_layers = getattr(self.moe_args, "n_hash_layers", 3)
             # The converter list holds dynamically-generated Config instances
-            # (e.g. ``DeepSeekV4SFAKernelConfig``), not the kernel classes
+            # (e.g. ``NpuSMLAKernelConfig``), not the kernel classes
             # themselves, so matching on ``type(c).__name__`` silently fails
             # after the f7d0133 config refactor. Use the registry helper which
             # matches on the ``_model_config.name`` attribute the converter
             # registry attaches to each Config.
             from torchtitan_npu.converters import has_npu_converter
 
-            self.use_sfa = has_npu_converter(
-                trainer_config.model_converters.converters, "deepseek_v4_sfa"
+            self.use_smla = has_npu_converter(
+                trainer_config.model_converters.converters, "npu_smla"
             )
             self.num_mtp_modules = trainer_config.training.num_mtp_modules
             if (

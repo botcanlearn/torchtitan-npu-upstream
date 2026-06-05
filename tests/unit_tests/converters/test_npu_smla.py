@@ -8,14 +8,14 @@ from unittest.mock import MagicMock
 
 import torch
 
-import torchtitan_npu.converters.kernels.deepseek_v4_sfa as sfa_mod
-from torchtitan_npu.converters.kernels.deepseek_v4_sfa import NpuSparseAttention
+import torchtitan_npu.converters.kernels.npu_smla as smla_mod
+from torchtitan_npu.converters.kernels.npu_smla import NpuSparseAttention
 
 _mock_fused_fn = MagicMock()
-sfa_mod.SparseAttnSharedKV.apply = _mock_fused_fn
+smla_mod.SparseAttnSharedKV.apply = _mock_fused_fn
 
 
-class TestSFANPUKernel(unittest.TestCase):
+class TestSMLANPUKernel(unittest.TestCase):
     def setUp(self):
         self.batch_size = 2
         self.seq_len_q = 1024

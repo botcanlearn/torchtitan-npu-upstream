@@ -8,13 +8,13 @@ from unittest.mock import MagicMock
 
 import torch
 
-import torchtitan_npu.converters.kernels.deepseek_v4_sfa as sfa_mod
-from torchtitan_npu.converters.kernels.deepseek_v4_sfa import NpuLiCompute
+import torchtitan_npu.converters.kernels.npu_smla as smla_mod
+from torchtitan_npu.converters.kernels.npu_smla import NpuLiCompute
 
 _mock_fused_fn = MagicMock()
 _mock_li_op = MagicMock()
 _mock_li_op.npu_lightning_indexer = _mock_fused_fn
-sfa_mod._li_op = _mock_li_op
+smla_mod._li_op = _mock_li_op
 
 
 class TestLIKernel(unittest.TestCase):

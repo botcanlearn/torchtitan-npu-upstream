@@ -6,6 +6,8 @@
 
 import logging
 
+import torch
+import torch_npu
 from torch import nn, Tensor
 
 from torchtitan_npu.converters.convert_utils import replace_module_with_name
@@ -16,9 +18,119 @@ from torchtitan_npu.converters.model_custom_interface import (
 from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.models.deepseek_v4.model import HcHead, HcPost, HcPre
 from torchtitan_npu.ops.triton import MHCPostTriton, MHCPreOnlyTriton, MHCPreTriton
+from torchtitan_npu.tools.device import get_npu_device_type
 
 
 logger = logging.getLogger(__name__)
+
+
+def _none_grads(count: int) -> tuple[None, ...]:
+    return (None,) * count
+
+
+class MHCPre(torch.autograd.Function):
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(ctx, *args):
+        x, weight, hc_scale, hc_base, hc_mult, sinkhorn_iters, norm_eps, hc_eps = args
+        weight = weight.to(torch.float32)
+        hc_scale = hc_scale.to(torch.float32)
+        hc_base = hc_base.to(torch.float32)
+        (
+            y,
+            post,
+            comb_frag,
+            h_pre,
+            hc_before_norm,
+            inv_rms,
+            sum_out,
+            norm_out,
+        ) = torch_npu.npu_hc_pre(
+            x=x,
+            hc_fn=weight,
+            hc_scale=hc_scale,
+            hc_base=hc_base,
+            hc_mult=hc_mult,
+            hc_sinkhorn_iters=sinkhorn_iters,
+            norm_eps=norm_eps,
+            hc_eps=hc_eps,
+            need_grad=True,
+        )
+
+        ctx.save_for_backward(
+            x,
+            weight,
+            hc_scale,
+            hc_base,
+            h_pre,
+            hc_before_norm,
+            inv_rms,
+            sum_out,
+            norm_out,
+        )
+        ctx.hc_eps = hc_eps
+        return y, post, comb_frag
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        grad_y, grad_h_post, grad_h_res = grad_outputs
+        (
+            x,
+            weight,
+            hc_scale,
+            hc_base,
+            h_pre,
+            hc_before_norm,
+            inv_rms,
+            sum_out,
+            norm_out,
+        ) = ctx.saved_tensors
+
+        grad_x, grad_phi, grad_alpha, grad_bias = torch_npu.npu_mhc_pre_sinkhorn_grad(
+            grad_hin=grad_y,
+            grad_h_post=grad_h_post,
+            grad_h_res=grad_h_res,
+            x=x,
+            phi=weight,
+            alpha=hc_scale,
+            bias=hc_base,
+            h_pre=h_pre,
+            hc_before_norm=hc_before_norm,
+            inv_rms=inv_rms,
+            sum_out=sum_out,
+            norm_out=norm_out,
+            hc_eps=ctx.hc_eps,
+        )
+
+        return grad_x, grad_phi, grad_alpha, grad_bias, *_none_grads(4)
+
+
+class MHCPost(torch.autograd.Function):
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(ctx, *args):
+        x, residual, h_post, h_res = args
+        y = torch_npu.npu_hc_post(
+            x=x,
+            residual=residual,
+            post=h_post,
+            comb=h_res,
+        )
+        ctx.save_for_backward(x, residual, h_post, h_res)
+        return y
+
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        (grad_output,) = grad_outputs
+        x, residual, h_post, h_res = ctx.saved_tensors
+        grad_x, grad_residual, grad_h_post, grad_h_res = torch_npu.npu_mhc_post_grad(
+            comb_grad=grad_output,
+            F_out=x,
+            x_l=residual,
+            h_post=h_post,
+            h_res=h_res,
+        )
+        return grad_x, grad_residual, grad_h_post, grad_h_res
 
 
 class NpuHcPre(HcPre):
@@ -84,6 +196,29 @@ class NpuHcPre(HcPre):
         return y, h_post, h_res
 
 
+class NpuHcPreFused(HcPre):
+    def __init__(self, parent: HcPre):
+        self.__dict__.update(parent.__dict__)
+
+    def forward(
+        self,
+        x: Tensor,
+        hc_fn: Tensor,
+        hc_scale: Tensor,
+        hc_base: Tensor,
+    ):
+        return MHCPre.apply(
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            self.hc_mult,
+            self.hc_sinkhorn_iters,
+            self.norm_eps,
+            self.hc_eps,
+        )
+
+
 class NpuHcPost(HcPost):
     def __init__(self, parent: HcPost):
         # Shallow copy of parent's __dict__ is intentional here:
@@ -139,6 +274,22 @@ class NpuHcPost(HcPost):
         return y
 
 
+class NpuHcPostFused(HcPost):
+    def __init__(self, parent: HcPost):
+        self.__dict__.update(parent.__dict__)
+
+    def forward(
+        self,
+        x: Tensor,
+        residual: Tensor,
+        post: Tensor,
+        comb: Tensor,
+    ):
+        dim_b, dim_s, dim_n, dim_d = residual.shape
+        y = MHCPost.apply(x, residual, post, comb)
+        return y.view(dim_b, dim_s, dim_n, dim_d)
+
+
 class NpuHcHead(HcHead):
     def __init__(self, parent: HcHead):
         # Shallow copy of parent's __dict__ is intentional here:
@@ -187,9 +338,15 @@ class NpuHcHead(HcHead):
 
 class MHCPreConverter(ModelCustomConverter):
     def convert(self, model: nn.Module):
-        for name, module in model.named_modules():
+        use_fused_kernel = get_npu_device_type() == "A5"
+        if use_fused_kernel:
+            # pyrefly: ignore [missing-import]
+            import custom_ops  # noqa: F401
+
+        hc_pre_cls = NpuHcPreFused if use_fused_kernel else NpuHcPre
+        for name, module in list(model.named_modules()):
             if isinstance(module, HcPre):
-                replace_module_with_name(model, name, NpuHcPre(module))
+                replace_module_with_name(model, name, hc_pre_cls(module))
                 logger.info("[MHCPreConverter] [HcPre forward] Applied.")
 
 
@@ -200,12 +357,18 @@ class MHCPrePostModelConfig(ModelCustomConfig):
 
 class MHCPostConverter(ModelCustomConverter):
     def convert(self, model: nn.Module):
-        for name, module in model.named_modules():
+        use_fused_kernel = get_npu_device_type() == "A5"
+        if use_fused_kernel:
+            # pyrefly: ignore [missing-import]
+            import custom_ops  # noqa: F401
+
+        hc_post_cls = NpuHcPostFused if use_fused_kernel else NpuHcPost
+        for name, module in list(model.named_modules()):
             if isinstance(module, HcPost):
-                replace_module_with_name(model, name, NpuHcPost(module))
+                replace_module_with_name(model, name, hc_post_cls(module))
                 logger.info("[MHCPostConverter] [HcPost forward] Applied.")
 
-            if isinstance(module, HcHead):
+            if not use_fused_kernel and isinstance(module, HcHead):
                 replace_module_with_name(model, name, NpuHcHead(module))
                 logger.info("[MHCPostConverter] [HcHead forward] Applied.")
 

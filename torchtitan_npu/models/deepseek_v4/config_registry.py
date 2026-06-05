@@ -30,7 +30,7 @@ def _default_converters() -> list:
         get_model_converter_config("npu_permute"),
         get_model_converter_config("npu_gmm"),
         get_model_converter_config("npu_rope"),
-        get_model_converter_config("deepseek_v4_sfa"),
+        get_model_converter_config("npu_smla"),
         get_model_converter_config("npu_mhc_pre"),
     ]
 

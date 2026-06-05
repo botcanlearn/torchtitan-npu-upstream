@@ -262,10 +262,10 @@ def parallelize_deepseek_v4(
             apply_cp_to_attention_module,
         )
 
-        if not has_npu_converter(model_converters.converters, "deepseek_v4_sfa"):
+        if not has_npu_converter(model_converters.converters, "npu_smla"):
             raise NotImplementedError(
                 "Context parallel is supported only when DSv4 fusion kernels "
-                "are enabled, please add `deepseek_v4_sfa` to converters."
+                "are enabled, please add `npu_smla` to converters."
             )
 
         apply_cp_to_attention_module(
