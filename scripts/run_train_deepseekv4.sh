@@ -7,8 +7,8 @@
 # [TODO]
 # current branch is not stable , please clone torchtitan and checkout ac13e536.
 
-source /usr/local/Ascend/cann/set_env.sh
-source /usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash
+# NOTE: Source the CANN env scripts in your shell before running this script.
+# See docs/user-guides/quickstart.md "配置 CANN 环境变量".
 
 NGPU=${NGPU:-"16"}
 export LOG_RANK=${LOG_RANK:-0}

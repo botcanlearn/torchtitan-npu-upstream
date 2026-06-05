@@ -7,6 +7,9 @@
 # [TODO]
 # current branch is not stable , please clone torchtitan and checkout ac13e536.
 
+# NOTE: Source the CANN env scripts in your shell before running this script.
+# See docs/user-guides/quickstart.md "配置 CANN 环境变量".
+
 NGPU=${NGPU:-"16"}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"torchtitan_npu.models.deepseek_v32"}

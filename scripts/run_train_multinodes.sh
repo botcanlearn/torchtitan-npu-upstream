@@ -8,11 +8,8 @@ ps -ef |grep -i torchrun |grep -i [name] |grep -v grep |awk '{print $2}' |xargs 
 ps -ef |grep -i ray |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
 ps -ef |grep -i vllm |grep -i [name] |grep -v grep |awk '{print $2}' |xargs -t -I {} kill -9 {}
 
-# TODO change to your environment
-source /usr/local/Ascend/cann/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-# When enabling custom operators, you need to enable the following command
-# source /usr/local/Ascend/vendors/custom_transformer/bin/set_env.bash
+# NOTE: Source the CANN env scripts in your shell before running this script.
+# See docs/user-guides/quickstart.md "配置 CANN 环境变量".
 
 export HCCL_CONNECT_TIMEOUT=7200
 export HCCL_EXEC_TIMEOUT=7200

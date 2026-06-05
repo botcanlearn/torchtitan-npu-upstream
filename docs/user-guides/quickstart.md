@@ -41,11 +41,19 @@ cd ../..
 
 ## 配置 CANN 环境变量
 
-```bash
-source /usr/local/Ascend/cann/set_env.sh
-```
+启动训练前，需要先在当前 shell 中加载 CANN 相关环境变量。启动脚本（`run_train.sh` /
+`run_train_deepseekv4.sh` / `run_train_multinodes.sh`）本身不再内置这些 `source` 命令，请按需自行执行：
 
-如果环境中使用的是其他 CANN 安装路径，请按实际路径调整。
+```bash
+# CANN 基础环境（必需）
+source /usr/local/Ascend/cann/set_env.sh
+
+# ATB 加速库环境（使用 ATB 融合算子时必需）
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+# 自定义算子环境（仅在启用 custom operators 时需要）
+source /usr/local/Ascend/vendors/custom_transformer/bin/set_env.bash
+```
 
 ## 启动训练任务
 
