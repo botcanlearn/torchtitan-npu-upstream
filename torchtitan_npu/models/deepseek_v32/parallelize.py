@@ -200,7 +200,6 @@ def parallelize_deepseekv32(
             tp_mesh,
             loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            parallelism=parallelism,
             model_converters=model_converters,
             ac_config=ac_config,
             cp_enabled=parallel_dims.cp_enabled,
@@ -211,6 +210,12 @@ def parallelize_deepseekv32(
         from torchtitan_npu.distributed.context_parallel.registry import (
             apply_cp_to_attention_module,
         )
+
+        if not has_npu_converter(model_converters.converters, "npu_dsa"):
+            raise NotImplementedError(
+                "Context parallel is supported for deepseek_v32 only when DSA "
+                "fusion kernels are enabled, please add `npu_dsa` to converters."
+            )
 
         apply_cp_to_attention_module(
             [
@@ -319,7 +324,6 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     *,
-    parallelism: ParallelismConfig,
     model_converters: ModelConvertersContainer.Config,
     ac_config: ActivationCheckpointConfig,
     cp_enabled: bool,
@@ -327,8 +331,7 @@ def apply_non_moe_tp(
     """Apply tensor parallelism."""
 
     # whether the npu_dsa kernel is enabled
-    use_cp = parallelism.context_parallel_degree > 1
-    enable_npu_dsa = has_npu_converter(model_converters.converters, "npu_dsa") or use_cp
+    enable_npu_dsa = has_npu_converter(model_converters.converters, "npu_dsa")
     # ``enable_mla_absorb`` lives on the per-layer Attention.Config in the new
     # Config tree. v32 layers share attention shape so layers[0] is canonical.
     enable_mla_absorb = getattr(
