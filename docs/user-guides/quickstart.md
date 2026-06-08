@@ -42,7 +42,7 @@ cd ../..
 ## 配置 CANN 环境变量
 
 启动训练前，需要先在当前 shell 中加载 CANN 相关环境变量。启动脚本（`run_train.sh` /
-`run_train_deepseekv4.sh` / `run_train_multinodes.sh`）本身不再内置这些 `source` 命令，请按需自行执行：
+`run_train_multinodes.sh`）本身不再内置这些 `source` 命令，请按需自行执行：
 
 ```bash
 # CANN 基础环境（必需）
@@ -52,7 +52,7 @@ source /usr/local/Ascend/cann/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 # 自定义算子环境（仅在启用 custom operators 时需要）
-source /usr/local/Ascend/vendors/custom_transformer/bin/set_env.bash
+source /usr/local/Ascend/cann/opp/vendors/custom_transformer/bin/set_env.bash
 ```
 
 ## 启动训练任务
@@ -76,8 +76,8 @@ bash scripts/run_train.sh \
 ```
 
 > [!NOTE]
-> * `MODULE`: 指定模型 Python 模块，例如 `torchtitan_npu.models.deepseek_v32`。
-> * `CONFIG`: 指定 `config_registry.py` 中的配置函数，例如 `deepseek_v32_671b_4layers_debug`。
+> * `MODULE`: 指定模型 Python 模块，默认 `torchtitan_npu.models.deepseek_v32`。切换模型时改为对应模块，例如 DeepSeek-V4 改为 `torchtitan_npu.models.deepseek_v4`。
+> * `CONFIG`: 指定 `config_registry.py` 中的配置函数，默认 `deepseek_v32_671b_4layers_debug`。需与 `MODULE` 对应同一模型，例如 DeepSeek-V4 改为 `deepseek_v4_285b_debug_4_layers`。
 > * `NGPU`: 指定单节点参与训练的 NPU 数量，`scripts/run_train.sh` 默认值为 16。
 > * `--training.steps` 与 `--training.global_batch_size`: 动态覆盖 registry 配置中的字段。
 
@@ -104,6 +104,7 @@ bash scripts/run_train_multinodes.sh
 > [!NOTE]
 > * 脚本会自动通过 `LOCAL_HOST` 匹配 `IPs` 数组以推导当前机器的 `NODE_RANK`。若提取规则错误导致未匹配成功，脚本将报错退出。
 > * 多机通信依赖相应的端口开放，请确保 `MASTER_PORT` (默认 6300) 以及 HCCL 通信基础端口 (默认 30000) 不被防火墙拦截。
+> * 脚本中设置的 `HCCL_CONNECT_TIMEOUT`、`HCCL_EXEC_TIMEOUT`、`ACL_DEVICE_SYNC_TIMEOUT` 等通信与超时相关环境变量，可按集群规模和网络状况调整，各变量含义详见[《CANN 环境变量参考》](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/900/maintenref/envvar/envref_07_0001.html)。
 
 
 ### 排查启动报错:查看更多 rank 日志
