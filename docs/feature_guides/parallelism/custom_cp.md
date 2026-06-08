@@ -23,11 +23,10 @@ torchtitan_npu在`torchtitan_npu/patches/distributed/custom_context_parallel.py`
 | `context_parallel_degree` | int | 1 | Context并行度 |
 | `enable_custom_context_parallel` | bool | false | 是否启用自定义CP |
 
-> **注意**：`enable_custom_context_parallel` 目前仅对 DeepSeek-V3 和 DeepSeek-V3.2 的并行化实现生效，其他模型（如 Llama3）的并行化实现暂不支持。
-
 CP类型由框架根据模型及转换器配置**自动选择**，无需手动指定：
 - **DeepSeek-V3**：启用自定义CP后自动使用 Ulysses CP。
 - **DeepSeek-V3.2**：当 `model.converters` 中包含 `npu_dsa` 时，自动使用 DSA CP。
+- **DeepSeek-V4**：当 `model.converters` 中包含 `deepseek_v4_sfa` 时，自动使用基于前置注意力的 WindowExchange + AllGather KV CP。
 
 
 ### 配置示例：SDPA Ulysses CP（DeepSeek-V3）
@@ -54,4 +53,19 @@ converters = ["npu_dsa", "npu_rms_norm", "npu_permute", "npu_gmm", "npu_rope"]  
 [parallelism]
 context_parallel_degree = 2
 enable_custom_context_parallel = true
+```
+
+### 配置示例：PreAttention Context Parallel（DeepSeek-V4）
+
+DeepSeek-V4 的 CP 策略要求启用 `deepseek_v4_sfa` 融合 NPU 算子，框架通过 WindowExchange（P2P 窗口交换）+ AllGather 压缩 KV 的方式实现 CP。
+
+```toml
+[job]
+custom_config_module = "torchtitan_npu.config.custom_config"    # 使能本代码仓的自定义配置
+
+[model]
+converters = ["npu_rms_norm", "npu_permute", "npu_gmm", "npu_rope", "deepseek_v4_sfa", "npu_mhc_pre"]    # 需包含 deepseek_v4_sfa 以启用 CP
+
+[parallelism]
+context_parallel_degree = 2
 ```
