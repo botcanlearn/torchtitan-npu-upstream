@@ -25,6 +25,7 @@ torchtitan/experiments/flux/assets/*
 *.log
 error.json
 _remote_module_non_scriptable.py
+pipeline_logs
 
 # Editor temporaries (VIM)
 [._]*.s[a-v][a-z]
@@ -59,3 +60,6 @@ Sessionx.vim
 .codex/rules
 .codex/*.bak.*
 AGENTS.md
+.agents/skills/_remote/
+.agents/skills/gitcode-pr
+.agents/skills/gitcode-pipeline

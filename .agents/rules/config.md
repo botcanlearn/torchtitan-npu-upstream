@@ -34,8 +34,10 @@ paths:
 
 ### NPU 自定义配置隔离
 
-- NPU 特有的配置字段放在 `torchtitan_npu/config/custom_config.py`，不要修改上游的配置定义。
-- 自定义配置应继承或扩展上游配置结构，保持兼容性。
+- NPU 特有的配置字段当前集中在 `torchtitan_npu/config/configs.py`，不要修改上游的配置定义。
+- 如果配置继续增长，可以拆分到 `torchtitan_npu/config/` 下的子模块，但需保持 `configs.py` 的导出兼容，避免破坏现有 config registry。
+- 自定义配置应继承或扩展上游配置结构，顶层配置通过继承 `torchtitan.trainer.Trainer.Config` 暴露给 tyro，保持 CLI 兼容性。
+- 使用 `dataclasses.replace()` 修改配置时注意它是浅拷贝；嵌套 dataclass、list、dict 会共享引用，需要修改嵌套结构时显式深拷贝。
 
 ### 配置与 Patch 的关系
 

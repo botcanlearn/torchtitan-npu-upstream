@@ -20,7 +20,7 @@ parse_frontmatter_field() {
   local key="$2"
 
   awk -v key="${key}" '
-    BEGIN { in_frontmatter=0; separator_count=0 }
+    BEGIN { in_frontmatter=0; separator_count=0; capture_block=0 }
     /^---[[:space:]]*$/ {
       separator_count++
       if (separator_count == 1) {
@@ -31,9 +31,24 @@ parse_frontmatter_field() {
         exit
       }
     }
+    capture_block {
+      if ($0 ~ /^[[:space:]]+/) {
+        sub(/^[[:space:]]+/, "", $0)
+        if ($0 != "") {
+          print $0
+          exit
+        }
+        next
+      }
+      exit
+    }
     in_frontmatter {
       if ($0 ~ ("^" key ":[[:space:]]*")) {
         sub("^" key ":[[:space:]]*", "", $0)
+        if ($0 ~ /^[>|][[:space:]]*$/) {
+          capture_block=1
+          next
+        }
         print $0
         exit
       }
@@ -167,8 +182,6 @@ log() {
 }
 
 ensure_symlink() {
-  # 在 link_path 处建立指向 relative_target 的软链接，已存在同目标软链直接放过；
-  # 其它情况（旧软链指错、普通文件、目录）会被备份到 .bak.<时间戳> 后重建。
   local link_path="$1"
   local relative_target="$2"
 

@@ -3,29 +3,6 @@
 `torchtitan-npu` 是 [torchtitan](https://github.com/pytorch/torchtitan) 的 **Ascend NPU 插件仓**。
 本仓不直接修改上游 torchtitan 代码，而是通过 monkey-patch、ModelConverter、模型注入等机制将 NPU 适配能力叠加到上游之上。
 
-## 构建与测试
-
-```bash
-# 安装依赖
-pip install -r requirements.txt -r requirements_dev.txt
-
-# Lint & 格式化（PR 前必须通过）
-pre-commit run --all-files
-
-# 运行单元测试
-pytest tests/ -x
-```
-
-### 数值验证
-
-非计算性改动（如重构、activation checkpointing 调整）必须保证修改前后 **loss 完全一致**（使用 `--debug.seed=42 --debug.deterministic`）。
-计算性改动需在代表性数据集（如 C4）上展示 loss 收敛。
-
-相同并行策略和 debug 选项下，两次运行应产生 bit-wise 一致的 loss 和 grad_norm。
-stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/loss_compare.py` 开启 profiling 并从 TensorBoard 结果中检查。
-
-**禁止** 使用 `--debug.deterministic_warn_only`。
-
 ## 核心原则
 
 1. **PyTorch 原生训练技术。** torchtitan 核心的训练基础设施和并行代码不依赖非 PyTorch 库。作为插件仓，torchtitan-npu 可使用 torch_npu 等外部库，但应尽可能复用 PyTorch 原生接口。
@@ -51,7 +28,7 @@ stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/los
 
 3. **Converter 遵循注册表模式。** 自定义算子转换必须通过 `torchtitan_npu/converters/registry.py` 的 `@register_model_converter()` 注册。不要在模型文件中硬编码算子替换逻辑。
 
-4. **上游同步是常态。** 本仓需定期跟踪上游 torchtitan 变更。同步基线信息维护在 `docs/source/community/versioning_policy.md` 的分支同步表。每次同步后必须更新此表。
+4. **上游同步是常态。** 本仓需定期跟踪上游 torchtitan 变更。同步基线信息维护在 `docs/community/versioning_policy.md` 的分支同步表。每次同步后必须更新此表。
 
 5. **Patch 目标随上游变化。** 上游重构后，patch 的目标函数/类可能已不存在或签名已变。每次上游同步必须检查所有 patch 是否仍有效。
 
@@ -83,7 +60,7 @@ stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/los
 ### 断言与错误处理
 
 - **`ValueError`** 用于用户可见的错误（配置错误、无效输入）。
-- **`assert`** 仅用于表示程序员错误的内部不变量。
+- **`assert`** 仅用于表示程序错误的内部不变量。
 - 分布式代码中显式验证 mesh 维度、tensor placement 和配置值 — 不要假设 1D mesh 或特定 placement。
 - 代码路径静默跳过用户配置时，**发出 warning**。
 
@@ -99,52 +76,50 @@ stdout 仅打印 5 位有效数字，可能不够精确，请使用 `scripts/los
 - 仅为真正不明显的内容添加注释：维度语义、并行梯度 placement、workaround 存在的原因。
 - 使用 TODO 注释标记已知限制并附简要说明。
 - 描述放在 docstring 中，不要放在名称里。
+- 注释使用英文，文档优先使用中文。
 
-## 领域专项规则
+## 标准开发 Pipeline
 
-针对不同代码领域的详细规则，请参阅 `.agents/rules/` 下的专项文件：
+### 1. 获取上下文
 
-| 规则文件 | 适用范围 |
-| --- | --- |
-| `rules/config.md` | 配置系统（`torchtitan_npu/config/`） |
-| `rules/distributed.md` | 分布式训练代码（`torchtitan_npu/distributed/`、`torchtitan_npu/patches/distributed/`） |
-| `rules/models.md` | 模型实现（`torchtitan_npu/models/`） |
-| `rules/patches.md` | Patch 机制（`torchtitan_npu/patches/`） |
-| `rules/converters.md` | Converter / Kernel 机制（`torchtitan_npu/converters/`） |
+- 先确认任务涉及的目录、模型、并行策略和是否影响训练数值。
+- 修改 `torchtitan_npu/` 下代码时，按路径加载 `.agents/rules/` 中的专项规则；如果同一改动命中多个领域，规则全部适用。
+- 涉及上游同步时使用 `torchtitan-sync` skill。
 
-## PR 要求
+### 2. 实施修改
 
-1. **先 lint:** 提交前运行 `pre-commit run --all-files` 并修复所有问题。
-2. **展示loss曲线:** 任何非 trivial 改动需包含 loss 对比曲线。
-3. **解释"为什么"而不只是"做了什么"。**
-4. **添加测试:** 新功能至少需要 CPU 单元测试；涉及并行的需要 NPU 集成测试。
-5. **保持模型代码精简:** 模型变更后确保原始 checkpoint 仍能加载，并说明变更原因。
-6. **验证 patch 兼容性:** 新增或修改 patch 后，确认 `_apply_patches()` 注册正确，不与现有 patch 冲突。
-7. **更新 converter 注册:** 新增算子转换后，确认 registry 注册正确。
+- 保持改动最小，只改完成目标所需的文件。
+- 复用现有 patch、converter、model injection、distributed helper 和 config 模式。
+- 新增或修改 patch/converter/model/config 后，同步检查注册入口和所有调用点。
+- 对数值、分布式、checkpoint、模型加载路径保持保守；存疑时先给出风险和验证方案。
 
-## 可用 Skills
+### 3. Codecheck
 
-| Skill | 说明 |
-| --- | --- |
-| `accuracy-debug` | 有基线对照的训练精度异常定位（loss 偏离、NaN/Inf），基于代码审查 + detect_anomaly + msprobe dump/compare 流程 |
-| `premerge-accuracy-check` | 变更前的正向精度验证，对比两个分支/commit 的 loss 和 grad_norm，生成包含复现步骤的 PDF 报告 |
-| `oom-analysis` | NPU 训练 OOM 问题诊断，按日志分类 → 静态内存估算 → Memory Snapshot 深度分析 → 优化建议的流程定位和解决问题 |
-| `torchtitan-sync` | 上游 torchtitan 分支同步与适配，读取 versioning_policy.md 分支同步表，生成变更分析并完成代码适配 |
-| `training-log-visualization` | 从训练 stdout 日志解析并绘制 loss/grad_norm/memory/tps 等指标曲线，支持双日志对比和误差分析 |
+step1: 运行pre-commit
 
-## 关键路径速查
+```bash
+pip install -r requirements.txt -r requirements_dev.txt
+# 快速迭代，可先只检查改动文件
+pre-commit run --files <changed files>
+# 提交或发 PR 前必须通过
+pre-commit run --all-files
+```
+step2: 代码审查
 
-| 类别 | 路径 |
-| --- | --- |
-| 训练入口 | `torchtitan_npu/entry.py` |
-| 训练 patch | `torchtitan_npu/train.py` |
-| Patch 注册（包初始化） | `torchtitan_npu/__init__.py` |
-| Patches 目录 | `torchtitan_npu/patches/` |
-| Converters 目录 | `torchtitan_npu/converters/` |
-| Converter 注册表 | `torchtitan_npu/converters/registry.py` |
-| 自定义配置 | `torchtitan_npu/config/config.py` |
-| 模型实现 | `torchtitan_npu/models/` |
-| 分布式工具 | `torchtitan_npu/distributed/` |
-| 训练辅助工具 | `torchtitan_npu/tools/` |
-| 训练配置 | `torchtitan_npu/models/*/train_configs/*.toml` |
-| 版本策略 / 同步基线 | `docs/source/community/versioning_policy.md` |
+代码审查或定位 codecheck 失败时使用 `torchtitan-npu-code-reviewer` skill。
+
+### 4. 测试与数值验证
+
+- Python 逻辑改动至少运行相关单元测试；影响共享逻辑时扩大到 `pytest tests/ -x`。
+- 涉及分布式、NPU kernel、converter、patch 或模型训练行为时，补充对应 NPU 冒烟/集成测试。
+- 数值验证：
+  - 非计算性改动（重构、activation checkpointing 调整等）必须保证修改前后 **loss 完全一致**；计算性改动需在代表性数据集（如 C4）上展示 loss 收敛。
+  - 对齐验证须加载同一 checkpoint 并固定 NPU 随机性，相同并行策略下两次运行的 loss 和 grad_norm 应一致；**禁止** 使用 `--debug.deterministic_warn_only`。
+  - 优先用 `premerge-accuracy-check` skill 生成 loss/grad_norm 对比报告，仅对已有日志作图可用 `training-log-visualization`；证明 bit-wise 一致需保留更高精度来源，stdout 的 5 位有效数字不能作为唯一依据。
+
+### 5. PR 与流水线
+
+- **提 PR 前必须调用 `torchtitan-npu-code-reviewer` skill 审查本次改动**，建议修复其报告的 S1/S2 问题后再创建 PR。
+- PR 描述解释“为什么”而非只是“做了什么”；非 trivial 改动附 loss 对比曲线，模型变更说明 checkpoint 兼容性。
+- 用 `gitcode-pr` 创建/推送 PR、读取改动与评论，并严格按 `.gitcode/PULL_REQUEST_TEMPLATE/PULL_REQUEST_TEMPLATE.md` 填写：标题用英文类型标签 `[type] 描述`，`类型` 只勾一个主类型，`Checklist` 只勾真实完成项，`如何测试` 写实际执行的命令或说明未执行原因。
+- 用 `gitcode-pipeline` 触发/等待 CI 并拉取失败日志，失败后结合失败类型与专项规则修复或判断 CodeCheck 屏蔽；缺少上述远程 skills 时先用 `default-skills` 安装。

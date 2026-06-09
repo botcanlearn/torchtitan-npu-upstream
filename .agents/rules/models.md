@@ -16,14 +16,15 @@ paths:
 - 权重初始化放在配置或专用 init 函数中，不散布在 `Module.__init__` 中。
 - 模型变更后确保原始 checkpoint 仍能正确加载。
 
-### 审计所有变体
+### 审查模型目录
 
-修改共享组件（attention、normalization、MoE routing）时，检查并更新**所有**模型变体：llama3、llama4、qwen3、deepseek_v3、deepseek_v32 以及后续新增的模型。不要在相邻模型中留下过时模式。
+修改共享组件（attention、normalization、MoE routing）时，检查并更新 `torchtitan_npu/models/` 下所有受影响的模型目录。不要在某个模型中留下过时模式；若某个上游模型本仓尚未适配，在审查结论中明确说明不适用。
 
 ### 跨模型统一
 
 - 不要给每个模型创建功能相同的独立 wrapper。尽量只有一个通用 wrapper 供所有模型共享。
-- 多个模型有近乎相同的代码（如 `apply_fsdp`、`apply_ac`、`apply_compile`）时，合并到 `torchtitan_npu/models/common/` 或上游 common 目录。
+- 上游已有通用实现时，优先复用 `torchtitan.models.common`。
+- 被多个模型复用的组件应放在共享位置，而不是复制到每个模型目录，新增跨模型 attention、feed-forward、decoder、MoE、rope、normalization 等组件时，优先建立 `torchtitan_npu/models/common/` 或贡献到上游 common 目录。
 - 新增 rotary embedding、MoE router 等组件前，检查已有实现是否已支持该用例。
 
 ### 标准模型目录结构
@@ -31,9 +32,10 @@ paths:
 每个模型目录遵循一致的模式：
 
 - `config_registry.py` — 注册模型配置（size、超参）
-- `infra/parallelize.py` — 定义模型的并行化策略
-- `train_configs/*.toml` — 训练配置文件
-- 模型定义文件（架构、层）
+- `parallelize.py` — 定义模型的并行化策略
+- `model.py` / `moe.py` / `state_dict_adapter.py` 等 — 模型定义、专用层或 checkpoint 适配
+
+已有轻量适配目录（如只提供 `state_dict_adapter.py` 或只注册配置）不必强行补齐所有文件；新增完整模型时再遵循上述结构。
 
 ### 不要过度特化
 
@@ -54,3 +56,4 @@ paths:
 
 - NPU 特有的模型修改（如算子替换、内存优化）应通过 converter 或 patch 实现，不要直接 fork 上游模型代码。
 - 如必须 fork 模型代码，在文件头注释中说明 fork 原因和对应的上游文件位置。
+- 如果模型依赖上游 `torchtitan.experiments.*`（当前如 VLM），把实验性依赖限制在对应模型适配层内，不要为实验需求修改通用 patch、converter、distributed helper 或训练入口。

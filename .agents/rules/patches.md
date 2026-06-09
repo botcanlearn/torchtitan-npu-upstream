@@ -33,6 +33,15 @@ paths:
 
 新增 patch 时，放入对应的子目录。如果目标不属于上述任何类别，评估是否需要新建子目录。
 
+### 面向上游合入的 patch（`patches/torchtitan/`）
+
+`patches/torchtitan/` 的目标是**最终能合入上游 torchtitan 社区**，因此这里只放上游通用的功能补强，而非 NPU 适配：
+
+- **禁止 NPU 特性代码**：不得出现 `torch_npu` 导入、NPU 专属算子/kernel、Ascend 设备假设、`"npu"` 设备字符串等。NPU 相关适配应放到 `patches/torch_npu/`、`patches/distributed/` 或 converters。
+- **只补上游欠缺**：适合放此处的是上游 torchtitan 缺失或有 bug 的**与硬件无关**的功能（通用修复、增强、兼容性补丁）。
+- **以可直接提交上游为标准**：实现风格、命名、依赖须符合上游约定。判断方法——设想"这段代码能否原样向 torchtitan 提 PR"；若答案为否，它就不该放在 `patches/torchtitan/`。
+- **混合改动要拆分**：若一个需求既要通用改动又要 NPU 适配，拆开——通用部分放 `patches/torchtitan/`，NPU 部分放对应 NPU 目录，避免上游通用补丁被 NPU 代码污染。
+
 ## 编写规范
 
 ### 最小化 patch 范围
@@ -41,13 +50,13 @@ paths:
 - 避免在同一个 patch 文件中修改多个不相关的模块。
 - Patch 函数应尽可能少地复制上游代码，优先使用 `functools.wraps` 或装饰器模式。
 
-### 文档化 patch 目标
+### 说明被 patch 的对象
 
-每个 patch 文件头部必须注释说明：
+新增 patch 或重写 patch 目标行为时，文件头部应注释说明：
 
-- Patch 的目标模块和函数/类。
+- patch 的目标模块和函数/类。
 - Patch 的原因（为什么需要这个 patch）。
-- 对应的上游版本或 commit（便于上游同步时检查）。
+- Patch 的实现摘要。
 
 ### 上游同步兼容性
 
