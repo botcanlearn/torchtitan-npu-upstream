@@ -39,7 +39,7 @@ $$\gamma_{\text{adjusted}} = \gamma \times \sqrt{\max\left(1, \frac{A}{B}\right)
 - 当 $A \le B$（宽矩阵，如 FFN 中的中间层）时，系数为 1，不做额外调整
 - 当 $A > B$（高矩阵，如输出层）时，按 $\sqrt{A/B}$ 缩放
 
-这种设计使得 Muon 可以在不同形状的矩阵上保持相似的收敛行为。由于调整幅度较大，通常需要单独为 Muon 调优学习率（即配置 `muon_lr`），一般来说可以将Adamw的学习率放大10倍来作为Muon的学习率。这就是为什么该模式需要配合 `MuonLRSchedulersContainer` 使用。
+这种设计使得 Muon 可以在不同形状的矩阵上保持相似的收敛行为。由于调整幅度较大，通常需要单独为 Muon 调优学习率（即配置 `muon_lr`），一般来说可以将AdamW的学习率放大10倍来作为Muon的学习率。这就是为什么该模式需要配合 `MuonLRSchedulersContainer` 使用。
 
 #### match_rms_adamw 模式详解
 

@@ -2,7 +2,7 @@
 
 ## 1. 重构目的
 
-**基于TorchTitan的ModelConverter机制，为TorchTitan_npu提供了一套声明式、可组合的模型自定义框架，取代了原先monkey-patch方式**
+**基于 torchtitan 的 ModelConverter 机制，为 torchtitan_npu 提供了一套声明式、可组合的模型自定义框架，取代了原先 monkey-patch 方式**
 
 ## 2. 使用方法
 
@@ -343,7 +343,7 @@ sequenceDiagram
     participant dyn as type() 动态创建
     participant tt as torchtitan 框架
 
-    converters->>converters: _auto_search_conveter()
+    converters->>converters: _auto_search_converter()
     converters->>converters: importlib.import_module("kernels.my_kernel")
 
     Note over converters: 模块加载时，装饰器 @register_model_converter 执行

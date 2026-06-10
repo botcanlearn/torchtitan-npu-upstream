@@ -46,9 +46,9 @@ model_converters = ModelConvertersContainer.Config(
 </p>
 
 
-DSA 是DeepSeek-V3.2中引入的一种特殊注意力机制，主要由图中的两个模块构成：**Lightning Indexer** 筛选出少量高价值token的索引；这些索引被用于高效的 **稀疏 Attention 计算** (图中 Multi-Query Attention部分)。
+DSA 是 DeepSeek-V3.2 中引入的一种特殊注意力机制，主要由图中的两个模块构成：**Lightning Indexer** 筛选出少量高价值token的索引；这些索引被用于高效的 **稀疏 Attention 计算** (图中 Multi-Query Attention部分)。
 
-针对 DeepSeek V3.2 模型的 Attention 模块，将以上两种核心组件替换为对应的 NPU 融合算子。具体对应关系如下：
+针对 DeepSeek-V3.2 模型的 Attention 模块，将以上两种核心组件替换为对应的 NPU 融合算子。具体对应关系如下：
 
 | DeepSeek V3.2 Attention 组件              | NPU融合算子                                 |
 | ----------------------------------------- | ------------------------------------------- |
