@@ -72,7 +72,7 @@ rg -n -i "step|iteration" <train_log> | tail -5
 
 #### 1.1 收集参数
 
-**模型参数**：从 `torchtitan_npu/models/<model>/__init__.py`（flavors）和 `model/args.py`（ModelArgs）获取 `dim`、`n_layers`、`n_heads`、`vocab_size`、`inter_dim`、MoE 参数等。
+**模型参数**：从 `torchtitan_npu/models/<model>/__init__.py`（flavors 函数，如 `_make_dsv3_model_config`）和 `torchtitan_npu/models/<model>/model.py`（Config，继承上游 torchtitan 的 ModelArgs）获取 `dim`、`n_layers`、`n_heads`、`vocab_size`、`inter_dim`、MoE 参数等。
 
 **训练参数**（从 TOML 获取）：`local_batch_size`、`seq_len`、TP/PP/DP/EP/CP 各并行度、`activation_checkpoint` 策略、优化器类型。
 
@@ -232,7 +232,7 @@ python .agents/skills/oom-analysis/scripts/analyze_snapshot.py \
 ```bash
 # 检查并行化代码中的异步通信
 rg -n "async_op|redistribute|_prepare_output_fn" \
-    torchtitan_npu/models/<model>/infra/parallelize.py
+    torchtitan_npu/models/<model>/parallelize.py
 
 # 检查是否有 wait_tensor 配对
 rg -n "wait_tensor|async_op=True" \
@@ -303,10 +303,9 @@ msmemscope 提供以下高级分析能力：
 | --- | --- |
 | 训练入口 | `torchtitan_npu/entry.py` |
 | 训练 patch（含内存水线） | `torchtitan_npu/train.py` |
-| 自定义配置 | `torchtitan_npu/config/custom_config.py` |
-| 模型定义 | `torchtitan_npu/models/<model>/model/*.py` |
+| 自定义配置 | `torchtitan_npu/config/configs.py` |
+| 模型定义 | `torchtitan_npu/models/<model>/model.py` |
 | 模型参数 flavors | `torchtitan_npu/models/<model>/__init__.py` |
 | 训练配置 | `torchtitan_npu/models/<model>/train_configs/*.toml` |
-| 并行逻辑 | `torchtitan_npu/models/<model>/infra/parallelize.py` |
-| 激活重计算 patch | `torchtitan_npu/patches/torchtitan/activation_checkpoint.py` |
+| 并行逻辑 | `torchtitan_npu/models/<model>/parallelize.py` |
 | 调试特性文档 | `docs/feature_guides/metrics_and_debugging.md` |

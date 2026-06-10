@@ -163,7 +163,7 @@ RMSNorm 通过计算输入张量每个样本的平方均值的平方根来稳定
 get_model_converter_config("npu_rms_norm")
 ```
 **ModelConverter 源码路径：** `torchtitan_npu/converters/kernels/rms_norm.py` \
-**相关 NPU 融合算子开发者文档：** [`npu_grouped_matmul`](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/torchnpuCustomsapi/docs/context/（beta）torch_npu-npu_rms_norm.md)
+**相关 NPU 融合算子开发者文档：** [`npu_rms_norm`](https://www.hiascend.com/document/detail/zh/Pytorch/730/apiref/torchnpuCustomsapi/docs/context/（beta）torch_npu-npu_rms_norm.md)
 
 -----------
 

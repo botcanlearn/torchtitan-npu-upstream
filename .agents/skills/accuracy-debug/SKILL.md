@@ -77,13 +77,7 @@ seed_all(seed=1234, mode=True)
 ```bash
 # 分支间对比
 git diff <baseline_branch>..<problem_branch> --stat
-git diff <baseline_branch>..<problem_branch> -- '*.py'定性开关状态与复现结果（开启前后是否仍可稳定复现）
-- 定位方法与工具输出证据
-- 根因假设与证据链
-- 单算子复现脚本（含运行命令与环境说明）
-- 最小 patch 或配置改动
-- 修复前后验证结果
-- 残余风险与后续检查建议
+git diff <baseline_branch>..<problem_branch> -- '*.py'
 
 # 指定 commit 区间
 git diff <baseline_commit>..<problem_commit> --stat
@@ -205,13 +199,7 @@ debugger = PrecisionDebugger(config_path="config_statistics.json")
 debugger.start()
 
 # 在训练循环中（每个 step 结束）
-debugger.step()定性开关状态与复现结果（开启前后是否仍可稳定复现）
-- 定位方法与工具输出证据
-- 根因假设与证据链
-- 单算子复现脚本（含运行命令与环境说明）
-- 最小 patch 或配置改动
-- 修复前后验证结果
-- 残余风险与后续检查建议
+debugger.step()
 
 # 在需要停止 dump 时
 debugger.stop()
@@ -326,9 +314,9 @@ msprobe compare -i compare.json -o ./compare_output_statistics
 | --- | --- |
 | 训练入口 | `torchtitan_npu/entry.py` |
 | 训练 patch | `torchtitan_npu/train.py` |
-| 自定义配置 | `torchtitan_npu/config/custom_config.py` |
+| 自定义配置 | `torchtitan_npu/config/configs.py` |
 | converters | `torchtitan_npu/converters/` |
 | 量化 patch | `torchtitan_npu/patches/quantization/` |
 | 模型逻辑 | `torchtitan_npu/models/` |
 | 训练配置 | `torchtitan_npu/models/*/train_configs/*.toml` |
-| 并行逻辑 | `torchtitan_npu/models/*/infra/parallelize.py` |
+| 并行逻辑 | `torchtitan_npu/models/*/parallelize.py` |
