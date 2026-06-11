@@ -208,14 +208,27 @@ class GMMModelConfig(ModelCustomConfig):                     # <-- 声明配置
 
 #### 2.2.5 第五步：激活配置
 
+通过模型模块中的 `config_registry.py` 在对应配置函数的 `model_converters` 中加入新注册的 converter：
+
 ```python
 # ──────────────────────────────────────────────────
 # 5. 激活配置
 # ──────────────────────────────────────────────────
-# 在对应的toml文件中配置
-[model]
-converters = ["npu_gmm"]
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+from torchtitan_npu.converters import get_model_converter_config
+
+
+model_converters = ModelConvertersContainer.Config(
+    converters=[
+        # ... 其他 converter ...
+        get_model_converter_config("npu_gmm"),
+    ],
+)
 ```
+
+如果模型已有 `model_converters` 配置，只需把 `get_model_converter_config("npu_gmm")`
+追加到现有 `converters` 列表中。
 
 ## 3. 架构概览
 

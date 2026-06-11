@@ -21,9 +21,7 @@ model_converters = ModelConvertersContainer.Config(
 )
 ```
 
-旧 TOML 样例中的 `converters = ["..."]` 仅适用于尚未迁移的旧入口。
-
-当前版本支持以下 ModelConverters ，前往对应章节查看功能介绍及启用方式：
+当前支持以下 ModelConverters ，前往对应章节查看功能介绍及启用方式：
 - [NPU 融合算子适配](#npu-融合算子适配)
   - [如何配置](#如何配置)
   - [DSA (DeepSeek Sparse Attention)](#dsa-deepseek-sparse-attention)

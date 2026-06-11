@@ -86,7 +86,7 @@ bash scripts/run_train.sh \
 
 在执行启动命令前，按照集群的实际情况编辑 `scripts/run_train_multinodes.sh` 文件中的网络与节点配置：
 
-```toml
+```bash
 # TODO change to your network interface
 Network_Interface=enp23s0f3 # 填入 ifconfig 的驱动名
 ...
@@ -134,7 +134,7 @@ git checkout ac13e536c84e7f6647b14fa9375c3c8a8a2b8578
 cp ./torchtitan/torchtitan ./torchtitan-npu/ -r
 ```
 
-3. 在 torchtitan-npu 项目中，使用 torchtitan 原生 toml 配置文件，启动训练。以 llama3 的 debug_model 配置为例:
+3. 在 torchtitan-npu 项目中，使用 torchtitan 原生 `config_registry.py` 配置函数启动训练。以 llama3 的 debug_model 配置为例:
 
 ```bash
 NGPU=8 \
