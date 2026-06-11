@@ -43,7 +43,7 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
-from torchtitan.models.common import moe as moe_module
+from torchtitan.models.common import FlexAttention, moe as moe_module, VarlenAttention
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
@@ -164,6 +164,16 @@ def _register_distributed_parameter(
         )
     )
     module.register_parameter(name, dt)
+
+
+def _model_uses_attention_masks(model_args: Any) -> bool:
+    for layer_cfg in getattr(model_args, "layers", ()):
+        inner_attention = getattr(
+            getattr(layer_cfg, "attention", None), "inner_attention", None
+        )
+        if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
+            return True
+    return False
 
 
 class HcHeadParallelStyle(ParallelStyle):
@@ -493,6 +503,22 @@ def apply_non_moe_tp(
         use_local_output=False,
     )
 
+    li_compute_smla_plan = prepare_module_input_output(
+        input_layouts=(Replicate(), Replicate(), Replicate(), None, None, None),
+        desired_input_layouts=(
+            Replicate(),
+            Replicate(),
+            Replicate(),
+            None,
+            None,
+            None,
+        ),
+        use_local_input=True,
+        output_layouts=(Replicate(), Replicate()),
+        desired_output_layouts=(Replicate(), Replicate()),
+        use_local_output=False,
+    )
+
     compressor_plan = prepare_module_input_output(
         input_layouts=(Replicate(), Replicate()),
         desired_input_layouts=(Replicate(), Replicate()),
@@ -562,7 +588,6 @@ def apply_non_moe_tp(
             Replicate(),
             Replicate(),
             None,
-            None,
         ),
         desired_input_layouts=(
             Replicate(),
@@ -573,10 +598,12 @@ def apply_non_moe_tp(
             Replicate(),
             Replicate(),
             None,
-            None,
         ),
         use_local_output=True,
     )
+
+    model_args = cast(Any, model).model_args
+    use_attention_masks = _model_uses_attention_masks(model_args)
 
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
@@ -702,6 +729,9 @@ def apply_non_moe_tp(
                 }
             )
             if compress_ratio == 4:
+                li_compute_parallel_plan = (
+                    li_compute_smla_plan if use_attention_masks else li_compute_plan
+                )
                 _register_distributed_parameter(
                     # pyrefly: ignore [missing-attribute]
                     transformer_block.attention.pre_attention.indexer.compressor,
@@ -711,7 +741,7 @@ def apply_non_moe_tp(
                 )
                 layer_plan.update(
                     {
-                        "attention.inner_attention.li_compute": li_compute_plan,
+                        "attention.inner_attention.li_compute": li_compute_parallel_plan,
                         "attention.pre_attention.indexer": indexer_plan,
                         "attention.pre_attention.indexer.compressor": indexer_compressor_plan,
                         "attention.pre_attention.indexer.wq_b": NoParallel(
