@@ -74,6 +74,9 @@ def _apply_patches():
     # patching fake process group
     from .patches.torch.testing._internal.distributed import fake_pg  # noqa: F401
 
+    # patching torch_npu
+    from .patches.torch_npu import determinism  # noqa: F401
+
     # patching tools
     from .tools import flight_recorder, profiling  # noqa: F401
 
