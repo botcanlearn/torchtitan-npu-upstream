@@ -69,7 +69,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-> 注：如有旧版本Torchtitan-npu，请先[卸载](#卸载)，再进行安装
+> 注：如有旧版本torchtitan-npu，请先[卸载](#卸载)，再进行安装
 
 > 注：`requirements.txt` 已为 `triton-ascend==3.2.1` 配置 `--extra-index-url https://triton-ascend.osinfra.cn/pypi/simple`；默认 PyPI 源当前不提供该版本，单独安装时请使用 `pip install --extra-index-url https://triton-ascend.osinfra.cn/pypi/simple triton-ascend==3.2.1`。`triton-ascend` 是安装包名，实际 Python 模块名为 `triton`，代码中请使用 `import triton`，不要使用 `import triton_ascend`。
 

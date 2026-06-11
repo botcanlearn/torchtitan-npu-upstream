@@ -36,7 +36,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 - [Apr. 2026]: 🚀 **torchtitan‑npu 正式开源**:在 NPU 上支持 4D 并行等 torchtitan 原生特性，并引入 Swap Optimizer 等 NPU 亲和优化。
 
 ***
-* [TorchTitan-NPU 0day支持DeepSeekV4续训练，助力训练场景轻松入图，开箱即优](https://gitcode.com/cann/cann-recipes-train/blob/master/docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md)
+* [TorchTitan-NPU 0day支持DeepSeek-V4续训练，助力训练场景轻松入图，开箱即优](https://gitcode.com/cann/cann-recipes-train/blob/master/docs/llm_pretrain/deepseek-v4_torchtitan_npu_autofuse.md)
 
 # Roadmap
 
@@ -89,7 +89,7 @@ pip install -e .
       <td>✅</td>
     </tr>
     <tr>
-      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/parallelism/custom_cp.md">自定义 CP (DeepSeek V3.2 CP/SDPA Ulysses CP)</a></td>
+      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/parallelism/custom_cp.md">自定义 CP (DeepSeek-V3.2 CP/SDPA Ulysses CP)</a></td>
       <td>❌</td>
       <td>✅</td>
     </tr>
@@ -154,7 +154,7 @@ torchtitan-npu/
 │   ├── config/         # NPU 扩展配置 dataclass
 │   ├── converters/     # 基于torchtitan ModelConverter机制的补丁
 │   ├── distributed/    # 自定义分布式代码
-│   ├── models/         # 基于torchtitan-npu的模型 (如Deepseek-V3.2)
+│   ├── models/         # 基于torchtitan-npu的模型 (如DeepSeek-V3.2)
 │   ├── patches/        # 其他补丁
 │   ├── tools/          # 工具补丁
 │   ├── entry.py        # 启动训练
@@ -199,7 +199,7 @@ torchtitan‑npu 功能依赖的 PyTorch 等第三方开源软件，均由第三
 ---
 
 - torchtitan‑npu 产品的使用许可证，具体请参见 [LICENSE](https://gitcode.com/cann/torchtitan-npu/blob/master/LICENSE)。
-- torchtitan‑npu 工具 docs 目录下的文档适用相应许可证，具体请根目录下的 LICENSE 文件。
+- torchtitan‑npu 工具 docs 目录下的文档适用相应许可证，具体请参见根目录下的 LICENSE 文件。
 
 ## 🤝联系我们
 
