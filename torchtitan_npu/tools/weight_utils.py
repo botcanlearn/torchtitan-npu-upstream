@@ -182,8 +182,8 @@ def _split_w13_dtensor(w13: DTensor) -> tuple[DTensor, DTensor]:
     """split DTensor"""
     local_tensor = w13.to_local()
     chunks = torch.chunk(local_tensor, 2, dim=1)
-    local_w1 = chunks[0].clone()
-    local_w3 = chunks[1].clone()
+    local_w1 = chunks[0]
+    local_w3 = chunks[1]
     del chunks, local_tensor
     return (
         DTensor.from_local(
@@ -204,23 +204,9 @@ def _split_w13_for_mapping(state_dict: dict[str, Any]) -> dict[str, Any]:
             base_key = key.replace(".w13", "")
 
             if isinstance(value, DTensor):
-                local_val = value.to_local()
-                chunks = torch.chunk(local_val, 2, dim=1)
-                w1_local = chunks[0].clone()
-                w3_local = chunks[1].clone()
-                del chunks, local_val
-
-                w1 = DTensor.from_local(
-                    w1_local, device_mesh=value.device_mesh, placements=value.placements
-                )
-                w3 = DTensor.from_local(
-                    w3_local, device_mesh=value.device_mesh, placements=value.placements
-                )
+                w1, w3 = _split_w13_dtensor(value)
             else:
-                chunks = torch.chunk(value, 2, dim=1)
-                w1 = chunks[0].clone()
-                w3 = chunks[1].clone()
-                del chunks
+                w1, w3 = torch.chunk(value, 2, dim=1)
 
             result[base_key + ".w1"] = w1
             result[base_key + ".w3"] = w3

@@ -6,6 +6,7 @@ import torch
 
 import torchtitan_npu.tools.weight_utils as weight_utils
 from torchtitan_npu.tools.weight_utils import (
+    _split_w13_for_mapping,
     convert_expert_format,
     detect_expert_format,
 )
@@ -55,6 +56,30 @@ def test_convert_expert_format_splits_w13_back_to_standard():
     assert result["model.layers.0.moe.experts.w3"].shape == (2, 4, 8)
 
 
+def test_split_w13_for_mapping_uses_views_without_losing_values_or_dtype():
+    w13 = torch.arange(2 * 8 * 8, dtype=torch.bfloat16).reshape(2, 8, 8)
+    state_dict = {
+        "model.layers.0.moe.experts.w13": w13,
+        "model.layers.0.attention.weight": torch.ones(2, 2),
+    }
+
+    result = _split_w13_for_mapping(state_dict)
+
+    w1 = result["model.layers.0.moe.experts.w1"]
+    w3 = result["model.layers.0.moe.experts.w3"]
+    assert "model.layers.0.moe.experts.w13" not in result
+    assert w1.dtype == torch.bfloat16
+    assert w3.dtype == torch.bfloat16
+    assert torch.equal(w1, w13[:, :4, :])
+    assert torch.equal(w3, w13[:, 4:, :])
+    assert w1.untyped_storage().data_ptr() == w13.untyped_storage().data_ptr()
+    assert w3.untyped_storage().data_ptr() == w13.untyped_storage().data_ptr()
+    assert (
+        result["model.layers.0.attention.weight"]
+        is state_dict["model.layers.0.attention.weight"]
+    )
+
+
 def test_convert_expert_format_splits_dtensor_w13_with_placements(monkeypatch):
     from types import SimpleNamespace
 
@@ -96,3 +121,46 @@ def test_convert_expert_format_splits_dtensor_w13_with_placements(monkeypatch):
     assert captured_calls[1]["placements"] == ("shard",)
     assert result["model.layers.0.moe.experts.w1"].to_local().shape == (2, 4, 8)
     assert result["model.layers.0.moe.experts.w3"].to_local().shape == (2, 4, 8)
+
+
+def test_split_w13_for_mapping_dtensor_uses_views_without_losing_values(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeDTensor:
+        def __init__(self, local_tensor, *, device_mesh, placements):
+            self._local_tensor = local_tensor
+            self.device_mesh = device_mesh
+            self.placements = placements
+
+        @classmethod
+        def from_local(cls, local_tensor, *, device_mesh, placements):
+            return cls(local_tensor, device_mesh=device_mesh, placements=placements)
+
+        def to_local(self):
+            return self._local_tensor
+
+    monkeypatch.setattr(weight_utils, "DTensor", FakeDTensor)
+
+    local_w13 = torch.arange(2 * 8 * 8, dtype=torch.bfloat16).reshape(2, 8, 8)
+    w13 = FakeDTensor(
+        local_w13,
+        device_mesh=SimpleNamespace(name="mesh"),
+        placements=("shard",),
+    )
+
+    result = _split_w13_for_mapping({"model.layers.0.moe.experts.w13": w13})
+
+    w1 = result["model.layers.0.moe.experts.w1"]
+    w3 = result["model.layers.0.moe.experts.w3"]
+    assert w1.placements == ("shard",)
+    assert w3.placements == ("shard",)
+    assert torch.equal(w1.to_local(), local_w13[:, :4, :])
+    assert torch.equal(w3.to_local(), local_w13[:, 4:, :])
+    assert (
+        w1.to_local().untyped_storage().data_ptr()
+        == local_w13.untyped_storage().data_ptr()
+    )
+    assert (
+        w3.to_local().untyped_storage().data_ptr()
+        == local_w13.untyped_storage().data_ptr()
+    )
