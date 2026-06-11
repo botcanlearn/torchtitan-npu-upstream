@@ -17,6 +17,10 @@ from torch import nn
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rmsnorm import RMSNorm as TorchTitanRMSNorm
+
+from torchtitan.models.common.rope import (
+    _reshape_for_broadcast_complex as reshape_for_broadcast_complex,
+)
 from torchtitan.models.deepseek_v3.model import (
     Attention as DeepSeekV3Attention,
     DeepSeekV3TransformerBlock,
@@ -29,7 +33,6 @@ from torchtitan_npu.models.common.dsa_indexer_loss import (
     DSAIndexerLossLoggingHelper,
 )
 from torchtitan_npu.models.deepseek_v3.model import DeepSeekV3ModelNpu
-from torchtitan_npu.train import reshape_for_broadcast
 
 logger = logging.getLogger()
 
@@ -214,7 +217,7 @@ def apply_rotary_emb(
     if not interleaved:
         x = x.view(*shape[:-1], 2, -1).transpose(-1, -2).contiguous()
     x = torch.view_as_complex(x.float().view(*shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, x, positions)
+    freqs_cis = reshape_for_broadcast_complex(freqs_cis, x, positions)
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     if not interleaved:
         y = torch.cat([y[..., 0::2], y[..., 1::2]], dim=-1)

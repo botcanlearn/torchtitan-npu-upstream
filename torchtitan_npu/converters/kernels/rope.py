@@ -186,6 +186,25 @@ def npu_apply_rotary_emb_single_complex(
     return y
 
 
+def reshape_for_broadcast_complex(
+    freqs_cis: torch.Tensor,
+    x: torch.Tensor,
+    positions: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """NPU-safe ``_reshape_for_broadcast_complex`` (patched onto common.rope at
+    import time): select per-position freqs via _select_freqs_cis (real-view,
+    dodges NPU complex64 index) and reshape to broadcast against complex x.
+    """
+    freqs_cis = _select_freqs_cis(freqs_cis, positions, x.shape[1])
+    # Upstream has two branches: shared positions → (1, S, 1, D) via this
+    # comprehension, per-sample positions → (B, S, 1, D) via explicit shape.
+    # NPU only needs the shared branch because _select_freqs_cis always
+    # returns (seqlen, d/2) — it forces batch-shared positions by taking
+    # positions[0], matching the fused NPU RoPE op's constraint.
+    shape = [d if i == 1 or i == x.ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+
+
 _UPSTREAM_ROPE_MODULE = "torchtitan.models.common.rope"
 
 _ROPE_REPLACEMENTS = {
@@ -193,6 +212,29 @@ _ROPE_REPLACEMENTS = {
     "apply_rotary_emb_single_complex": npu_apply_rotary_emb_single_complex,
     "apply_rotary_emb_cos_sin": npu_apply_rotary_emb_cos_sin,
 }
+
+
+def apply_reshape_for_broadcast_complex_patch() -> None:
+    """Patch the inner helper (called by name within common.rope) so all callers
+    are covered regardless of model from-imports. Fail loud if the target is
+    missing -- a renamed/missing target must not silently disable the fix
+    again (the previous patch went stale exactly that way).
+    """
+    mod = sys.modules.get(_UPSTREAM_ROPE_MODULE)
+    target = "_reshape_for_broadcast_complex"
+    if mod is None or not hasattr(mod, target):
+        raise RuntimeError(
+            f"RoPEKernel: target {_UPSTREAM_ROPE_MODULE}.{target} not found; "
+            f"upstream likely renamed or moved it. Re-check this converter "
+            f"against the current torchtitan version."
+        )
+    if getattr(mod, target) is reshape_for_broadcast_complex:
+        return
+    setattr(mod, target, reshape_for_broadcast_complex)
+    logger.info(
+        f"RoPEKernel: replaced {_UPSTREAM_ROPE_MODULE}.{target} "
+        f"with {reshape_for_broadcast_complex.__name__}"
+    )
 
 
 class NpuRoPEConverter(ModelCustomConverter):
@@ -237,3 +279,6 @@ class NpuRoPEConverter(ModelCustomConverter):
 @register_model_converter("npu_rope")
 class RoPEModelConfig(ModelCustomConfig):
     model_converter = NpuRoPEConverter
+
+
+apply_reshape_for_broadcast_complex_patch()
