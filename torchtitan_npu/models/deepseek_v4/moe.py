@@ -308,6 +308,9 @@ class MoE(Module):
             for m in self.shared_experts.modules():
                 if isinstance(m, nn.Linear) and m.weight is not None:
                     nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
+        # DeepSeekV4Model.init_weights bypasses the Module.init_states
+        # recursion, so call _init_self_buffers explicitly.
+        self._init_self_buffers(buffer_device=buffer_device)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -372,3 +375,13 @@ class MoE(Module):
             output = (shared_output + out_experts).reshape(bs, slen, dim)
 
         return output
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # to_empty() leaves buffers uninitialized; recreate them with zeros,
+        # mirroring common.moe.MoE._init_self_buffers. For hash layers this
+        # recreates expert_bias as a non-buffer field (see note in __init__).
+        num_experts = self.experts.num_experts
+        device = buffer_device or self.tokens_per_expert.device
+        self.tokens_per_expert = torch.zeros(num_experts, dtype=torch.float32, device=device)
+        if self.load_balance_coeff is not None:
+            self.expert_bias = torch.zeros(num_experts, dtype=torch.float32, device=device)
