@@ -68,7 +68,7 @@ bash scripts/run_train.sh \
   --comm.save_traces_folder hccl_traces
 ```
 
-当训练过程中出现 HCCL 通信超时或错误时，系统会自动将追踪信息转储到 `hccl_traces/rank_*` 文件中，开发者可以使用这些文件进行问题诊断和分析，相关指导可以参考Pytorch社区关于Flight Recorder功能的相关[说明文档](https://docs.pytorch.org/tutorials/unstable/flight_recorder_tutorial.html)。
+当训练过程中出现 HCCL 通信超时或错误时，系统会自动将追踪信息转储到 `hccl_traces/rank_*` 文件中，开发者可以使用这些文件进行问题诊断和分析，相关指导可以参考 PyTorch 社区关于 Flight Recorder 功能的相关[说明文档](https://docs.pytorch.org/tutorials/unstable/flight_recorder_tutorial.html)。
 
 ---
 

@@ -69,7 +69,7 @@ MoE 模型:   P_dense × dtype_bytes / (TP × PP) + P_expert × dtype_bytes / (T
 | 激活内存 (selective AC) | 取决于 B×S | 变动 | 变动 |
 | **静态总计 (不含激活)** | | **96 GB** | **12 GB** |
 
-**配置示例**（`llama3_8b_16die_graphs.toml`）：
+**配置示例**（llama3-8b，参数示意，实际配置见 `config_registry.py`）：
 
 - `local_batch_size = 2`, `seq_len = 2048`
 - `activation_checkpoint.mode = "selective"`
@@ -84,7 +84,7 @@ MoE 模型:   P_dense × dtype_bytes / (TP × PP) + P_expert × dtype_bytes / (T
 | 优化器状态 | 取决于 FSDP 分片、swap_optimizer | 取决于具体并行策略 |
 | 激活内存 | 强依赖 AC 策略、B、S | 需实际测量 |
 
-**配置示例**（`deepseek_v32_671b_debug.toml`）：
+**配置示例**（DeepSeek-V3.2 671B，参数示意，实际配置见 `config_registry.py`）：
 
 - `local_batch_size = 4`, `seq_len = 2048`
 - `activation_checkpoint.mode = "selective"`

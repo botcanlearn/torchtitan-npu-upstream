@@ -306,6 +306,6 @@ msmemscope 提供以下高级分析能力：
 | 自定义配置 | `torchtitan_npu/config/configs.py` |
 | 模型定义 | `torchtitan_npu/models/<model>/model.py` |
 | 模型参数 flavors | `torchtitan_npu/models/<model>/__init__.py` |
-| 训练配置 | `torchtitan_npu/models/<model>/train_configs/*.toml` |
+| 训练配置 | `torchtitan_npu/models/<model>/config_registry.py`（`--config` 传注册名，非文件路径） |
 | 并行逻辑 | `torchtitan_npu/models/<model>/parallelize.py` |
 | 调试特性文档 | `docs/feature_guides/metrics_and_debugging.md` |

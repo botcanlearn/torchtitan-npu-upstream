@@ -318,5 +318,5 @@ msprobe compare -i compare.json -o ./compare_output_statistics
 | converters | `torchtitan_npu/converters/` |
 | 量化 patch | `torchtitan_npu/patches/quantization/` |
 | 模型逻辑 | `torchtitan_npu/models/` |
-| 训练配置 | `torchtitan_npu/models/*/train_configs/*.toml` |
+| 训练配置 | `torchtitan_npu/models/<model>/config_registry.py`（`--config` 传注册名，非文件路径） |
 | 并行逻辑 | `torchtitan_npu/models/*/parallelize.py` |

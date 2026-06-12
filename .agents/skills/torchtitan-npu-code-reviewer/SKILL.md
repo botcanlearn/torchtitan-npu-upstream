@@ -30,7 +30,7 @@ description: "用于 torchtitan-npu 仓库的关键风险代码审查：本地 d
 | `torchtitan_npu/config/**/*.py` | `.agents/rules/config.md` |
 | `torchtitan_npu/converters/**/*.py` | `.agents/rules/converters.md` |
 | `torchtitan_npu/distributed/**/*.py`、`torchtitan_npu/patches/distributed/**/*.py` | `.agents/rules/distributed.md` |
-| `torchtitan_npu/models/**/*.py`、`torchtitan_npu/models/**/train_configs/*.toml` | `.agents/rules/models.md` |
+| `torchtitan_npu/models/**/*.py` | `.agents/rules/models.md` |
 | `torchtitan_npu/patches/**/*.py` | `.agents/rules/patches.md` |
 
 ### （二）代码坏味道审查

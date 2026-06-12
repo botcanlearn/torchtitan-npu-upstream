@@ -1,7 +1,6 @@
 ---
 paths:
   - "torchtitan_npu/models/**/*.py"
-  - "torchtitan_npu/models/**/train_configs/*.toml"
 ---
 
 # 模型代码规则
