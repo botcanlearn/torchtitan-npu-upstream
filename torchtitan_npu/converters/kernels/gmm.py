@@ -213,9 +213,11 @@ class GMMStateDictUpdater(StateDictUpdater):
 
     @classmethod
     def from_hf(cls, state_dict):
-        filtered = {k: v for k, v in state_dict.items() if not k.endswith(".weight_scale_inv")}
+        keys_to_remove = [k for k in state_dict if k.endswith(".weight_scale_inv")]
+        for k in keys_to_remove:
+            del state_dict[k]
 
-        return fuse_experts(filtered)
+        return fuse_experts(state_dict)
 
 
 @register_model_converter("npu_gmm")
