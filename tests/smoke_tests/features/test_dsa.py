@@ -22,9 +22,7 @@ def test_dsa_forward_returns_scalar_finite_loss(npu_device):
     from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
 
     li_loss_fn = SparseLightningIndexerKLLoss()
-    inputs = build_model_backed_dsa_inputs(
-        npu_device, batch_size=1, seq_len=2048, requires_grad=False
-    )
+    inputs = build_model_backed_dsa_inputs(npu_device, batch_size=1, seq_len=2048, requires_grad=False)
     loss = li_loss_fn(**inputs)
 
     assert loss.shape == ()
@@ -36,9 +34,7 @@ def test_dsa_backward_produces_finite_gradients(npu_device):
     from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
 
     li_loss_fn = SparseLightningIndexerKLLoss()
-    inputs = build_model_backed_dsa_inputs(
-        npu_device, batch_size=1, seq_len=2048, requires_grad=True
-    )
+    inputs = build_model_backed_dsa_inputs(npu_device, batch_size=1, seq_len=2048, requires_grad=True)
     loss = li_loss_fn(**inputs)
     loss.backward()
 
@@ -55,9 +51,7 @@ def test_dsa_supports_model_backed_shapes(batch_size, seq_len, npu_device):
     from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
 
     li_loss_fn = SparseLightningIndexerKLLoss()
-    inputs = build_model_backed_dsa_inputs(
-        npu_device, batch_size=batch_size, seq_len=seq_len, requires_grad=False
-    )
+    inputs = build_model_backed_dsa_inputs(npu_device, batch_size=batch_size, seq_len=seq_len, requires_grad=False)
     loss = li_loss_fn(**inputs)
 
     assert_tensor_finite(loss)

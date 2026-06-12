@@ -18,9 +18,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.tools.logging import logger
 
-_cp_strategies: list[
-    tuple[Callable[[nn.Module], bool], Callable[[nn.Module, DeviceMesh], None]]
-] = []
+_cp_strategies: list[tuple[Callable[[nn.Module], bool], Callable[[nn.Module, DeviceMesh], None]]] = []
 
 # Handlers for attention-mask types that upstream ``cp_shard`` cannot
 # sequence-shard (e.g. DeepSeek-V4 SMLA varlen metadata). See
@@ -88,17 +86,13 @@ def apply_cp_to_attention_module(
         applied = False
         for detector, applier in _cp_strategies:
             if detector(module):
-                logger.info(
-                    f"CP: matched strategy for {module_name} "
-                    f"cp_degree={cp_mesh.size()}"
-                )
+                logger.info(f"CP: matched strategy for {module_name} cp_degree={cp_mesh.size()}")
                 applier(module, cp_mesh)
                 applied = True
                 break
         if not applied:
             raise NotImplementedError(
-                f"No custom CP strategy found for module "
-                f"{module_name}.  Registered detectors have been exhausted."
+                f"No custom CP strategy found for module {module_name}.  Registered detectors have been exhausted."
             )
 
     logger.info("Applied custom Context Parallel to the model")

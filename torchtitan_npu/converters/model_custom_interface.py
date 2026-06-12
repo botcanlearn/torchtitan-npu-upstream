@@ -9,7 +9,6 @@ from typing import Any
 
 import torch.nn as nn
 from torch.distributed.tensor.parallel.style import ParallelStyle
-
 from torchtitan.protocols.model_spec import ModelSpec
 
 

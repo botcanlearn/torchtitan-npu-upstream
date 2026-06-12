@@ -21,11 +21,11 @@ The upstream fix adds _get_unsharded_dtensor_spec() which checks if
 tensor_meta.dtype matches the actual unsharded param dtype and creates
 a corrected DTensorSpec when they mismatch (due to mixed precision cast).
 """
+
 from dataclasses import replace
 
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor._dtensor_spec import TensorMeta
-
 
 _orig_init_unsharded_param = FSDPParam.init_unsharded_param
 

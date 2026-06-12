@@ -45,8 +45,7 @@ def init_distributed_wrapper(self, *args, **kwargs):
     G_USING_TRAIN_CONFIG = self.config
     if _original_init_distributed is None:
         raise RuntimeError(
-            "init_distributed_wrapper called before apply(); "
-            "this patch must be activated via _apply_patches()."
+            "init_distributed_wrapper called before apply(); this patch must be activated via _apply_patches()."
         )
     return _original_init_distributed(self, *args, **kwargs)
 

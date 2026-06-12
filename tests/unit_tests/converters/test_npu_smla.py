@@ -26,16 +26,10 @@ class TestSMLANPUKernel(unittest.TestCase):
         self.topk = 256
         self.softmax_scale = 0.125
 
-        self.query = torch.randn(
-            self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim
-        )
+        self.query = torch.randn(self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim)
         self.kv_states = torch.randn(self.seq_len_kv, self.batch_size, self.head_dim)
-        self.kv_compress = torch.randn(
-            self.seq_len_kv // self.compress_ratio, self.batch_size, self.head_dim
-        )
-        self.indices = torch.randint(
-            0, self.seq_len_kv, (self.batch_size, self.seq_len_q, self.topk)
-        ).to(torch.int64)
+        self.kv_compress = torch.randn(self.seq_len_kv // self.compress_ratio, self.batch_size, self.head_dim)
+        self.indices = torch.randint(0, self.seq_len_kv, (self.batch_size, self.seq_len_q, self.topk)).to(torch.int64)
         self.sinks = torch.randn(1, 128)
 
     def test_npu_sparse_attention_forward_flow(self):
@@ -43,9 +37,7 @@ class TestSMLANPUKernel(unittest.TestCase):
         mock_fused_op = _mock_fused_fn
         mock_fused_op.reset_mock()
 
-        mock_fused_op.return_value = torch.randn(
-            self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim
-        )
+        mock_fused_op.return_value = torch.randn(self.batch_size, self.seq_len_q, self.num_heads_q, self.head_dim)
 
         # Create mock parent module
         mock_parent = MagicMock()

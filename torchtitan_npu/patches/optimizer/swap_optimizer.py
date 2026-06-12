@@ -141,8 +141,7 @@ class SwapOptimizersContainer(OptimizersContainer):
                 )
             if self._owner is None:
                 raise NotImplementedError(
-                    f"{type(self).__name__} has no owner class. "
-                    "Define Config inside a Configurable subclass."
+                    f"{type(self).__name__} has no owner class. Define Config inside a Configurable subclass."
                 )
             if not kwargs:
                 return self._owner(config=replace(self))
@@ -173,9 +172,7 @@ class SwapOptimizersContainer(OptimizersContainer):
 
         # create streams for swapping
         if SwapOptimizersContainer.swap_to_device_stream is None:
-            # pyrefly: ignore [missing-attribute]
             SwapOptimizersContainer.swap_to_device_stream = get_torch_device().Stream()
-            # pyrefly: ignore [missing-attribute]
             SwapOptimizersContainer.swap_to_host_stream = get_torch_device().Stream()
 
         # initialize states and cpu counterparts for each device param
@@ -185,16 +182,9 @@ class SwapOptimizersContainer(OptimizersContainer):
                 for p in group["params"]:
                     optim.param_to_group_map[p] = group
                     SwapOptimizersContainer.param_state_initialization(p, optim)
-            swap_num = sum(
-                [
-                    sum([unwrap_dtensor(p).numel() for p in group["params"]])
-                    for group in optim.param_groups
-                ]
-            )
+            swap_num = sum([sum([unwrap_dtensor(p).numel() for p in group["params"]]) for group in optim.param_groups])
             optim.swap_numel = swap_num // config.swap_optimizer_times
-            logger.info(
-                f"Swap param numel for optimizer_{idx}: {optim.swap_numel} / {swap_num}\n"
-            )
+            logger.info(f"Swap param numel for optimizer_{idx}: {optim.swap_numel} / {swap_num}\n")
 
     @staticmethod
     def _restore_states(original_states):
@@ -226,9 +216,7 @@ class SwapOptimizersContainer(OptimizersContainer):
 
     @staticmethod
     def _save_param_groups(optimizers):
-        return [
-            (group, dict(group)) for optim in optimizers for group in optim.param_groups
-        ]
+        return [(group, dict(group)) for optim in optimizers for group in optim.param_groups]
 
     @staticmethod
     def _restore_param_groups(original_param_groups):
@@ -270,18 +258,14 @@ class SwapOptimizersContainer(OptimizersContainer):
             for param_name in param_names_by_param.get(param, [name]):
                 fqns = set(_get_fqns(model_part, param_name))
                 if not fqns:
-                    raise AssertionError(
-                        f"Expected at least 1 FQN for parameter '{param_name}', got 0"
-                    )
+                    raise AssertionError(f"Expected at least 1 FQN for parameter '{param_name}', got 0")
                 if len(fqns) > 1 and param_name not in fqns:
                     raise NotImplementedError(
                         "Swap optimizer checkpoint does not support saving "
                         f"flattened parameter '{param_name}' that maps to multiple "
                         f"FQNs: {sorted(fqns)}"
                     )
-                ordered_fqns.extend(
-                    fqn for fqn in [param_name, *sorted(fqns)] if fqn in fqns
-                )
+                ordered_fqns.extend(fqn for fqn in [param_name, *sorted(fqns)] if fqn in fqns)
             ordered_fqns = list(dict.fromkeys(ordered_fqns))
             fqns_by_param[param] = tuple(ordered_fqns)
         return fqns_by_param
@@ -305,9 +289,7 @@ class SwapOptimizersContainer(OptimizersContainer):
                 cpu_state[key] = None
             else:
                 local_param = unwrap_dtensor(param)
-                cpu_state[key] = torch.zeros_like(
-                    local_param, pin_memory=True, device="cpu"
-                )
+                cpu_state[key] = torch.zeros_like(local_param, pin_memory=True, device="cpu")
                 device_state[key] = cls._clone_loaded_state_for_device_placeholder(
                     param,
                     cpu_state[key],
@@ -336,17 +318,10 @@ class SwapOptimizersContainer(OptimizersContainer):
                     )
                     device_state[key] = wrap_like_param(local_state, param)
                 else:
-                    local_state.untyped_storage().resize_(
-                        cpu_state[key].untyped_storage().size()
-                    )
+                    local_state.untyped_storage().resize_(cpu_state[key].untyped_storage().size())
                 local_state.copy_(cpu_state[key], non_blocking=True)
 
-        cls.swap_to_device_events_map[param] = (
-            # pyrefly: ignore [missing-attribute]
-            get_torch_device()
-            .current_stream()
-            .record_event()
-        )
+        cls.swap_to_device_events_map[param] = get_torch_device().current_stream().record_event()
 
     @classmethod
     def swap_states_to_host(cls, param):
@@ -363,18 +338,12 @@ class SwapOptimizersContainer(OptimizersContainer):
                 cpu_state[key].copy_(local_state, non_blocking=True)
                 local_state.untyped_storage().resize_(0)
 
-        cls.swap_to_host_events_map[param] = (
-            # pyrefly: ignore [missing-attribute]
-            get_torch_device()
-            .current_stream()
-            .record_event()
-        )
+        cls.swap_to_host_events_map[param] = get_torch_device().current_stream().record_event()
 
     @classmethod
     def wait_swap_to_device_event(cls, param):
         event = cls.swap_to_device_events_map.get(param, None)
         if event is not None:
-            # pyrefly: ignore [missing-attribute]
             get_torch_device().current_stream().wait_event(event)
             cls.swap_to_device_events_map[param] = None
 
@@ -382,7 +351,6 @@ class SwapOptimizersContainer(OptimizersContainer):
     def wait_param_update_event(cls, param):
         event = cls.param_update_events_map.get(param, None)
         if event is not None:
-            # pyrefly: ignore [missing-attribute]
             get_torch_device().current_stream().wait_event(event)
             cls.param_update_events_map[param] = None
 
@@ -390,13 +358,8 @@ class SwapOptimizersContainer(OptimizersContainer):
     def _tensor_for_state_dict(cls, tensor, like_param=None):
         local_tensor = unwrap_dtensor(tensor)
         if local_tensor.numel() != 0 and local_tensor.untyped_storage().size() == 0:
-            raise RuntimeError(
-                "Cannot checkpoint a swapped optimizer state without CPU cache."
-            )
-        if local_tensor.device.type == "cpu":
-            cpu_tensor = local_tensor.detach()
-        else:
-            cpu_tensor = local_tensor.detach().cpu()
+            raise RuntimeError("Cannot checkpoint a swapped optimizer state without CPU cache.")
+        cpu_tensor = local_tensor.detach() if local_tensor.device.type == "cpu" else local_tensor.detach().cpu()
         if isinstance(like_param, DTensor):
             return wrap_like_param_without_device_move(cpu_tensor, like_param)
         return cpu_tensor
@@ -437,9 +400,7 @@ class SwapOptimizersContainer(OptimizersContainer):
         for key, value in group.items():
             if key == "params":
                 continue
-            state_dict[
-                f"param_groups.{fqn}.{key}"
-            ] = cls._param_group_value_for_state_dict(value)
+            state_dict[f"param_groups.{fqn}.{key}"] = cls._param_group_value_for_state_dict(value)
 
     @classmethod
     def _add_param_state_to_state_dict(cls, state_dict, optim, param, fqn):
@@ -519,9 +480,7 @@ class SwapOptimizersContainer(OptimizersContainer):
         for key in group:
             if key == "params":
                 continue
-            value = cls._state_dict_value_for_fqns(
-                state_dict, "param_groups", fqns, key
-            )
+            value = cls._state_dict_value_for_fqns(state_dict, "param_groups", fqns, key)
             if value is not cls._MISSING:
                 group[key] = cls._clone_loaded_value(value)
 
@@ -550,9 +509,7 @@ class SwapOptimizersContainer(OptimizersContainer):
 
         step = cls._state_dict_value_for_fqns(state_dict, "state", fqns, "step")
         if step is cls._MISSING:
-            step = cls._state_dict_value_for_fqns(
-                state_dict, "param_groups", fqns, "step"
-            )
+            step = cls._state_dict_value_for_fqns(state_dict, "param_groups", fqns, "step")
         if step is not cls._MISSING:
             group["step"] = cls._clone_loaded_value(step)
 
@@ -574,7 +531,7 @@ class SwapOptimizersContainer(OptimizersContainer):
     def state_dict(self) -> dict[str, Any]:
         self._wait_pending_swap_to_host()
         state_dict = {}
-        for model_part, optim in zip(self.model_parts, self.optimizers):
+        for model_part, optim in zip(self.model_parts, self.optimizers, strict=False):
             state_dict.update(self._optimizer_state_dict(model_part, optim))
         return state_dict
 
@@ -582,7 +539,7 @@ class SwapOptimizersContainer(OptimizersContainer):
         original_states = self._save_optimizer_states()
         original_param_groups = self._save_param_groups(self.optimizers)
         try:
-            for model_part, optim in zip(self.model_parts, self.optimizers):
+            for model_part, optim in zip(self.model_parts, self.optimizers, strict=False):
                 self._load_optimizer_state_dict(model_part, optim, state_dict)
         except Exception:
             self._restore_states(original_states)
@@ -593,11 +550,7 @@ class SwapOptimizersContainer(OptimizersContainer):
 
 def param_update(param, state, param_group):
     beta1, beta2 = param_group["betas"]
-    step_func = (
-        torch._fused_adamw_
-        if param_group["decoupled_weight_decay"]
-        else torch._fused_adam_
-    )
+    step_func = torch._fused_adamw_ if param_group["decoupled_weight_decay"] else torch._fused_adam_
     step_func(
         [param],
         [param.grad],
@@ -617,17 +570,10 @@ def param_update(param, state, param_group):
 
 def pipeline_load_param(swap_numel, params_list, start_index, current_swap_count):
     torch_device = get_torch_device()
-    # pyrefly: ignore [missing-attribute]
-    torch_device.current_stream().wait_stream(
-        SwapOptimizersContainer.swap_to_host_stream
-    )
+    torch_device.current_stream().wait_stream(SwapOptimizersContainer.swap_to_host_stream)
 
-    # pyrefly: ignore [missing-attribute]
     with torch_device.stream(SwapOptimizersContainer.swap_to_device_stream):
-        # pyrefly: ignore [missing-attribute]
-        torch_device.current_stream().wait_stream(
-            SwapOptimizersContainer.swap_to_host_stream
-        )
+        torch_device.current_stream().wait_stream(SwapOptimizersContainer.swap_to_host_stream)
 
         idx = start_index
         while idx < len(params_list):
@@ -650,9 +596,7 @@ def pipeline_load_param(swap_numel, params_list, start_index, current_swap_count
 @_use_grad_for_differentiable
 def swap_optimizer_step(self, closure=None):
     if torch.jit.is_scripting():
-        raise NotImplementedError(
-            "SwapOptimizer does not support torch.jit.script by now."
-        )
+        raise NotImplementedError("SwapOptimizer does not support torch.jit.script by now.")
 
     loss = None
     if closure is not None:
@@ -667,7 +611,6 @@ def swap_optimizer_step(self, closure=None):
             group["step"] = torch.tensor(
                 1,
                 dtype=torch.int64,
-                # pyrefly: ignore [missing-attribute]
                 device=get_torch_device().current_device(),
             )
 
@@ -677,9 +620,7 @@ def swap_optimizer_step(self, closure=None):
         if param.grad is None:
             continue
         if param.grad.is_sparse:
-            raise RuntimeError(
-                "SwapOptimizer step function does not support sparse gradients for now."
-            )
+            raise RuntimeError("SwapOptimizer step function does not support sparse gradients for now.")
 
         state = self.state[param]
         group = self.param_to_group_map[param]
@@ -687,37 +628,21 @@ def swap_optimizer_step(self, closure=None):
 
         # state initialization
         if len(state) == 0:
-            state["exp_avg"] = torch.zeros_like(
-                param, memory_format=torch.preserve_format
-            )
-            state["exp_avg_sq"] = torch.zeros_like(
-                param, memory_format=torch.preserve_format
-            )
+            state["exp_avg"] = torch.zeros_like(param, memory_format=torch.preserve_format)
+            state["exp_avg_sq"] = torch.zeros_like(param, memory_format=torch.preserve_format)
         if "max_exp_avg_sq" not in state:
-            state["max_exp_avg_sq"] = (
-                torch.zeros_like(param, memory_format=torch.preserve_format)
-                if amsgrad
-                else None
-            )
+            state["max_exp_avg_sq"] = torch.zeros_like(param, memory_format=torch.preserve_format) if amsgrad else None
 
         # pipelined swap update (load -> update -> offload)
         # load
         if swap_count == 0:
-            swap_count = pipeline_load_param(
-                self.swap_numel, params_list, i, swap_count
-            )
+            swap_count = pipeline_load_param(self.swap_numel, params_list, i, swap_count)
 
         # update
         SwapOptimizersContainer.wait_swap_to_device_event(param)
         param_update(param, state, group)
-        SwapOptimizersContainer.param_update_events_map[param] = (
-            # pyrefly: ignore [missing-attribute]
-            get_torch_device()
-            .current_stream()
-            .record_event()
-        )
+        SwapOptimizersContainer.param_update_events_map[param] = get_torch_device().current_stream().record_event()
         # offload
-        # pyrefly: ignore [missing-attribute]
         with get_torch_device().stream(SwapOptimizersContainer.swap_to_host_stream):
             SwapOptimizersContainer.wait_param_update_event(param)
             swap_count -= unwrap_dtensor(param).numel()

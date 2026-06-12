@@ -45,9 +45,7 @@ def deepseek_v4_285b_debug_4_layers() -> TrainerConfig:
         hf_assets_path="./tests/assets/tokenizer/deepseekv4_tokenizer",
         model_spec=model_registry("285B_debug_4_layers"),
         debug=DebugConfig(print_config=True, moe_force_load_balance=True),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
@@ -105,9 +103,7 @@ def deepseek_v4_285b_43layers_4k_128die() -> TrainerConfig:
         model_spec=model_registry("285B_debug_43_layers"),
         debug=DebugConfig(print_config=True),
         comm=CommConfig(trace_buf_size=0),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
@@ -172,9 +168,7 @@ def deepseek_v4_pro_debug_16_layers() -> TrainerConfig:
         hf_assets_path="./tests/assets/tokenizer/deepseek_v4_pro_tokenizer",
         model_spec=model_registry("v4_pro_debug_16_layers"),
         debug=DebugConfig(print_config=True, moe_force_load_balance=True),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
@@ -242,9 +236,7 @@ def deepseek_v4_pro_debug_61_layers_4k_384die() -> TrainerConfig:
         model_spec=model_registry("v4_pro_debug_61_layers"),
         debug=DebugConfig(print_config=True, moe_force_load_balance=True),
         comm=CommConfig(trace_buf_size=0),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(

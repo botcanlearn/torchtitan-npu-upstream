@@ -18,7 +18,6 @@ from torchtitan_npu.config.configs import (
     TrainerConfig,
     TrainingConfig,
 )
-
 from torchtitan_npu.converters import get_model_converter_config
 
 from . import model_registry
@@ -39,9 +38,7 @@ def deepseek_v32_671b_4layers_debug() -> TrainerConfig:
         hf_assets_path="./assets/hf/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_4_layers"),
         debug=DebugConfig(print_config=True),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
         optimizer=OptimizerConfig(
@@ -106,9 +103,7 @@ def deepseek_v32_671b_61layers_4k_128die() -> TrainerConfig:
         hf_assets_path="./assets/hf/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_128die"),
         debug=DebugConfig(print_config=True),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="enwiki-eod"),
         optimizer=OptimizerConfig(
@@ -163,9 +158,7 @@ def deepseek_v32_671b_61layers_32k_128die() -> TrainerConfig:
         hf_assets_path="./assets/hf/DeepSeek-V3.2",
         model_spec=model_registry("671B_debug_128die"),
         debug=DebugConfig(print_config=True),
-        model_converters=ModelConvertersContainer.Config(
-            converters=_default_converters()
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=_default_converters()),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="enwiki-eod"),
         optimizer=OptimizerConfig(

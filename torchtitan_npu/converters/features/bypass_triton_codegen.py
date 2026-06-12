@@ -12,6 +12,7 @@ from torch._inductor.decomposition import decompositions
 from torch._inductor.lowering import lowerings
 
 from torchtitan_npu.patches.torch._inductor.graph import graphlowering_call_function
+
 from ..convert_utils import find_functions
 from ..model_custom_interface import ModelCustomConfig, ModelCustomConverter
 from ..registry import register_model_converter
@@ -34,7 +35,6 @@ def compile_bypass_fusion(func):
 
 
 class BypassTritonCodegenConverter(ModelCustomConverter):
-
     SUPPORTED_MODELS = {"deepseek_v32", "llama3"}
 
     def convert(self, model: nn.Module):
@@ -51,9 +51,7 @@ class BypassTritonCodegenConverter(ModelCustomConverter):
         matches = find_functions(target, package=pkg)
         matches.extend(find_functions(target, package=pkg_npu))
         if not matches:
-            logger.info(
-                "  No matched function apply_compile for this model, continue without patching"
-            )
+            logger.info("  No matched function apply_compile for this model, continue without patching")
             return
 
         for m in matches:

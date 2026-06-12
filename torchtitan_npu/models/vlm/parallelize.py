@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torch import nn
-
 from torchtitan.config import ActivationCheckpointConfig, CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.vlm.infra.parallelize import parallelize_vlm
@@ -14,16 +13,13 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan_npu.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan_npu.converters.registry import has_npu_converter
 
-
 # Current VLM NPU only supports FSDP/HSDP data parallelism.
 
 
 def _validate_supported_parallel_dims(parallel_dims: ParallelDims) -> None:
     """Document and enforce the currently supported VLM NPU parallel modes."""
     if parallel_dims.tp_enabled or parallel_dims.pp_enabled or parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "VLM NPU currently only supports FSDP/HSDP data parallelism."
-        )
+        raise NotImplementedError("VLM NPU currently only supports FSDP/HSDP data parallelism.")
 
 
 def _validate_npu_vlm_converter(

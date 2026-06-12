@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 import torch.nn as nn
-
 import torch_npu
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.quantization.mx import MXFP8Converter
@@ -16,6 +15,8 @@ from torchtitan.tools.logging import logger
 
 from ..patches.quantization.quant_config import (
     MoETrainingConfig as TorchMoETrainingConfig,
+)
+from ..patches.quantization.quant_config import (
     MXLinearConfig as TorchMXLinearConfig,
 )
 from ..patches.quantization.quantize import grouped_quantize_, linear_quantize_
@@ -52,9 +53,7 @@ def npu_quant_mxfp8_converter_init(
 ):
     self.enabled = False
     if not is_a5():
-        raise RuntimeError(
-            "[MXFP8/Hif8] is only supported on Ascend950 or higher architecture."
-        )
+        raise RuntimeError("[MXFP8/Hif8] is only supported on Ascend950 or higher architecture.")
 
     self.linear_config = TorchMXLinearConfig.from_recipe_name(config.recipe_name)
     self.grouped_mm_config = TorchMoETrainingConfig.from_recipe_name(config.recipe_name)
@@ -78,10 +77,7 @@ def npu_quant_mxfp8_converter(self, model: nn.Module):
     logger.info("Swapped to MXLinear_NPU layers")
 
     def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-        for target_fqn in self.moe_fqns:
-            if target_fqn in cur_fqn:
-                return True
-        return False
+        return any(target_fqn in cur_fqn for target_fqn in self.moe_fqns)
 
     grouped_quantize_(
         model,
@@ -89,13 +85,10 @@ def npu_quant_mxfp8_converter(self, model: nn.Module):
         filter_fn=moe_module_filter_fn,
     )
     logger.info(
-        f"Converted all MoE grouped MM layers "
-        f"to use dynamic {self.recipe_name} quantization with scaled grouped GEMMs"
+        f"Converted all MoE grouped MM layers to use dynamic {self.recipe_name} quantization with scaled grouped GEMMs"
     )
 
 
 MXFP8Converter.Config = NPUMXFP8Config  # pyrefly: ignore [read-only, bad-assignment]
-MXFP8Converter.__init__ = (
-    npu_quant_mxfp8_converter_init  # pyrefly: ignore [bad-assignment]
-)
+MXFP8Converter.__init__ = npu_quant_mxfp8_converter_init  # pyrefly: ignore [bad-assignment]
 MXFP8Converter.convert = npu_quant_mxfp8_converter

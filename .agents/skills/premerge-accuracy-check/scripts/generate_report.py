@@ -63,11 +63,7 @@ def fill_template(template: str, data: dict) -> str:
         if isinstance(value, list):
             # Handle list sections: {{#list_name}}...{{key}}...{{/list_name}}
             pattern = re.compile(
-                r"\{\{#"
-                + re.escape(key)
-                + r"\}\}(.*?)\{\{/"
-                + re.escape(key)
-                + r"\}\}",
+                r"\{\{#" + re.escape(key) + r"\}\}(.*?)\{\{/" + re.escape(key) + r"\}\}",
                 re.DOTALL,
             )
             for match in pattern.finditer(result):
@@ -77,9 +73,7 @@ def fill_template(template: str, data: dict) -> str:
                     rendered = block_template
                     if isinstance(item, dict):
                         for item_key, item_val in item.items():
-                            rendered = rendered.replace(
-                                "{{" + item_key + "}}", str(item_val)
-                            )
+                            rendered = rendered.replace("{{" + item_key + "}}", str(item_val))
                     else:
                         # String or scalar item — {{.}} renders the value itself
                         rendered = rendered.replace("{{.}}", str(item))
@@ -88,11 +82,7 @@ def fill_template(template: str, data: dict) -> str:
         else:
             # Handle boolean/conditional sections: {{#bool_key}}...{{/bool_key}}
             pattern = re.compile(
-                r"\{\{#"
-                + re.escape(key)
-                + r"\}\}(.*?)\{\{/"
-                + re.escape(key)
-                + r"\}\}",
+                r"\{\{#" + re.escape(key) + r"\}\}(.*?)\{\{/" + re.escape(key) + r"\}\}",
                 re.DOTALL,
             )
             if value:
@@ -101,18 +91,14 @@ def fill_template(template: str, data: dict) -> str:
                 result = pattern.sub("", result)  # falsy: remove entire block
             # Simple placeholder substitution
             placeholder = "{{" + key + "}}"
-            result = result.replace(
-                placeholder, str(value) if value is not None else ""
-            )
+            result = result.replace(placeholder, str(value) if value is not None else "")
 
     # Clean up any remaining {{mustache}} placeholders
     result = re.sub(r"\{\{.*?\}\}", "", result)
     return result
 
 
-def _extract_case_metrics(
-    report: dict, case_label: str, tolerance: float, report_path: str = ""
-) -> dict:
+def _extract_case_metrics(report: dict, case_label: str, tolerance: float, report_path: str = "") -> dict:
     """Extract per-case metrics, plot paths, and pass/fail from a single report.json."""
     loss_metric = None
     grad_metric = None
@@ -132,12 +118,8 @@ def _extract_case_metrics(
                 "loss_max_rel_diff": f"{loss_metric['max_rel_diff']:.6f}",
                 "loss_mean_rel_diff": f"{loss_metric['mean_rel_diff']:.6f}",
                 "loss_common_steps": str(loss_metric.get("num_common_steps", "")),
-                "loss_max_abs_diff_class": classify_diff(
-                    loss_metric["max_abs_diff"], tolerance
-                ),
-                "loss_pass_class": classify_diff(
-                    loss_metric["max_abs_diff"], tolerance
-                ),
+                "loss_max_abs_diff_class": classify_diff(loss_metric["max_abs_diff"], tolerance),
+                "loss_pass_class": classify_diff(loss_metric["max_abs_diff"], tolerance),
                 "loss_pass_text": pass_text(loss_metric["max_abs_diff"], tolerance),
             }
         )
@@ -149,15 +131,9 @@ def _extract_case_metrics(
                 "grad_norm_max_rel_diff": f"{grad_metric['max_rel_diff']:.6f}",
                 "grad_norm_mean_rel_diff": f"{grad_metric['mean_rel_diff']:.6f}",
                 "grad_norm_common_steps": str(grad_metric.get("num_common_steps", "")),
-                "grad_norm_max_abs_diff_class": classify_diff(
-                    grad_metric["max_abs_diff"], tolerance
-                ),
-                "grad_norm_pass_class": classify_diff(
-                    grad_metric["max_abs_diff"], tolerance
-                ),
-                "grad_norm_pass_text": pass_text(
-                    grad_metric["max_abs_diff"], tolerance
-                ),
+                "grad_norm_max_abs_diff_class": classify_diff(grad_metric["max_abs_diff"], tolerance),
+                "grad_norm_pass_class": classify_diff(grad_metric["max_abs_diff"], tolerance),
+                "grad_norm_pass_text": pass_text(grad_metric["max_abs_diff"], tolerance),
             }
         )
     case["passed"] = report.get("passed", True)
@@ -185,11 +161,7 @@ def build_template_data(
     cases = []
     for i, report in enumerate(reports):
         path = report_paths[i] if i < len(report_paths) else ""
-        label = (
-            os.path.basename(os.path.dirname(os.path.abspath(path)))
-            if path
-            else f"case_{i}"
-        )
+        label = os.path.basename(os.path.dirname(os.path.abspath(path))) if path else f"case_{i}"
         case = _extract_case_metrics(report, label, tolerance, path)
         case["case_index"] = str(i + 1)  # 5.1, 5.2, ...
         cases.append(case)
@@ -208,9 +180,7 @@ def build_template_data(
         "npu_count": reproduce.get("environment", {}).get("npu_count", ""),
         "cann_version": reproduce.get("environment", {}).get("cann_version", ""),
         "torch_version": reproduce.get("environment", {}).get("torch_version", ""),
-        "torch_npu_version": reproduce.get("environment", {}).get(
-            "torch_npu_version", ""
-        ),
+        "torch_npu_version": reproduce.get("environment", {}).get("torch_npu_version", ""),
         "baseline_branch": reproduce.get("baseline_branch", ""),
         "baseline_commit": reproduce.get("baseline_commit", ""),
         "baseline_commit_short": reproduce.get("baseline_commit", "")[:short_len],
@@ -222,9 +192,7 @@ def build_template_data(
         "training_steps": reproduce.get("training_steps", ""),
         "parallelism_summary": reproduce.get("parallelism_summary", ""),
         "branch_diff": reproduce.get("branch_diff", "(未记录)"),
-        "repo_url": reproduce.get(
-            "repo_url", "https://gitcode.com/cann/torchtitan-npu.git"
-        ),
+        "repo_url": reproduce.get("repo_url", "https://gitcode.com/cann/torchtitan-npu.git"),
         "infra_steps": reproduce.get("infra_steps", []),
         "training_runs": reproduce.get("training_runs", []),
         "compare_commands": reproduce.get("compare_commands", []),
@@ -299,9 +267,7 @@ def _build_failed_items(report: dict, tolerance: float) -> list[dict]:
             items.append(
                 {
                     "tag": tag_label,
-                    "step": str(
-                        m.get("first_exceed_step", m.get("max_abs_diff_step", "?"))
-                    ),
+                    "step": str(m.get("first_exceed_step", m.get("max_abs_diff_step", "?"))),
                     "diff": f"{first_abs_diff:.6f}",
                 }
             )
@@ -309,9 +275,7 @@ def _build_failed_items(report: dict, tolerance: float) -> list[dict]:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate numerical stability PDF report"
-    )
+    parser = argparse.ArgumentParser(description="Generate numerical stability PDF report")
     parser.add_argument(
         "--report",
         required=True,
@@ -321,9 +285,7 @@ def main():
     parser.add_argument("--reproduce", required=True, help="Path to reproduce.json")
     parser.add_argument("--template", required=True, help="Path to HTML template")
     parser.add_argument("--output", required=True, help="Output PDF path")
-    parser.add_argument(
-        "--tolerance", type=float, default=1e-5, help="Tolerance threshold"
-    )
+    parser.add_argument("--tolerance", type=float, default=1e-5, help="Tolerance threshold")
     args = parser.parse_args()
 
     # Validate inputs
@@ -388,9 +350,7 @@ def main():
         HTML(string=html, base_url=output_dir).write_pdf(args.output)
         print(f"PDF:  {args.output}")
     except ImportError:
-        print(
-            "WARNING: weasyprint not installed. Open the HTML file in a browser and print to PDF."
-        )
+        print("WARNING: weasyprint not installed. Open the HTML file in a browser and print to PDF.")
         print("  pip install weasyprint  # to enable PDF generation")
     except Exception as e:
         print("WARNING: PDF generation failed:", e)

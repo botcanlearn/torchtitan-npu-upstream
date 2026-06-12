@@ -49,18 +49,10 @@ if TRITON_AVAILABLE:
         mask_d = tl.full((BLOCK_D,), True, tl.int1) if DIVISIBLE_D else (d < D)
 
         # load H (G,1)
-        h0 = tl.load(
-            H_ptr + pids * stride_h_bs + 0 * stride_h_n, mask=mask_pid, other=0.0
-        )[:, None]
-        h1 = tl.load(
-            H_ptr + pids * stride_h_bs + 1 * stride_h_n, mask=mask_pid, other=0.0
-        )[:, None]
-        h2 = tl.load(
-            H_ptr + pids * stride_h_bs + 2 * stride_h_n, mask=mask_pid, other=0.0
-        )[:, None]
-        h3 = tl.load(
-            H_ptr + pids * stride_h_bs + 3 * stride_h_n, mask=mask_pid, other=0.0
-        )[:, None]
+        h0 = tl.load(H_ptr + pids * stride_h_bs + 0 * stride_h_n, mask=mask_pid, other=0.0)[:, None]
+        h1 = tl.load(H_ptr + pids * stride_h_bs + 1 * stride_h_n, mask=mask_pid, other=0.0)[:, None]
+        h2 = tl.load(H_ptr + pids * stride_h_bs + 2 * stride_h_n, mask=mask_pid, other=0.0)[:, None]
+        h3 = tl.load(H_ptr + pids * stride_h_bs + 3 * stride_h_n, mask=mask_pid, other=0.0)[:, None]
 
         X_base = X_ptr + pids[:, None] * stride_x_bs + d[None, :] * stride_x_d
         Y_base = Y_ptr + pids[:, None] * stride_y_bs + d[None, :] * stride_y_d
@@ -118,49 +110,29 @@ if TRITON_AVAILABLE:
         ).to(tl.float32)
 
         # load H (for dX)
-        h0 = tl.load(
-            H_ptr + pids * stride_h_bs + 0 * stride_h_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        h1 = tl.load(
-            H_ptr + pids * stride_h_bs + 1 * stride_h_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        h2 = tl.load(
-            H_ptr + pids * stride_h_bs + 2 * stride_h_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        h3 = tl.load(
-            H_ptr + pids * stride_h_bs + 3 * stride_h_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
+        h0 = tl.load(H_ptr + pids * stride_h_bs + 0 * stride_h_n, mask=mask_pid, other=0.0).to(tl.float32)[:, None]
+        h1 = tl.load(H_ptr + pids * stride_h_bs + 1 * stride_h_n, mask=mask_pid, other=0.0).to(tl.float32)[:, None]
+        h2 = tl.load(H_ptr + pids * stride_h_bs + 2 * stride_h_n, mask=mask_pid, other=0.0).to(tl.float32)[:, None]
+        h3 = tl.load(H_ptr + pids * stride_h_bs + 3 * stride_h_n, mask=mask_pid, other=0.0).to(tl.float32)[:, None]
 
         # write dX
         tl.store(
-            dX_ptr
-            + pids[:, None] * stride_dx_bs
-            + 0 * stride_dx_n
-            + d[None, :] * stride_dx_d,
+            dX_ptr + pids[:, None] * stride_dx_bs + 0 * stride_dx_n + d[None, :] * stride_dx_d,
             dY * h0,
             mask=m,
         )
         tl.store(
-            dX_ptr
-            + pids[:, None] * stride_dx_bs
-            + 1 * stride_dx_n
-            + d[None, :] * stride_dx_d,
+            dX_ptr + pids[:, None] * stride_dx_bs + 1 * stride_dx_n + d[None, :] * stride_dx_d,
             dY * h1,
             mask=m,
         )
         tl.store(
-            dX_ptr
-            + pids[:, None] * stride_dx_bs
-            + 2 * stride_dx_n
-            + d[None, :] * stride_dx_d,
+            dX_ptr + pids[:, None] * stride_dx_bs + 2 * stride_dx_n + d[None, :] * stride_dx_d,
             dY * h2,
             mask=m,
         )
         tl.store(
-            dX_ptr
-            + pids[:, None] * stride_dx_bs
-            + 3 * stride_dx_n
-            + d[None, :] * stride_dx_d,
+            dX_ptr + pids[:, None] * stride_dx_bs + 3 * stride_dx_n + d[None, :] * stride_dx_d,
             dY * h3,
             mask=m,
         )
@@ -181,18 +153,10 @@ if TRITON_AVAILABLE:
 
         # atomic add to dH[bs, i]
         # (mask_pid already ensures only valid bs write)
-        tl.atomic_add(
-            dH_ptr + pids * stride_dh_bs + 0 * stride_dh_n, dh0, mask=mask_pid
-        )
-        tl.atomic_add(
-            dH_ptr + pids * stride_dh_bs + 1 * stride_dh_n, dh1, mask=mask_pid
-        )
-        tl.atomic_add(
-            dH_ptr + pids * stride_dh_bs + 2 * stride_dh_n, dh2, mask=mask_pid
-        )
-        tl.atomic_add(
-            dH_ptr + pids * stride_dh_bs + 3 * stride_dh_n, dh3, mask=mask_pid
-        )
+        tl.atomic_add(dH_ptr + pids * stride_dh_bs + 0 * stride_dh_n, dh0, mask=mask_pid)
+        tl.atomic_add(dH_ptr + pids * stride_dh_bs + 1 * stride_dh_n, dh1, mask=mask_pid)
+        tl.atomic_add(dH_ptr + pids * stride_dh_bs + 2 * stride_dh_n, dh2, mask=mask_pid)
+        tl.atomic_add(dH_ptr + pids * stride_dh_bs + 3 * stride_dh_n, dh3, mask=mask_pid)
 
 
 def hc_pre_bmm_forward(H_pre: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

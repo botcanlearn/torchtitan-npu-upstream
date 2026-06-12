@@ -29,27 +29,16 @@ class NpuVLMConverter(ModelCustomConverter):
 
     def convert(self, model: nn.Module) -> None:
         if self.model_name != "vlm":
-            raise ValueError(
-                f"npu_vlm converter only supports model 'vlm', got {self.model_name!r}."
-            )
+            raise ValueError(f"npu_vlm converter only supports model 'vlm', got {self.model_name!r}.")
         if not isinstance(model, Llama3Siglip2TransformerNpu):
-            raise TypeError(
-                "npu_vlm converter requires Llama3Siglip2TransformerNpu. "
-                f"Got {type(model).__name__}."
-            )
+            raise TypeError(f"npu_vlm converter requires Llama3Siglip2TransformerNpu. Got {type(model).__name__}.")
 
-        decoder_layers = cast(Any, model.layers)
-        if not all(
-            isinstance(layer.attention.inner_attention, DenseMaskSDPA)
-            for layer in decoder_layers.values()
-        ):
+        decoder_layers = cast("Any", model.layers)
+        if not all(isinstance(layer.attention.inner_attention, DenseMaskSDPA) for layer in decoder_layers.values()):
             raise TypeError("npu_vlm requires decoder DenseMaskSDPA attention.")
 
-        encoder_layers = cast(Any, model.encoder.layers)
-        if not all(
-            isinstance(layer.self_attn.inner_attention, DenseMaskSDPA)
-            for layer in encoder_layers.values()
-        ):
+        encoder_layers = cast("Any", model.encoder.layers)
+        if not all(isinstance(layer.self_attn.inner_attention, DenseMaskSDPA) for layer in encoder_layers.values()):
             raise TypeError("npu_vlm requires encoder DenseMaskSDPA attention.")
 
 

@@ -8,9 +8,8 @@
 # LICENSE file in the root directory of this source tree.
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed.pipelining.stage
@@ -32,6 +31,9 @@ from torchtitan_npu.models.deepseek_v4.pipeline_parallel import (
     _is_deepseek_v4_pp_target,
     _with_deepseek_v4_pp_input_ids,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _patch_fork_rng_for_npu_pipeline() -> None:
@@ -116,9 +118,7 @@ def backward_maybe_with_nosync(
             )
         elif backward_type == "weight":
             return lambda: (
-                stage_backward_weight(
-                    self.submod.parameters(), bwd_kwargs["param_groups"]
-                ),
+                stage_backward_weight(self.submod.parameters(), bwd_kwargs["param_groups"]),
                 None,
             )
         else:
@@ -145,12 +145,8 @@ def backward_maybe_with_nosync(
     elif isinstance(self.submod, FSDPModule):
         self.submod.set_is_last_backward(False)
         # NOTE: npu modification start
-        self.submod.set_reshard_after_backward(
-            True
-        )  # set True to save memory by resharding params
-        self.submod.set_requires_gradient_sync(
-            True
-        )  # set True to save memory by resharding grads
+        self.submod.set_reshard_after_backward(True)  # set True to save memory by resharding params
+        self.submod.set_requires_gradient_sync(True)  # set True to save memory by resharding grads
         # NOTE: npu modification end
         result = perform_backward(backward_type)()
 
@@ -163,6 +159,4 @@ def backward_maybe_with_nosync(
 
 
 # apply patch to reshard params and grads after backward to save memory, but this will hurt efficiency
-torch.distributed.pipelining.stage._PipelineStageBase.backward_maybe_with_nosync = (
-    backward_maybe_with_nosync
-)
+torch.distributed.pipelining.stage._PipelineStageBase.backward_maybe_with_nosync = backward_maybe_with_nosync

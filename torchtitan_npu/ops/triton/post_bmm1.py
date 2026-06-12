@@ -60,18 +60,18 @@ if TRITON_AVAILABLE:
         ).to(tl.float32)
 
         # load H_post scalars (G,1)
-        hp0 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 0 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp1 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 1 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp2 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 2 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp3 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 3 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
+        hp0 = tl.load(H_post_ptr + pids * stride_hp_bs + 0 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp1 = tl.load(H_post_ptr + pids * stride_hp_bs + 1 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp2 = tl.load(H_post_ptr + pids * stride_hp_bs + 2 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp3 = tl.load(H_post_ptr + pids * stride_hp_bs + 3 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
 
         # store h_post[bs, i, c]
         Y_base = h_post_ptr + pids[:, None] * stride_y_bs + c[None, :] * stride_y_c
@@ -126,18 +126,18 @@ if TRITON_AVAILABLE:
         ).to(tl.float32)
 
         # load H_post scalars (G,1)
-        hp0 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 0 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp1 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 1 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp2 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 2 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
-        hp3 = tl.load(
-            H_post_ptr + pids * stride_hp_bs + 3 * stride_hp_n, mask=mask_pid, other=0.0
-        ).to(tl.float32)[:, None]
+        hp0 = tl.load(H_post_ptr + pids * stride_hp_bs + 0 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp1 = tl.load(H_post_ptr + pids * stride_hp_bs + 1 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp2 = tl.load(H_post_ptr + pids * stride_hp_bs + 2 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
+        hp3 = tl.load(H_post_ptr + pids * stride_hp_bs + 3 * stride_hp_n, mask=mask_pid, other=0.0).to(tl.float32)[
+            :, None
+        ]
 
         # dh_out accumulator (G,BC)
         dh = tl.zeros((GROUP, BLOCK_C), dtype=tl.float32)
@@ -148,30 +148,22 @@ if TRITON_AVAILABLE:
         dy = tl.load(dY_base + 0 * stride_dy_n, mask=m, other=0.0).to(tl.float32)
         dh += dy * hp0
         dhp = tl.sum(dy * hout, axis=1)  # (G,)
-        tl.atomic_add(
-            dH_post_ptr + pids * stride_dhp_bs + 0 * stride_dhp_n, dhp, mask=mask_pid
-        )
+        tl.atomic_add(dH_post_ptr + pids * stride_dhp_bs + 0 * stride_dhp_n, dhp, mask=mask_pid)
 
         dy = tl.load(dY_base + 1 * stride_dy_n, mask=m, other=0.0).to(tl.float32)
         dh += dy * hp1
         dhp = tl.sum(dy * hout, axis=1)
-        tl.atomic_add(
-            dH_post_ptr + pids * stride_dhp_bs + 1 * stride_dhp_n, dhp, mask=mask_pid
-        )
+        tl.atomic_add(dH_post_ptr + pids * stride_dhp_bs + 1 * stride_dhp_n, dhp, mask=mask_pid)
 
         dy = tl.load(dY_base + 2 * stride_dy_n, mask=m, other=0.0).to(tl.float32)
         dh += dy * hp2
         dhp = tl.sum(dy * hout, axis=1)
-        tl.atomic_add(
-            dH_post_ptr + pids * stride_dhp_bs + 2 * stride_dhp_n, dhp, mask=mask_pid
-        )
+        tl.atomic_add(dH_post_ptr + pids * stride_dhp_bs + 2 * stride_dhp_n, dhp, mask=mask_pid)
 
         dy = tl.load(dY_base + 3 * stride_dy_n, mask=m, other=0.0).to(tl.float32)
         dh += dy * hp3
         dhp = tl.sum(dy * hout, axis=1)
-        tl.atomic_add(
-            dH_post_ptr + pids * stride_dhp_bs + 3 * stride_dhp_n, dhp, mask=mask_pid
-        )
+        tl.atomic_add(dH_post_ptr + pids * stride_dhp_bs + 3 * stride_dhp_n, dhp, mask=mask_pid)
 
         # store dh_out (G,BC)
         tl.store(
@@ -229,9 +221,7 @@ def hc_post_bmm1_forward(h_out: torch.Tensor, H_post: torch.Tensor) -> torch.Ten
     return Y.view(B, S, N, C)
 
 
-def hc_post_bmm1_backward(
-    h_out: torch.Tensor, H_post: torch.Tensor, grad_out: torch.Tensor
-):
+def hc_post_bmm1_backward(h_out: torch.Tensor, H_post: torch.Tensor, grad_out: torch.Tensor):
     """
     h_out   : [B,S,C] bf16
     H_post  : [B,S,4] fp32
@@ -256,9 +246,7 @@ def hc_post_bmm1_backward(
 
     GROUP = 2
     if C > 4096 and C % 2 != 0:
-        raise ValueError(
-            f"Channel dimension C must be even to split into two equal blocks, but got {C}"
-        )
+        raise ValueError(f"Channel dimension C must be even to split into two equal blocks, but got {C}")
 
     BLOCK_C = C // 2 if C > 4096 else C
 

@@ -54,9 +54,7 @@ if TRITON_AVAILABLE:
         pid_hc_off = pids[:, None] * hc_mult
 
         # mixes_pre/post: shape (G,4)
-        mixes_pre = tl.load(
-            mixes_ptr + pid_feat_off + ar4[None, :], mask=pid_mask[:, None], other=0.0
-        )
+        mixes_pre = tl.load(mixes_ptr + pid_feat_off + ar4[None, :], mask=pid_mask[:, None], other=0.0)
         mixes_post = tl.load(
             mixes_ptr + pid_feat_off + (hc_mult + ar4)[None, :],
             mask=pid_mask[:, None],
@@ -100,9 +98,7 @@ if TRITON_AVAILABLE:
         col_mask = c < BLOCK_HC
         idx2d = r * BLOCK_HC + c
 
-        base_comb = tl.load(
-            hc_base_ptr + (2 * hc_mult) + idx2d, mask=col_mask, other=0.0
-        ).to(tl.float32)
+        base_comb = tl.load(hc_base_ptr + (2 * hc_mult) + idx2d, mask=col_mask, other=0.0).to(tl.float32)
 
         # offsets for each pid
         pid_feat_off = pids[:, None] * feat_dim
@@ -113,9 +109,7 @@ if TRITON_AVAILABLE:
             mixes_ptr + pid_feat_off[:, :, None] + (2 * hc_mult) + idx2d[None, :, :],
             mask=pid_mask[:, None, None] & col_mask[None, :, :],
             other=0.0,
-        ).to(
-            tl.float32
-        )  # (G,4,8)
+        ).to(tl.float32)  # (G,4,8)
 
         # comb logits: (G,4,8)
         comb = mixes_comb * scale_comb + base_comb[None, :, :]
@@ -154,9 +148,7 @@ if TRITON_AVAILABLE:
         lin = tl.arange(0, BLOCK_HC * BLOCK_ALIGN)
         comb_flat = tl.reshape(comb, (GROUP, BLOCK_HC * BLOCK_ALIGN))
 
-        tl.store(
-            comb_ptr + pid_comb_off + lin[None, :], comb_flat, mask=pid_mask[:, None]
-        )
+        tl.store(comb_ptr + pid_comb_off + lin[None, :], comb_flat, mask=pid_mask[:, None])
 
     @triton.jit
     def _triton_hc_prepost_bwd_kernel(
@@ -189,21 +181,15 @@ if TRITON_AVAILABLE:
         pid_feat_off = pids[:, None] * total_dim
         pid_hc_off = pids[:, None] * hc_mult
 
-        pre_slice = tl.load(
-            mixes_ptr + pid_feat_off + ar4[None, :], mask=mask_pid[:, None], other=0.0
-        )
+        pre_slice = tl.load(mixes_ptr + pid_feat_off + ar4[None, :], mask=mask_pid[:, None], other=0.0)
         post_slice = tl.load(
             mixes_ptr + pid_feat_off + (hc_mult + ar4)[None, :],
             mask=mask_pid[:, None],
             other=0.0,
         )
 
-        grad_pre = tl.load(
-            grad_pre_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0
-        )
-        grad_post = tl.load(
-            grad_post_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0
-        )
+        grad_pre = tl.load(grad_pre_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0)
+        grad_post = tl.load(grad_post_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0)
 
         # Pre backward
         pre_in = pre_slice * scale_0 + base_pre[None, :]
@@ -279,9 +265,7 @@ if TRITON_AVAILABLE:
             acc_post = tl.zeros((), dtype=tl.float32)
             for i in range(idx, num_blocks, stride):
                 acc_pre += tl.load(tmp_grad_hc_base_ptr + i * (2 * hc_mult) + j)
-                acc_post += tl.load(
-                    tmp_grad_hc_base_ptr + i * (2 * hc_mult) + hc_mult + j
-                )
+                acc_post += tl.load(tmp_grad_hc_base_ptr + i * (2 * hc_mult) + hc_mult + j)
             if stride == 1:
                 tl.store(grad_hc_base_ptr + j, acc_pre)
                 tl.store(grad_hc_base_ptr + hc_mult + j, acc_post)
@@ -305,7 +289,6 @@ if TRITON_AVAILABLE:
         BLOCK_ALIGN: tl.constexpr = 8,
         group: tl.constexpr = 32,
     ):
-
         block_id = tl.program_id(0)
         pid0 = block_id * group
         pids = pid0 + tl.arange(0, group)
@@ -320,12 +303,8 @@ if TRITON_AVAILABLE:
         col_mask_1d = col_arange < hc_mult
         col_mask = col_mask_1d[None, None, :]
 
-        mixes_flat = tl.load(mixes_ptr + feat_indices, mask=feat_mask, other=0.0).to(
-            tl.float32
-        )
-        logits_flat = tl.load(
-            comb_tmp_ptr + feat_indices, mask=feat_mask, other=-1.0e4
-        ).to(tl.float32)
+        mixes_flat = tl.load(mixes_ptr + feat_indices, mask=feat_mask, other=0.0).to(tl.float32)
+        logits_flat = tl.load(comb_tmp_ptr + feat_indices, mask=feat_mask, other=-1.0e4).to(tl.float32)
 
         mixes = tl.reshape(mixes_flat, (group, hc_mult, BLOCK_ALIGN))
         logits = tl.reshape(logits_flat, (group, hc_mult, BLOCK_ALIGN))
@@ -346,13 +325,9 @@ if TRITON_AVAILABLE:
         col0 = tl.sum(A, axis=1, keep_dims=True)
         Bmat = A / (col0 + eps)
 
-        col_sum_list = tl.full(
-            (sinkhorn_iters, group, 1, BLOCK_ALIGN), 0.0, dtype=tl.float32
-        )
+        col_sum_list = tl.full((sinkhorn_iters, group, 1, BLOCK_ALIGN), 0.0, dtype=tl.float32)
 
-        row_sum_list = tl.full(
-            (sinkhorn_iters - 1, group, hc_mult, 1), 0.0, dtype=tl.float32
-        )
+        row_sum_list = tl.full((sinkhorn_iters - 1, group, hc_mult, 1), 0.0, dtype=tl.float32)
 
         col_sum_list = tlx.insert_slice(
             col_sum_list,
@@ -386,9 +361,7 @@ if TRITON_AVAILABLE:
 
         K_out = tl.where(col_mask, Bmat, 0.0)
 
-        grad_flat = tl.load(grad_comb_ptr + feat_indices, mask=feat_mask, other=0.0).to(
-            tl.float32
-        )
+        grad_flat = tl.load(grad_comb_ptr + feat_indices, mask=feat_mask, other=0.0).to(tl.float32)
         dB = tl.reshape(grad_flat, (group, hc_mult, BLOCK_ALIGN))
         dB = tl.where(col_mask, dB, 0.0)
 
@@ -414,17 +387,13 @@ if TRITON_AVAILABLE:
             denom_c = colk + eps
             C_cur = B_cur * denom_c
             dC = dB / denom_c
-            d_denom_c = -tl.sum(
-                dB * C_cur / (denom_c * denom_c), axis=1, keep_dims=True
-            )
+            d_denom_c = -tl.sum(dB * C_cur / (denom_c * denom_c), axis=1, keep_dims=True)
             dC = dC + d_denom_c
 
             denom_r = rowk + eps
             B_prev = C_cur * denom_r
             dB_prev = dC / denom_r
-            d_denom_r = -tl.sum(
-                dC * B_prev / (denom_r * denom_r), axis=2, keep_dims=True
-            )
+            d_denom_r = -tl.sum(dC * B_prev / (denom_r * denom_r), axis=2, keep_dims=True)
             dB_prev = dB_prev + d_denom_r
 
             dB = tl.where(col_mask, dB_prev, 0.0)
@@ -482,9 +451,7 @@ if TRITON_AVAILABLE:
         arange_feat = tl.arange(0, hc_mult * BLOCK_ALIGN)
         scale_sum = tl.load(partial_scale_ptr + tl.arange(0, grid_size))
         base_vals = tl.load(
-            partial_base_ptr
-            + tl.arange(0, grid_size)[:, None] * (hc_mult * BLOCK_ALIGN)
-            + arange_feat[None, :]
+            partial_base_ptr + tl.arange(0, grid_size)[:, None] * (hc_mult * BLOCK_ALIGN) + arange_feat[None, :]
         )
 
         final_scale = tl.sum(scale_sum)
@@ -524,9 +491,7 @@ if TRITON_AVAILABLE:
         pid_hc_off = pids[:, None] * hc_mult
 
         # mixes_pre/post: shape (G,4)
-        mixes_pre = tl.load(
-            mixes_ptr + pid_feat_off + ar4[None, :], mask=pid_mask[:, None], other=0.0
-        )
+        mixes_pre = tl.load(mixes_ptr + pid_feat_off + ar4[None, :], mask=pid_mask[:, None], other=0.0)
 
         # compute
         pre = tl.sigmoid(mixes_pre * scale_pre + base_pre[None, :]) + eps
@@ -566,14 +531,10 @@ if TRITON_AVAILABLE:
         pid_hc_off = pids[:, None] * hc_mult
 
         # load mixes pre/post (G,4)
-        pre_slice = tl.load(
-            mixes_ptr + pid_feat_off + ar4[None, :], mask=mask_pid[:, None], other=0.0
-        )
+        pre_slice = tl.load(mixes_ptr + pid_feat_off + ar4[None, :], mask=mask_pid[:, None], other=0.0)
 
         # load grad_pre/post (G,4)
-        grad_pre = tl.load(
-            grad_pre_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0
-        )
+        grad_pre = tl.load(grad_pre_ptr + pid_hc_off + ar4[None, :], mask=mask_pid[:, None], other=0.0)
 
         # Pre backward
         pre_in = pre_slice * scale_0 + base_pre[None, :]
@@ -654,12 +615,8 @@ def hc_pre_fwd(
 
     mixes_flat = mixes_f32.view(-1, feat_dim).contiguous()
 
-    pre_flat = torch.empty(
-        (batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32
-    )
-    post_flat = torch.empty(
-        (batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32
-    )
+    pre_flat = torch.empty((batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32)
+    post_flat = torch.empty((batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32)
     comb_flat_padded = torch.empty(
         (batch_seq_size, hc_mult * BLOCK_ALIGN),
         device=mixes.device,
@@ -701,9 +658,7 @@ def hc_pre_fwd(
 
     pre = pre_flat.view(b, s, hc_mult).to(origin_dtype)
     post = post_flat.view(b, s, hc_mult).to(origin_dtype)
-    comb = comb_flat_padded.view(b, s, hc_mult, BLOCK_ALIGN)[:, :, :, :hc_mult].to(
-        origin_dtype
-    )
+    comb = comb_flat_padded.view(b, s, hc_mult, BLOCK_ALIGN)[:, :, :, :hc_mult].to(origin_dtype)
     return pre, post, comb
 
 
@@ -745,31 +700,19 @@ def hc_pre_bwd(
     hc_base_f32 = hc_base.to(torch.float32).contiguous()
 
     grad_pre_f32 = grad_pre.to(torch.float32).view(batch_seq_size, hc_mult).contiguous()
-    grad_post_f32 = (
-        grad_post.to(torch.float32).view(batch_seq_size, hc_mult).contiguous()
-    )
-    grad_comb_f32 = (
-        grad_comb.to(torch.float32).view(batch_seq_size, hc_mult, hc_mult).contiguous()
-    )
+    grad_post_f32 = grad_post.to(torch.float32).view(batch_seq_size, hc_mult).contiguous()
+    grad_comb_f32 = grad_comb.to(torch.float32).view(batch_seq_size, hc_mult, hc_mult).contiguous()
 
-    grad_mixes_f32 = torch.zeros(
-        (batch_seq_size, total_dim), device=mixes.device, dtype=torch.float32
-    )
+    grad_mixes_f32 = torch.zeros((batch_seq_size, total_dim), device=mixes.device, dtype=torch.float32)
     grad_hc_scale_f32 = torch.zeros((3,), device=mixes.device, dtype=torch.float32)
-    grad_hc_base_f32 = torch.zeros(
-        (total_dim,), device=mixes.device, dtype=torch.float32
-    )
+    grad_hc_base_f32 = torch.zeros((total_dim,), device=mixes.device, dtype=torch.float32)
 
     # P1 (grouped): pre/post grads + scale[0/1] + base[0..7]
     GROUP_P1 = group_p1
     num_blocks = triton.cdiv(batch_seq_size, GROUP_P1)
 
-    tmp_grad_hc_scale_f32 = torch.empty(
-        num_blocks, 2, device=grad_hc_scale_f32.device, dtype=torch.float32
-    )
-    tmp_grad_hc_base_f32 = torch.empty(
-        num_blocks, 2 * hc_mult, device=grad_hc_base_f32.device, dtype=torch.float32
-    )
+    tmp_grad_hc_scale_f32 = torch.empty(num_blocks, 2, device=grad_hc_scale_f32.device, dtype=torch.float32)
+    tmp_grad_hc_base_f32 = torch.empty(num_blocks, 2 * hc_mult, device=grad_hc_base_f32.device, dtype=torch.float32)
 
     _triton_hc_prepost_bwd_kernel[(num_blocks,)](
         grad_pre_f32,
@@ -796,42 +739,24 @@ def hc_pre_bwd(
     )
 
     # Prepare P2 padded inputs
-    mixes_slice = mixes_f32[:, 2 * hc_mult :].view(
-        batch_seq_size, hc_mult, hc_mult
-    )  # (BS,4,4)
+    mixes_slice = mixes_f32[:, 2 * hc_mult :].view(batch_seq_size, hc_mult, hc_mult)  # (BS,4,4)
 
     # mixes_pad: (BS,4,8) pad 0
-    mixes_pad = (
-        F.pad(mixes_slice, (0, pad_num), mode="constant", value=0.0)
-        .contiguous()
-        .clone()
-    )
+    mixes_pad = F.pad(mixes_slice, (0, pad_num), mode="constant", value=0.0).contiguous().clone()
 
     # grad_comb_pad: (BS,4,8) pad 0
-    grad_comb_pad = (
-        F.pad(grad_comb_f32, (0, pad_num), mode="constant", value=0.0)
-        .contiguous()
-        .clone()
-    )
+    grad_comb_pad = F.pad(grad_comb_f32, (0, pad_num), mode="constant", value=0.0).contiguous().clone()
 
     scale2 = hc_scale_f32[2]
     base_comb_4x4 = hc_base_f32[2 * hc_mult :].view(hc_mult, hc_mult)  # (4,4)
     comb_logits_4x4 = mixes_slice * scale2 + base_comb_4x4  # (BS,4,4), fp32
 
     # comb_tmp_padded: pad -inf to tail columns (BS,4,8)
-    comb_tmp_padded = (
-        F.pad(comb_logits_4x4, (0, pad_num), mode="constant", value=float("-inf"))
-        .contiguous()
-        .clone()
-    )
+    comb_tmp_padded = F.pad(comb_logits_4x4, (0, pad_num), mode="constant", value=float("-inf")).contiguous().clone()
 
     # outputs for P2
-    grad_mixes_pad = torch.zeros(
-        (batch_seq_size, hc_mult, BLOCK_ALIGN), device=mixes.device, dtype=torch.float32
-    )
-    grad_hc_base_pad = torch.zeros(
-        (hc_mult, BLOCK_ALIGN), device=mixes.device, dtype=torch.float32
-    )
+    grad_mixes_pad = torch.zeros((batch_seq_size, hc_mult, BLOCK_ALIGN), device=mixes.device, dtype=torch.float32)
+    grad_hc_base_pad = torch.zeros((hc_mult, BLOCK_ALIGN), device=mixes.device, dtype=torch.float32)
 
     GROUP_P2 = 48
     grid_p2 = (triton.cdiv(batch_seq_size, GROUP_P2),)
@@ -842,9 +767,7 @@ def hc_pre_bwd(
 
     # Allocate partial buffers
     partial_scale = torch.zeros(grid_size, device=mixes.device, dtype=torch.float32)
-    partial_base = torch.zeros(
-        grid_size, hc_mult * BLOCK_ALIGN, device=mixes.device, dtype=torch.float32
-    )
+    partial_base = torch.zeros(grid_size, hc_mult * BLOCK_ALIGN, device=mixes.device, dtype=torch.float32)
 
     # Stage 1: main kernel (multi-block)
     _triton_hc_sinkhorn_comb_bwd_kernel[(grid_size,)](
@@ -875,17 +798,11 @@ def hc_pre_bwd(
     )
 
     # Crop back and merge
-    grad_mixes_slice = (
-        grad_mixes_pad[:, :, :hc_mult]
-        .contiguous()
-        .view(batch_seq_size, hc_mult * hc_mult)
-    )
+    grad_mixes_slice = grad_mixes_pad[:, :, :hc_mult].contiguous().view(batch_seq_size, hc_mult * hc_mult)
     grad_mixes_f32[:, 2 * hc_mult :] = grad_mixes_slice
 
     # (4,8)->(4,4)->(16) write to grad_hc_base[8:24]
-    grad_hc_base_slice = (
-        grad_hc_base_pad[:, :hc_mult].contiguous().view(hc_mult * hc_mult)
-    )
+    grad_hc_base_slice = grad_hc_base_pad[:, :hc_mult].contiguous().view(hc_mult * hc_mult)
     grad_hc_base_f32[2 * hc_mult :] = grad_hc_base_slice
 
     # cast back
@@ -912,13 +829,9 @@ def hc_pre_only_fwd(
 
     mixes_flat = mixes.view(-1, feat_dim).contiguous()
 
-    pre_flat = torch.empty(
-        (batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32
-    )
+    pre_flat = torch.empty((batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32)
 
-    dummy_post = torch.empty(
-        (batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32
-    )
+    dummy_post = torch.empty((batch_seq_size, hc_mult), device=mixes.device, dtype=torch.float32)
 
     grid = (triton.cdiv(batch_seq_size, group),)
 
@@ -957,24 +870,16 @@ def hc_pre_only_bwd(
     mixes_f32 = mixes.view(batch_seq_size, total_dim).contiguous()
     grad_pre_f32 = grad_pre.view(batch_seq_size, hc_mult).contiguous()
 
-    grad_mixes_f32 = torch.zeros(
-        (batch_seq_size, total_dim), device=mixes.device, dtype=torch.float32
-    )
+    grad_mixes_f32 = torch.zeros((batch_seq_size, total_dim), device=mixes.device, dtype=torch.float32)
     grad_hc_scale_f32 = torch.zeros((3,), device=mixes.device, dtype=torch.float32)
-    grad_hc_base_f32 = torch.zeros(
-        (total_dim,), device=mixes.device, dtype=torch.float32
-    )
+    grad_hc_base_f32 = torch.zeros((total_dim,), device=mixes.device, dtype=torch.float32)
 
     grid_p1 = (triton.cdiv(batch_seq_size, group_p1),)
 
     # tmp buffer
     num_programs_p1 = grid_p1[0]
-    tmp_grad_hc_scale_f32 = torch.empty(
-        num_programs_p1, device=grad_pre_f32.device, dtype=torch.float32
-    )
-    tmp_grad_hc_base_f32 = torch.empty(
-        num_programs_p1, hc_mult, device=grad_pre_f32.device, dtype=torch.float32
-    )
+    tmp_grad_hc_scale_f32 = torch.empty(num_programs_p1, device=grad_pre_f32.device, dtype=torch.float32)
+    tmp_grad_hc_base_f32 = torch.empty(num_programs_p1, hc_mult, device=grad_pre_f32.device, dtype=torch.float32)
 
     # kernel（no atomic_add)
     _triton_hc_preonly_bwd_kernel[grid_p1](

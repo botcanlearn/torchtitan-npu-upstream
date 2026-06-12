@@ -9,7 +9,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-
 # ---------------------------------------------------------------------------
 # DSAIndexerLoss is a torchtitan Module (inherits from torchtitan.protocols.module.Module)
 # ---------------------------------------------------------------------------
@@ -151,9 +150,7 @@ def test_logging_helper_save_and_clean():
     loss = torch.tensor(0.123)
     DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss, layer_number=0, num_layers=4)
     assert "values" in DSAIndexerLossLoggingHelper.tracker
-    assert DSAIndexerLossLoggingHelper.tracker["values"][0].item() == pytest.approx(
-        0.123
-    )
+    assert DSAIndexerLossLoggingHelper.tracker["values"][0].item() == pytest.approx(0.123)
 
     DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
     assert DSAIndexerLossLoggingHelper.tracker["values"][0].item() == pytest.approx(0.0)
@@ -166,7 +163,5 @@ def test_logging_helper_skips_none_layer_number():
 
     DSAIndexerLossLoggingHelper.tracker.clear()
     loss = torch.tensor(0.123)
-    DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-        loss, layer_number=None, num_layers=4
-    )
+    DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss, layer_number=None, num_layers=4)
     assert "values" not in DSAIndexerLossLoggingHelper.tracker

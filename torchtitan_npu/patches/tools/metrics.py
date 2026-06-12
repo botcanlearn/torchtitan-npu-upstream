@@ -21,9 +21,7 @@ def load_class_from_string(class_path: str):
     try:
         module_path, class_name = class_path.rsplit(".", 1)
     except ValueError as e:
-        raise ValueError(
-            f"Class string path error: {class_path!r}, need to be 'module.path.ClassName'"
-        ) from e
+        raise ValueError(f"Class string path error: {class_path!r}, need to be 'module.path.ClassName'") from e
 
     try:
         module = importlib.import_module(module_path)
@@ -33,9 +31,7 @@ def load_class_from_string(class_path: str):
     try:
         cls = getattr(module, class_name)
     except AttributeError as e:
-        raise AttributeError(
-            f"Module {module_path!r} does not have class {class_name!r}"
-        ) from e
+        raise AttributeError(f"Module {module_path!r} does not have class {class_name!r}") from e
 
     return cls
 
@@ -71,14 +67,9 @@ def _patched_metrics_processor_log(
     time_delta = time.perf_counter() - self.time_last_log
 
     # tokens per second per device, abbreviated as tps
-    tps = self.ntokens_since_last_log / (
-        time_delta * self.parallel_dims.non_data_parallel_size
-    )
+    tps = self.ntokens_since_last_log / (time_delta * self.parallel_dims.non_data_parallel_size)
     tflops = self.num_flops_per_token * tps / 1e12
-    if self.has_quantization:
-        mfu = None
-    else:
-        mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+    mfu = None if self.has_quantization else 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
     time_end_to_end = time_delta / self.config.log_freq
     time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)

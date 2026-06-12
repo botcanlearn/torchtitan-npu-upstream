@@ -120,11 +120,7 @@ def find_methods(
             continue
 
         cls = getattr(mod, class_name, None)
-        if (
-            inspect.isclass(cls)
-            and cls.__module__ == mod_path
-            and hasattr(cls, method_name)
-        ):
+        if inspect.isclass(cls) and cls.__module__ == mod_path and hasattr(cls, method_name):
             matches.append(
                 MethodMatch(
                     module_path=mod_path,

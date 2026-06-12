@@ -4,7 +4,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-
 import torch_npu
 
 from torchtitan_npu.patches.quantization.quant_config import (
@@ -95,12 +94,8 @@ class Hif8MM(torch.autograd.Function):
     # pyrefly: ignore [bad-override]
     def forward(ctx, x, weight):
         mm_kwargs = {"x1_dtype": torch_npu.hifloat8, "x2_dtype": torch_npu.hifloat8}
-        x_quant, x_scale = torch_npu.npu_dynamic_quant(
-            x, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
-        )
-        w_quant, w_scale = torch_npu.npu_dynamic_quant(
-            weight, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
-        )
+        x_quant, x_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch_npu.hifloat8, quant_mode="pertensor")
+        w_quant, w_scale = torch_npu.npu_dynamic_quant(weight, dst_type=torch_npu.hifloat8, quant_mode="pertensor")
 
         output = torch_npu.npu_quant_matmul(
             x_quant,
@@ -121,9 +116,7 @@ class Hif8MM(torch.autograd.Function):
     def backward(ctx, grads):
         mm_kwargs = {"x1_dtype": torch_npu.hifloat8, "x2_dtype": torch_npu.hifloat8}
         x, weight = ctx.saved_tensors
-        w_quant, w_scale = torch_npu.npu_dynamic_quant(
-            weight, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
-        )
+        w_quant, w_scale = torch_npu.npu_dynamic_quant(weight, dst_type=torch_npu.hifloat8, quant_mode="pertensor")
         grads_quant, grads_scale = torch_npu.npu_dynamic_quant(
             grads, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
         )
@@ -136,9 +129,7 @@ class Hif8MM(torch.autograd.Function):
             **mm_kwargs,
         )
 
-        x_quant, x_scale = torch_npu.npu_dynamic_quant(
-            x, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
-        )
+        x_quant, x_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch_npu.hifloat8, quant_mode="pertensor")
         grads_quant, grads_scale = torch_npu.npu_dynamic_quant(
             view_as_n_dim(grads).t(),
             dst_type=torch_npu.hifloat8,
@@ -172,9 +163,7 @@ class MXLinear(torch.nn.Linear):
         config: MXLinearConfig | None = MXLinearConfig(),
     ):
         if not isinstance(mod, torch.nn.Linear):
-            raise RuntimeError(
-                f"Unsupported module type: {type(mod)}. Expected torch.nn.Linear"
-            )
+            raise RuntimeError(f"Unsupported module type: {type(mod)}. Expected torch.nn.Linear")
         mod.__class__ = MXLinear
         mod.config = config  # pyrefly: ignore [bad-argument-type]
         return mod

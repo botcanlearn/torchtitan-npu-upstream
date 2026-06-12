@@ -19,19 +19,19 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import (
-    distribute_module,
-    distribute_tensor,
     Replicate,
     Shard,
+    distribute_module,
+    distribute_tensor,
 )
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    parallelize_module,
     ParallelStyle,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
+    parallelize_module,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -42,14 +42,16 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     TensorParallel,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
-from torchtitan.models.common import FlexAttention, moe as moe_module, VarlenAttention
+from torchtitan.distributed.tensor_parallel import NoParallel, maybe_enable_async_tp
+from torchtitan.models.common import FlexAttention, VarlenAttention
+from torchtitan.models.common import moe as moe_module
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
 
 from torchtitan_npu.converters.registry import has_npu_converter
 from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
-from torchtitan_npu.models.deepseek_v4.model import Attention, MoE as DeepSeekV4MoE
+from torchtitan_npu.models.deepseek_v4.model import Attention
+from torchtitan_npu.models.deepseek_v4.model import MoE as DeepSeekV4MoE
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +106,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
         self.bwd_allreduce_inputs = bwd_allreduce_inputs
 
         if self.prepare_module_input.input_layouts is not None:
-            assert len(self.bwd_allreduce_inputs) == len(
-                self.prepare_module_input.input_layouts
-            ), (
+            assert len(self.bwd_allreduce_inputs) == len(self.prepare_module_input.input_layouts), (
                 f"bwd_allreduce_inputs must have the same length as input_layouts! "
                 f"Got {len(self.bwd_allreduce_inputs)} vs {len(self.prepare_module_input.input_layouts)}"
             )
@@ -119,9 +119,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
             module: The module to register hooks on
             inputs: Tuple of input tensors to the module
         """
-        for _, (inp, needs_allreduce) in enumerate(
-            zip(inputs, self.bwd_allreduce_inputs, strict=True)
-        ):
+        for _, (inp, needs_allreduce) in enumerate(zip(inputs, self.bwd_allreduce_inputs, strict=True)):
             if not needs_allreduce:
                 continue
 
@@ -132,9 +130,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
                 # Ensure gradient is contiguous for efficient communication
                 if not grad.is_contiguous():
                     grad = grad.contiguous()
-                torch.distributed.all_reduce(
-                    grad, op=torch.distributed.ReduceOp.SUM, group=self.group
-                )
+                torch.distributed.all_reduce(grad, op=torch.distributed.ReduceOp.SUM, group=self.group)
                 return grad
 
             inp.register_hook(_allreduce_grad_hook)
@@ -168,9 +164,7 @@ def _register_distributed_parameter(
 
 def _model_uses_attention_masks(model_args: Any) -> bool:
     for layer_cfg in getattr(model_args, "layers", ()):
-        inner_attention = getattr(
-            getattr(layer_cfg, "attention", None), "inner_attention", None
-        )
+        inner_attention = getattr(getattr(layer_cfg, "attention", None), "inner_attention", None)
         if isinstance(inner_attention, (FlexAttention.Config, VarlenAttention.Config)):
             return True
     return False
@@ -189,9 +183,7 @@ class HcHeadParallelStyle(ParallelStyle):
             use_local_output=False,
         )
 
-    def partition_fn(
-        self, name: str, module: nn.Module, device_mesh: DeviceMesh
-    ) -> None:
+    def partition_fn(self, name: str, module: nn.Module, device_mesh: DeviceMesh) -> None:
         del name
         for param_name in self._param_names:
             param = getattr(module, param_name, None)
@@ -228,18 +220,14 @@ def parallelize_deepseek_v4(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     # patch the indexer loss tracking with distributed version to get the synchronized indexer loss metric
-    model_args = cast(Any, model).model_args
-    apply_distributed_indexer_loss_tracking(
-        parallel_dims, model_args.n_layers, model_args.compress_ratios
-    )
+    model_args = cast("Any", model).model_args
+    apply_distributed_indexer_loss_tracking(parallel_dims, model_args.n_layers, model_args.compress_ratios)
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -251,9 +239,7 @@ def parallelize_deepseek_v4(
 
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
-            raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for deepseekv4"
-            )
+            raise NotImplementedError("Currently, float8 tensorwise TP is not tested for deepseekv4")
 
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
@@ -318,9 +304,7 @@ def parallelize_deepseek_v4(
             use_deepep=use_deepep,
         )
 
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
+    model_compile_enabled = compile_config.enable and "model" in compile_config.components
 
     if ac_config.mode != "none":
         apply_ac(
@@ -336,17 +320,11 @@ def parallelize_deepseek_v4(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
+        dp_mesh_names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
+        edp_mesh_names = ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
@@ -602,7 +580,7 @@ def apply_non_moe_tp(
         use_local_output=True,
     )
 
-    model_args = cast(Any, model).model_args
+    model_args = cast("Any", model).model_args
     use_attention_masks = _model_uses_attention_masks(model_args)
 
     # Apply tensor + sequence parallelism to every transformer block
@@ -707,19 +685,14 @@ def apply_non_moe_tp(
         if transformer_block.attention.compress_ratio > 1:
             # pyrefly: ignore [missing-attribute]
             compress_ratio = transformer_block.attention.compress_ratio
-            if compress_ratio == 4:
-                compressor_attr = "compressor"
-            else:
-                compressor_attr = "compressor_128"
+            compressor_attr = "compressor" if compress_ratio == 4 else "compressor_128"
             compressor_module = getattr(
                 # pyrefly: ignore [missing-attribute]
                 transformer_block.attention.pre_attention,
                 compressor_attr,
             )
             compressor_key = f"attention.pre_attention.{compressor_attr}"
-            _register_distributed_parameter(
-                compressor_module, "ape", tp_mesh, [Replicate()]
-            )
+            _register_distributed_parameter(compressor_module, "ape", tp_mesh, [Replicate()])
             layer_plan.update(
                 {
                     compressor_key: compressor_plan,
@@ -729,9 +702,7 @@ def apply_non_moe_tp(
                 }
             )
             if compress_ratio == 4:
-                li_compute_parallel_plan = (
-                    li_compute_smla_plan if use_attention_masks else li_compute_plan
-                )
+                li_compute_parallel_plan = li_compute_smla_plan if use_attention_masks else li_compute_plan
                 _register_distributed_parameter(
                     # pyrefly: ignore [missing-attribute]
                     transformer_block.attention.pre_attention.indexer.compressor,
@@ -744,9 +715,7 @@ def apply_non_moe_tp(
                         "attention.inner_attention.li_compute": li_compute_parallel_plan,
                         "attention.pre_attention.indexer": indexer_plan,
                         "attention.pre_attention.indexer.compressor": indexer_compressor_plan,
-                        "attention.pre_attention.indexer.wq_b": NoParallel(
-                            local_output_grad_placements=(Replicate(),)
-                        ),
+                        "attention.pre_attention.indexer.wq_b": NoParallel(local_output_grad_placements=(Replicate(),)),
                         "attention.pre_attention.indexer.weights_proj": NoParallel(
                             local_output_grad_placements=(Replicate(),)
                         ),
@@ -764,11 +733,7 @@ def apply_non_moe_tp(
             # Use AwaitRowwiseParallel when activation checkpoint is enabled to handle
             # async redistribution. The custom implementation ensures wait_tensor() is called
             # on _local_tensor to prevent memory leaks caused by incomplete async operations.
-            safe_rowwise_parallel = (
-                await_rowwise_parallel
-                if enable_activation_checkpoint
-                else rowwise_parallel
-            )
+            safe_rowwise_parallel = await_rowwise_parallel if enable_activation_checkpoint else rowwise_parallel
             layer_plan.update(
                 {
                     "feed_forward": prepare_module_input(
@@ -798,14 +763,10 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
+    logger.info(f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}Tensor Parallelism to the model")
 
 
 def apply_moe_ep_tp(
@@ -816,9 +777,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     use_deepep: bool = False,
 ):
-    assert (
-        tp_mesh is not None or ep_mesh is not None
-    ), f"""
+    assert tp_mesh is not None or ep_mesh is not None, f"""
         At least one of Tensor Parallel mesh (tp_mesh) or Expert Parallel mesh (ep_mesh) must be provided.
         Current status: tp_mesh={tp_mesh}, ep_mesh={ep_mesh}
         """
@@ -839,9 +798,7 @@ def apply_moe_ep_tp(
                     output_layouts=(Shard(1),),
                     desired_output_layouts=(Shard(1),),
                 ),
-                "moe.router.gate": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
-                ),
+                "moe.router.gate": SequenceParallel(sequence_dim=0, use_local_output=True),
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
@@ -855,9 +812,7 @@ def apply_moe_ep_tp(
                             desired_input_layouts=(Replicate(),),
                         ),
                         "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Shard(0)
-                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(output_layouts=Shard(0)),
                         "moe.shared_experts.w3": ColwiseParallel(),
                     }
                 )
@@ -909,9 +864,7 @@ def _compile_moe_transformer_block(
     )
     for attr_name, submod in block.named_children():
         if getattr(block, attr_name) != getattr(transformer_block, attr_name):
-            raise RuntimeError(
-                f"Checkpoint-wrapped block child {attr_name!r} is not exposed on wrapper"
-            )
+            raise RuntimeError(f"Checkpoint-wrapped block child {attr_name!r} is not exposed on wrapper")
         if attr_name in {"hc_pre"}:
             continue
         if isinstance(submod, Attention):
@@ -947,10 +900,7 @@ def _compile_children_except(
 
 
 def _patch_grouped_mm_compile(compile_config, ep_enabled: bool) -> None:
-    already_patched = (
-        "_run_experts_grouped_mm_dynamic"
-        in moe_module._run_experts_grouped_mm.__qualname__
-    )
+    already_patched = "_run_experts_grouped_mm_dynamic" in moe_module._run_experts_grouped_mm.__qualname__
     if already_patched:
         return
 
@@ -995,9 +945,7 @@ def apply_compile(model: nn.Module, compile_config, ep_enabled: bool):
         transformer_block,
     ) in model.layers.named_children():  # pyrefly: ignore [missing-attribute]
         if transformer_block.moe_enabled:
-            transformer_block = _compile_moe_transformer_block(
-                transformer_block, compile_config
-            )
+            transformer_block = _compile_moe_transformer_block(transformer_block, compile_config)
         else:
             transformer_block = torch.compile(
                 transformer_block,
@@ -1034,18 +982,14 @@ def apply_distributed_indexer_loss_tracking(
     # This is static model structure info — same on every rank — so it can be
     # used as a safe early-return guard and as an index into the values tensor
     # without introducing any cross-rank divergence.
-    valid_indices = [
-        i
-        for i in range(num_layers)
-        if i < len(compress_ratios) and compress_ratios[i] == 4
-    ]
+    valid_indices = [i for i in range(num_layers) if i < len(compress_ratios) and compress_ratios[i] == 4]
 
     # Normalization factor: each valid layer is computed by every rank in its
     # PP stage.  world_size / pp == dp * tp * cp (ranks per PP stage).
     norm_factor = dist.get_world_size() // max(parallel_dims.pp, 1)
 
     def _new_empty_tracker_tensor() -> torch.Tensor:
-        device = torch.device("npu", cast(Any, torch).npu.current_device())
+        device = torch.device("npu", cast("Any", torch).npu.current_device())
         return torch.zeros(num_layers, device=device)
 
     def distributed_track_dsa_indexer_metrics(total_acc_steps: int):
@@ -1057,24 +1001,17 @@ def apply_distributed_indexer_loss_tracking(
 
         tracker = DSAIndexerLossLoggingHelper.tracker
         values = tracker.get("values")
-        if values is None:
-            dsa_indexer_losses = _new_empty_tracker_tensor()
-        else:
-            dsa_indexer_losses = values.clone()
+        dsa_indexer_losses = _new_empty_tracker_tensor() if values is None else values.clone()
 
         # all_reduce is unconditional so every rank participates, even those
         # on PP stages that have no indexer layers (their values are zeros).
         if dist.is_initialized():
             dist.all_reduce(dsa_indexer_losses, op=dist.ReduceOp.SUM)
 
-        loss = dsa_indexer_losses[valid_indices].mean() / (
-            norm_factor * total_acc_steps
-        )
+        loss = dsa_indexer_losses[valid_indices].mean() / (norm_factor * total_acc_steps)
 
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
         logger.info(f"indexer loss: {loss.item()}")
 
     # Apply the monkey patch
-    DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics = (
-        distributed_track_dsa_indexer_metrics
-    )
+    DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics = distributed_track_dsa_indexer_metrics

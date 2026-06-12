@@ -160,9 +160,7 @@ def test_apply_patch_returns_false_when_disabled():
         assert checkpoint_patch.apply_patch() is False
 
 
-def test_convert_to_hf_and_save_excludes_expert_tensors_from_non_expert_branch(
-    monkeypatch, tmp_path
-):
+def test_convert_to_hf_and_save_excludes_expert_tensors_from_non_expert_branch(monkeypatch, tmp_path):
     class CountingTensor:
         def __init__(self, value):
             self.value = value
@@ -173,9 +171,7 @@ def test_convert_to_hf_and_save_excludes_expert_tensors_from_non_expert_branch(
             return self.value
 
     class Adapter:
-        model_args = types.SimpleNamespace(
-            moe_args=types.SimpleNamespace(num_experts=1)
-        )
+        model_args = types.SimpleNamespace(moe_args=types.SimpleNamespace(num_experts=1))
 
         @staticmethod
         def to_hf(state_dict):
@@ -188,9 +184,7 @@ def test_convert_to_hf_and_save_excludes_expert_tensors_from_non_expert_branch(
         save_file=lambda tensors, path: saved.update({"tensors": tensors, "path": path})
     )
 
-    monkeypatch.setattr(
-        checkpoint_patch.torch.distributed, "is_initialized", lambda: False
-    )
+    monkeypatch.setattr(checkpoint_patch.torch.distributed, "is_initialized", lambda: False)
     config = checkpoint_patch.SaveConfig()
     config.set_adapter(Adapter())
     monkeypatch.setattr(checkpoint_patch, "_config", config)

@@ -6,7 +6,6 @@
 from dataclasses import fields
 from typing import Any, TypeVar
 
-
 ConfigT = TypeVar("ConfigT")
 
 
@@ -24,8 +23,5 @@ def require_config(
     field_name: str,
 ) -> ConfigT:
     if not isinstance(config, config_cls):
-        raise TypeError(
-            f"Expected {field_name} to be {config_cls.__name__}, "
-            f"got {type(config).__name__}."
-        )
+        raise TypeError(f"Expected {field_name} to be {config_cls.__name__}, got {type(config).__name__}.")
     return config

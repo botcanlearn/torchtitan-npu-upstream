@@ -18,9 +18,7 @@ class DeepSeekV3ModelNpu(DeepSeekV3Model):
                 if layer_cfg.moe is not None:
                     original_use_grouped_mm[i] = layer_cfg.moe.experts.use_grouped_mm
 
-            DeepSeekV3Model.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
-            )
+            DeepSeekV3Model.Config.update_from_config(self, trainer_config=trainer_config, **kwargs)
 
             for i, layer_cfg in enumerate(self.layers):
                 if layer_cfg.moe is not None and i in original_use_grouped_mm:

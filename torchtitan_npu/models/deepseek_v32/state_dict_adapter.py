@@ -6,7 +6,6 @@
 import logging
 
 from torch.distributed.checkpoint.hf_storage import HuggingFaceStorageReader
-
 from torchtitan.models.deepseek_v3 import DeepSeekV3StateDictAdapter
 
 from torchtitan_npu.tools.weight_utils import detect_input_format_by_path
@@ -77,15 +76,10 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
             if checkpoint_patch.is_enabled():
                 success = checkpoint_patch.apply_patch()
                 if success:
-                    logger.info(
-                        "Checkpoint save patch initialized from StateDict Adaptor"
-                    )
+                    logger.info("Checkpoint save patch initialized from StateDict Adaptor")
 
         except Exception as e:
-            logger.error(
-                f"Failed to setup checkpoint patch, training will continue with original "
-                f"saving configs: {e}"
-            )
+            logger.error(f"Failed to setup checkpoint patch, training will continue with original saving configs: {e}")
 
     def _setup_v32_mappings(self, model_config):
         """
@@ -110,15 +104,9 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
         self.from_hf_map.pop("model.layers.{}.self_attn.q_proj.weight", None)
         self.from_hf_map.update(
             {
-                "model.layers.{}.self_attn.q_a_proj.weight": (
-                    "layers.{}.attention.pre_attention.wq_a.weight"
-                ),
-                "model.layers.{}.self_attn.q_a_layernorm.weight": (
-                    "layers.{}.attention.pre_attention.q_norm.weight"
-                ),
-                "model.layers.{}.self_attn.q_b_proj.weight": (
-                    "layers.{}.attention.pre_attention.wq_b.weight"
-                ),
+                "model.layers.{}.self_attn.q_a_proj.weight": ("layers.{}.attention.pre_attention.wq_a.weight"),
+                "model.layers.{}.self_attn.q_a_layernorm.weight": ("layers.{}.attention.pre_attention.q_norm.weight"),
+                "model.layers.{}.self_attn.q_b_proj.weight": ("layers.{}.attention.pre_attention.wq_b.weight"),
             }
         )
 
@@ -128,9 +116,7 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
                 "model.layers.{}.self_attn.indexer.wq_b.weight": (
                     "layers.{}.attention.pre_attention.indexer.wq_b.weight"
                 ),
-                "model.layers.{}.self_attn.indexer.wk.weight": (
-                    "layers.{}.attention.pre_attention.indexer.wk.weight"
-                ),
+                "model.layers.{}.self_attn.indexer.wk.weight": ("layers.{}.attention.pre_attention.indexer.wk.weight"),
                 "model.layers.{}.self_attn.indexer.k_norm.weight": (
                     "layers.{}.attention.pre_attention.indexer.k_norm.weight"
                 ),
@@ -149,14 +135,8 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
                 "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": (
                     "layers.{}.attention.pre_attention.wkv_a.weight"
                 ),
-                "model.layers.{}.self_attn.kv_a_layernorm.weight": (
-                    "layers.{}.attention.pre_attention.kv_norm.weight"
-                ),
-                "model.layers.{}.self_attn.kv_b_proj.weight": (
-                    "layers.{}.attention.pre_attention.wkv_b.weight"
-                ),
-                "model.layers.{}.self_attn.o_proj.weight": (
-                    "layers.{}.attention.post_attention.wo.weight"
-                ),
+                "model.layers.{}.self_attn.kv_a_layernorm.weight": ("layers.{}.attention.pre_attention.kv_norm.weight"),
+                "model.layers.{}.self_attn.kv_b_proj.weight": ("layers.{}.attention.pre_attention.wkv_b.weight"),
+                "model.layers.{}.self_attn.o_proj.weight": ("layers.{}.attention.post_attention.wo.weight"),
             }
         )

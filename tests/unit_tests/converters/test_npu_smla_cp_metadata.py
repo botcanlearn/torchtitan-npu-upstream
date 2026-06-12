@@ -24,9 +24,9 @@ import pytest
 import torch
 
 from torchtitan_npu.converters.kernels.npu_smla import (
+    DeepSeekV4SMLAAttentionMasks,
     _cp_smla_seq_lengths,
     _smla_cp_mask_handler,
-    DeepSeekV4SMLAAttentionMasks,
 )
 from torchtitan_npu.distributed.context_parallel import adjust_cp_mask
 
@@ -62,9 +62,7 @@ def test_per_rank_lengths(seq_len, cp_degree, cp_rank, expected):
 def test_matches_post_hook_shapes(cp_degree, cp_rank, ratio):
     seq_len = 4096
     q_seq_len, kv_seq_len = _cp_smla_seq_lengths(seq_len, cp_degree, cp_rank)
-    local_s, target_ori_len, slice_blocks = _post_hook_lengths(
-        seq_len, cp_degree, cp_rank, ratio
-    )
+    local_s, target_ori_len, slice_blocks = _post_hook_lengths(seq_len, cp_degree, cp_rank, ratio)
     assert q_seq_len == local_s
     assert kv_seq_len == target_ori_len
     assert kv_seq_len // ratio == slice_blocks
@@ -99,10 +97,7 @@ def _make_smla_masks(seq_len, batch_size=2, ratios=(1, 4, 128)):
     return DeepSeekV4SMLAAttentionMasks(
         actual_seq_qlen=full.clone(),
         actual_seq_klen=full.clone(),
-        cmp_residual_kv={
-            ratio: torch.full((batch_size,), seq_len % ratio, dtype=torch.int32)
-            for ratio in ratios
-        },
+        cmp_residual_kv={ratio: torch.full((batch_size,), seq_len % ratio, dtype=torch.int32) for ratio in ratios},
         batch_size=batch_size,
         seq_len=seq_len,
     )

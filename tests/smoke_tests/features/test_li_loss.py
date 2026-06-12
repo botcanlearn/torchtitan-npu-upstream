@@ -13,20 +13,14 @@ import torch
 
 from tests.conftest import assert_tensor_finite
 from tests.smoke_tests.features._dsa_model_helpers import build_model_backed_dsa_inputs
-
 from torchtitan_npu.converters.kernels.dsa import SparseLightningIndexerKLLoss
-
 
 pytestmark = pytest.mark.smoke
 
 
 def test_li_loss_forward(npu_device):
     li_loss_fn = SparseLightningIndexerKLLoss()
-    loss = li_loss_fn(
-        **build_model_backed_dsa_inputs(
-            npu_device, batch_size=1, seq_len=2048, requires_grad=False
-        )
-    )
+    loss = li_loss_fn(**build_model_backed_dsa_inputs(npu_device, batch_size=1, seq_len=2048, requires_grad=False))
 
     assert loss.shape == ()
     assert loss.dtype == torch.float32
@@ -35,9 +29,7 @@ def test_li_loss_forward(npu_device):
 
 def test_li_loss_backward(npu_device):
     li_loss_fn = SparseLightningIndexerKLLoss()
-    inputs = build_model_backed_dsa_inputs(
-        npu_device, batch_size=1, seq_len=2048, requires_grad=True
-    )
+    inputs = build_model_backed_dsa_inputs(npu_device, batch_size=1, seq_len=2048, requires_grad=True)
 
     loss = li_loss_fn(**inputs)
     loss.backward()
@@ -50,9 +42,7 @@ def test_li_loss_backward(npu_device):
 def test_sparse_indexer_grad_kl_loss(npu_device):
     import torch_npu
 
-    inputs = build_model_backed_dsa_inputs(
-        npu_device, batch_size=1, seq_len=2048, requires_grad=False
-    )
+    inputs = build_model_backed_dsa_inputs(npu_device, batch_size=1, seq_len=2048, requires_grad=False)
     (
         d_query_index,
         d_key_index,

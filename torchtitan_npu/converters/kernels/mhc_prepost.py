@@ -8,7 +8,7 @@ import logging
 
 import torch
 import torch_npu
-from torch import nn, Tensor
+from torch import Tensor, nn
 
 from torchtitan_npu.converters.convert_utils import replace_module_with_name
 from torchtitan_npu.converters.model_custom_interface import (
@@ -19,7 +19,6 @@ from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.models.deepseek_v4.model import HcHead, HcPost, HcPre
 from torchtitan_npu.ops.triton import MHCPostTriton, MHCPreOnlyTriton, MHCPreTriton
 from torchtitan_npu.tools.device import get_npu_device_type
-
 
 logger = logging.getLogger(__name__)
 

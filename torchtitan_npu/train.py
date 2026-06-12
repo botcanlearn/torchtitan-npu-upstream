@@ -47,9 +47,7 @@ def _patch_train_step_for_dsa_indexer_loss():
 
             # Align logging frequency with the core metrics processor
             if self.metrics_processor.should_log(self.step):
-                DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics(
-                    total_acc_steps=get_grad_accumulation_steps(self)
-                )
+                DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics(total_acc_steps=get_grad_accumulation_steps(self))
             else:
                 # Crucial: Clear tracker silently if this step is not being logged
                 # to prevent runaway accumulation of losses across steps.
@@ -101,9 +99,7 @@ def _patch_for_train_npu_memory():
         torch.npu.set_per_process_memory_fraction(  # pyrefly: ignore[missing-attribute]
             memory_ratio
         )
-        logger.info(
-            f"[NPU Memory Config] Set process memory usage upper limit to {memory_ratio}"
-        )
+        logger.info(f"[NPU Memory Config] Set process memory usage upper limit to {memory_ratio}")
         return _original(self)
 
     titan_train.Trainer.train = wrapper_train
@@ -155,7 +151,8 @@ def _patch_for_parallel_dims_build_mesh():
         sparse_dims = ("pp", "dp_replicate", "efsdp", "ep", "etp")
         sparse_degrees = tuple(self._meshes[dim].size() for dim in sparse_dims)
         backend_override = {
-            dim: "fake" if dim != "ep"
+            dim: "fake"
+            if dim != "ep"
             # Provide a non-None Option to force Pytorch to create
             # a new ProcessGroup for EP communication.
             else torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()

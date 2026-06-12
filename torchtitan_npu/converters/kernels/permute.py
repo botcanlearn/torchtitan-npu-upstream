@@ -17,7 +17,6 @@ from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.distributed.tensor.parallel.style import ParallelStyle
 from torch.distributed.tensor.placement_types import Partial
 from torchtitan.distributed.expert_parallel import ExpertParallel
-
 from torchtitan.models.common.moe import MoE
 
 from torchtitan_npu.converters.convert_utils import replace_module_with_name
@@ -30,7 +29,6 @@ from torchtitan_npu.converters.model_custom_interface import (
 from torchtitan_npu.converters.registry import register_model_converter
 from torchtitan_npu.distributed.process_group import is_fake_process_group
 from torchtitan_npu.models.deepseek_v4.moe import MoE as DeepSeekV4MoE
-
 
 logger = logging.getLogger(__name__)
 
@@ -74,23 +72,15 @@ def _npu_moe_forward(self, x):
         num_limited_groups = self.router.num_limited_groups
         num_experts = self.router.num_experts
         experts_per_group = num_experts // num_expert_groups
-        scores_grouped = scores_for_choice.view(
-            -1, num_expert_groups, experts_per_group
-        )
+        scores_grouped = scores_for_choice.view(-1, num_expert_groups, experts_per_group)
         top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
         group_scores = top2_scores_in_group.sum(dim=-1)
-        _, group_idx = torch.topk(
-            group_scores, k=num_limited_groups, dim=-1, sorted=False
-        )
+        _, group_idx = torch.topk(group_scores, k=num_limited_groups, dim=-1, sorted=False)
         group_mask = torch.ones_like(group_scores, dtype=torch.bool)
         group_mask.scatter_(1, group_idx, False)
-        scores_for_choice = scores_grouped.masked_fill(
-            group_mask.unsqueeze(-1), float("-inf")
-        ).view(-1, num_experts)
+        scores_for_choice = scores_grouped.masked_fill(group_mask.unsqueeze(-1), float("-inf")).view(-1, num_experts)
 
-    _, selected_experts_indices = torch.topk(
-        scores_for_choice, k=self.router.top_k, dim=-1, sorted=False
-    )
+    _, selected_experts_indices = torch.topk(scores_for_choice, k=self.router.top_k, dim=-1, sorted=False)
     top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
     if self.router.route_norm:
@@ -117,9 +107,7 @@ def _npu_moe_forward(self, x):
 
     indices = selected_experts_indices.view(-1, self.reorderer.top_k)
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
-    routed_scores, _ = torch_npu.npu_moe_token_permute(
-        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
-    )
+    routed_scores, _ = torch_npu.npu_moe_token_permute(top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1))
 
     routed_output = self.experts(
         routed_input,
@@ -179,9 +167,7 @@ def _npu_moe_forward_for_dsv4(self, x, input_ids):
     total_tokens = x.shape[0]
     input_ids_flat = input_ids.flatten() if input_ids is not None else None
     bias = getattr(self, "expert_bias", None)
-    (top_scores, selected_experts_indices, num_tokens_per_expert) = self.router(
-        x, input_ids_flat, bias
-    )
+    (top_scores, selected_experts_indices, num_tokens_per_expert) = self.router(x, input_ids_flat, bias)
 
     with torch.no_grad():
         self.tokens_per_expert.add_(num_tokens_per_expert)
@@ -189,9 +175,7 @@ def _npu_moe_forward_for_dsv4(self, x, input_ids):
     indices = selected_experts_indices.view(-1, self.reorderer.top_k)
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
 
-    routed_scores, _ = torch_npu.npu_moe_token_permute(
-        top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1)
-    )
+    routed_scores, _ = torch_npu.npu_moe_token_permute(top_scores.reshape(-1).unsqueeze(-1), indices.reshape(-1, 1))
 
     routed_output = self.experts(
         routed_input,
@@ -199,10 +183,7 @@ def _npu_moe_forward_for_dsv4(self, x, input_ids):
         routed_scores,
     )
 
-    if self.shared_experts is not None:
-        out = self.shared_experts(x)
-    else:
-        out = torch.zeros_like(x)
+    out = self.shared_experts(x) if self.shared_experts is not None else torch.zeros_like(x)
 
     unpermuted = torch_npu.npu_moe_token_unpermute(
         routed_output,
@@ -239,9 +220,7 @@ class NpuExpertParallel(ExpertParallel):
         is_fake = is_fake_process_group(group)
         with torch.no_grad():
             input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=not is_fake)
+                num_tokens_per_expert.view(ep_degree, -1).sum(dim=1).to(torch.device("cpu"), non_blocking=not is_fake)
             )
             if is_fake:
                 num_tokens_per_expert_group = num_tokens_per_expert
@@ -313,26 +292,18 @@ class NpuExpertParallel(ExpertParallel):
             )
         )
 
-        routed_input, self.permuted_indices = torch_npu.npu_moe_token_permute(
-            routed_input, indices
-        )
+        routed_input, self.permuted_indices = torch_npu.npu_moe_token_permute(routed_input, indices)
         if routed_scores is not None:
             routed_scores, _ = torch_npu.npu_moe_token_permute(routed_scores, indices)
 
-        num_tokens_per_expert_group = num_tokens_per_expert_group.view(
-            ep_degree, -1
-        ).sum(0)
+        num_tokens_per_expert_group = num_tokens_per_expert_group.view(ep_degree, -1).sum(0)
 
         return routed_input, num_tokens_per_expert_group, routed_scores
 
-    def _token_combine(
-        self, mod: nn.Module, routed_output: torch.Tensor, device_mesh: DeviceMesh
-    ) -> torch.Tensor:
+    def _token_combine(self, mod: nn.Module, routed_output: torch.Tensor, device_mesh: DeviceMesh) -> torch.Tensor:
         # Using NPUMoeTokenUnpermute.apply and npu_moe_token_unpermute is equivalent here,
         # and avoid storing tensor routed_output during backpropagation.
-        routed_output = NPUMoeTokenUnpermute.apply(
-            routed_output, self.permuted_indices, routed_output.shape
-        )
+        routed_output = NPUMoeTokenUnpermute.apply(routed_output, self.permuted_indices, routed_output.shape)
         if is_fake_process_group(device_mesh.get_group()):
             return routed_output
 

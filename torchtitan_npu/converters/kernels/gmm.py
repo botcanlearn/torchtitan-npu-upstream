@@ -15,7 +15,6 @@ import torch
 import torch_npu
 from torch import nn
 from torch.distributed.tensor import DTensor
-
 from torchtitan.models.common.moe import GroupedExperts
 
 from torchtitan_npu.converters.convert_utils import replace_module_with_name
@@ -54,7 +53,6 @@ def _run_experts_grouped_mm(
     swiglu_limit: float | None = None,
     routed_scores: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    # pyrefly: ignore [missing-attribute]
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int64)
     if w13 is None:
         raise ValueError("w13 cannot be None for grouped_mm experts")
@@ -97,9 +95,7 @@ def npu_grouped_experts_forward(
         # trace setattr on a function object, and this branch has no effect on
         # the computation.
         logged_attr = "_logged"
-        if not torch.compiler.is_compiling() and not hasattr(
-            npu_grouped_experts_forward, logged_attr
-        ):
+        if not torch.compiler.is_compiling() and not hasattr(npu_grouped_experts_forward, logged_attr):
             setattr(npu_grouped_experts_forward, logged_attr, True)
             logger.info(
                 f"[GMM-TP] w2 placements={self.w2.placements}, is_tp={is_tp}, "
@@ -115,10 +111,7 @@ def npu_grouped_experts_forward(
     # and the clamp is skipped in ``_run_experts_grouped_mm``.
     swiglu_limit = getattr(self, "swiglu_limit", None)
 
-    # pyrefly: ignore [bad-argument-type]
-    out = _run_experts_grouped_mm(
-        w13, w2, None, x, num_tokens_per_expert, swiglu_limit, routed_scores
-    )
+    out = _run_experts_grouped_mm(w13, w2, None, x, num_tokens_per_expert, swiglu_limit, routed_scores)
 
     if is_tp and tp_group is not None:
         import torch.distributed as dist
@@ -127,9 +120,7 @@ def npu_grouped_experts_forward(
         # (dynamo cannot trace setattr on a function) and avoid the .item()
         # device syncs on every step once it has been logged.
         ar_logged_attr = "_ar_logged"
-        log_ar = not torch.compiler.is_compiling() and not hasattr(
-            npu_grouped_experts_forward, ar_logged_attr
-        )
+        log_ar = not torch.compiler.is_compiling() and not hasattr(npu_grouped_experts_forward, ar_logged_attr)
         pre_ar = out.mean().item() if log_ar else None
 
         dist.all_reduce(out, group=tp_group)
@@ -166,7 +157,6 @@ class NpuGroupedExperts(GroupedExperts):
         self.__dict__.update(parent.__dict__)
         self.use_grouped_mm = True
         if self.w1 is not None and self.w3 is not None:
-            # pyrefly: ignore [no-matching-overload]
             w13_data = torch.empty(
                 self.num_experts,
                 self.w2.shape[2] * 2,
@@ -199,9 +189,7 @@ class NpuGroupedExperts(GroupedExperts):
         num_tokens_per_expert: torch.Tensor,
         routed_scores: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return npu_grouped_experts_forward(
-            self, x, num_tokens_per_expert, routed_scores
-        )
+        return npu_grouped_experts_forward(self, x, num_tokens_per_expert, routed_scores)
 
     def init_weights(self, init_std: float):
         npu_grouped_experts_init_weights(self, init_std)
@@ -218,16 +206,14 @@ class NpuGroupedExpertConverter(ModelCustomConverter):
 class GMMStateDictUpdater(StateDictUpdater):
     @classmethod
     def to_hf(cls, state_dict):
-        has_w13 = any(".moe.experts.w13" in k for k in state_dict.keys())
+        has_w13 = any(".moe.experts.w13" in k for k in state_dict)
         if has_w13:
             state_dict = _split_w13_for_mapping(state_dict)
         return state_dict
 
     @classmethod
     def from_hf(cls, state_dict):
-        filtered = {
-            k: v for k, v in state_dict.items() if not k.endswith(".weight_scale_inv")
-        }
+        filtered = {k: v for k, v in state_dict.items() if not k.endswith(".weight_scale_inv")}
 
         return fuse_experts(filtered)
 

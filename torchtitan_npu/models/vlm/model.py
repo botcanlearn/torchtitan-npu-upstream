@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
-
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.experiments.vlm.model.model import (
     Llama3Siglip2Transformer,
@@ -17,17 +16,17 @@ from torchtitan.experiments.vlm.model.model import (
 from torchtitan.models.common.attention import AttentionMasksType
 
 from torchtitan_npu.models.multimodal import (
+    DenseMaskSDPA,
     build_config,
     build_encoder_causal_mask,
     build_text_document_causal_mask,
     build_valid_patch_mask,
     config_to_dict,
-    DenseMaskSDPA,
     require_config,
     scatter_visual_embeddings,
 )
 
-from .siglip2 import to_npu_vision_transformer_config, VisionTransformerNpu
+from .siglip2 import VisionTransformerNpu, to_npu_vision_transformer_config
 
 
 def _grid_hw_from_grid_thw(grid_thw: torch.Tensor) -> torch.Tensor:
@@ -44,9 +43,7 @@ class Llama3Siglip2TransformerNpu(Llama3Siglip2Transformer):
         # Upstream constructs a concrete VisionTransformer instead of using
         # config.encoder.build(), so replace only the encoder with the NPU
         # subclass while keeping the rest of upstream initialization intact.
-        self.encoder = VisionTransformerNpu(
-            require_config(config.encoder, VisionTransformerNpu.Config, "encoder")
-        )
+        self.encoder = VisionTransformerNpu(require_config(config.encoder, VisionTransformerNpu.Config, "encoder"))
 
     def get_attention_masks(
         self,
@@ -62,13 +59,11 @@ class Llama3Siglip2TransformerNpu(Llama3Siglip2Transformer):
         grid_hw = _grid_hw_from_grid_thw(extra_inputs["grid_thw"])
         valid_patches = build_valid_patch_mask(grid_hw)
         masks = {
-            "llama3_masks": build_text_document_causal_mask(
-                input_batch, tokenizer.eos_id
-            ),
+            "llama3_masks": build_text_document_causal_mask(input_batch, tokenizer.eos_id),
             "encoder_masks": build_encoder_causal_mask(valid_patches),
             "pixel_masks": valid_patches,
         }
-        return cast(Any, masks)
+        return cast("Any", masks)
 
     def forward(
         self,
@@ -82,16 +77,12 @@ class Llama3Siglip2TransformerNpu(Llama3Siglip2Transformer):
         hidden_states = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         if self.encoder is not None:
-            assert (
-                attention_masks is not None
-            ), "encoder requires attention masks when using VLM NPU dense masks."
-            dense_masks = cast(dict[str, torch.Tensor], attention_masks)
+            assert attention_masks is not None, "encoder requires attention masks when using VLM NPU dense masks."
+            dense_masks = cast("dict[str, torch.Tensor]", attention_masks)
             grid_hw = _grid_hw_from_grid_thw(grid_thw)
             pixel_masks = dense_masks.get("pixel_masks")
             if pixel_masks is None:
-                raise ValueError(
-                    "VLM dense masks require attention_masks['pixel_masks']"
-                )
+                raise ValueError("VLM dense masks require attention_masks['pixel_masks']")
             visual_embeddings = self.encoder(
                 pixel_values,
                 pixel_masks,
@@ -111,7 +102,7 @@ class Llama3Siglip2TransformerNpu(Llama3Siglip2Transformer):
             hidden_states = layer(
                 hidden_states,
                 self.freqs_cis,
-                cast(dict[str, torch.Tensor], attention_masks)["llama3_masks"],
+                cast("dict[str, torch.Tensor]", attention_masks)["llama3_masks"],
                 positions,
             )
 

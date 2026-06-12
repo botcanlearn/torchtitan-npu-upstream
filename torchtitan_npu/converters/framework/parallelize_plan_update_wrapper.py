@@ -4,14 +4,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from typing import TYPE_CHECKING
 
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import parallel
 from torch.distributed.tensor.parallel.style import ParallelStyle
 
-from torchtitan_npu.converters.model_custom_interface import ParallelizePlanUpdater
+if TYPE_CHECKING:
+    from torchtitan_npu.converters.model_custom_interface import ParallelizePlanUpdater
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,4 @@ parallel.parallelize_module = parallelize_module_wrapper
 def apply_parallelize_plan_update(updater_cls: type["ParallelizePlanUpdater"]):
     _updater_cls_list.append(updater_cls)
 
-    logger.info(
-        f"[apply_parallelize_plan_update] Add ParallelizePlanUpdater {updater_cls}."
-    )
+    logger.info(f"[apply_parallelize_plan_update] Add ParallelizePlanUpdater {updater_cls}.")

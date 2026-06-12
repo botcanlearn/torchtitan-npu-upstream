@@ -20,7 +20,7 @@ from typing import Any
 import torch
 import torch.distributed._functional_collectives as ft_c
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.parallel import parallelize_module, ParallelStyle
+from torch.distributed.tensor.parallel import ParallelStyle, parallelize_module
 
 from torchtitan_npu.models.deepseek_v32.model import DSV32_SDPA
 
@@ -56,9 +56,7 @@ class SparseAttentionCP(ParallelStyle):
         slice_end = (rank + 1) * s_local
 
         def _ag(x: torch.Tensor, dim: int) -> torch.Tensor:
-            r = ft_c.all_gather_tensor_autograd(
-                x.contiguous(), gather_dim=dim, group=group
-            )
+            r = ft_c.all_gather_tensor_autograd(x.contiguous(), gather_dim=dim, group=group)
             if isinstance(r, ft_c.AsyncCollectiveTensor):
                 # See CompressorAttentionCP for reason
                 # not using AsyncCollectiveTensor.wait().
@@ -73,15 +71,11 @@ class SparseAttentionCP(ParallelStyle):
         if k_indexer is not None and isinstance(k_indexer, torch.Tensor):
             new_kwargs["k_indexer"] = _ag(k_indexer, dim=1)[:, :slice_end, :, :]
 
-        new_args = (q, k, v) + args[3:]
+        new_args = (q, k, v, *args[3:])
         return new_args, new_kwargs
 
-    def _apply(
-        self, module: torch.nn.Module, device_mesh: DeviceMesh
-    ) -> torch.nn.Module:
-        module.register_forward_pre_hook(
-            partial(self._pre_hook, mesh=device_mesh), with_kwargs=True
-        )
+    def _apply(self, module: torch.nn.Module, device_mesh: DeviceMesh) -> torch.nn.Module:
+        module.register_forward_pre_hook(partial(self._pre_hook, mesh=device_mesh), with_kwargs=True)
         return module
 
 

@@ -124,9 +124,7 @@ def test_replace_functions_replaces_loaded_function():
     def replacement(*args, **kwargs):
         return []
 
-    count = replace_functions(
-        "find_modules", replacement, package="torchtitan_npu.converters"
-    )
+    count = replace_functions("find_modules", replacement, package="torchtitan_npu.converters")
 
     assert count >= 1
     assert utils_module.find_modules is replacement

@@ -120,9 +120,7 @@ def grouped_quantize_(
         replacement_counts += func_replacements
     else:
         raise AssertionError(f"unknown recipe_name {recipe_name}")
-    logger.info(
-        f"[MXFP8/Hif8 GMM] Replaced {replacement_counts} NPU GMM methods/functions."
-    )
+    logger.info(f"[MXFP8/Hif8 GMM] Replaced {replacement_counts} NPU GMM methods/functions.")
 
 
 @register_quantize_module_handler(MXLinearConfig)

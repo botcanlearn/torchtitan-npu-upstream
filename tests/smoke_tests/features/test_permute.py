@@ -28,8 +28,6 @@ def test_moe_token_unpermute_restores_shape(npu_device):
     routed_input, sorted_indices = torch_npu.npu_moe_token_permute(x, indices)
     top_scores = torch.ones(8, 2, dtype=torch.float32, device=npu_device)
 
-    restored = torch_npu.npu_moe_token_unpermute(
-        routed_input, sorted_indices, top_scores
-    )
+    restored = torch_npu.npu_moe_token_unpermute(routed_input, sorted_indices, top_scores)
 
     assert restored.shape == x.shape

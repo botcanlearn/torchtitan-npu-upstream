@@ -27,7 +27,6 @@ from torchtitan_npu.tools.weight_utils import (
     detect_input_format_by_path,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -226,9 +225,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
+                    self.grouped_expert_weight_placements[abstract_key] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
@@ -280,16 +277,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert loaded data to runtime format"""
-        filtered = {
-            k: v
-            for k, v in hf_state_dict.items()
-            if not k.endswith(".weight_scale_inv")
-        }
+        filtered = {k: v for k, v in hf_state_dict.items() if not k.endswith(".weight_scale_inv")}
 
-        if self._input_format == "hf":
-            state_dict = self.from_hf_deepseekv4(filtered)
-        else:
-            state_dict = filtered
+        state_dict = self.from_hf_deepseekv4(filtered) if self._input_format == "hf" else filtered
 
         return state_dict
 
@@ -344,9 +334,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     expert_weights_by_layer[layer_num] = {}
                 if titan_abstract_key not in expert_weights_by_layer[layer_num]:
                     expert_weights_by_layer[layer_num][titan_abstract_key] = {}
-                expert_weights_by_layer[layer_num][titan_abstract_key][
-                    int(expert_num)
-                ] = value
+                expert_weights_by_layer[layer_num][titan_abstract_key][int(expert_num)] = value
 
                 # Use stored metadata to decide path (online vs offline)
                 # Online mode: local_experts_indices was populated during to_hf()
@@ -387,14 +375,10 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             if checkpoint_patch.is_enabled():
                 success = checkpoint_patch.apply_patch()
                 if success:
-                    logger.info(
-                        "Checkpoint save patch initialized from StateDict Adaptor"
-                    )
+                    logger.info("Checkpoint save patch initialized from StateDict Adaptor")
 
         except Exception as e:
-            logger.error(
-                f"Failed to setup checkpoint patch, training will continue with original saving configs: {e}"
-            )
+            logger.error(f"Failed to setup checkpoint patch, training will continue with original saving configs: {e}")
 
     def _split_w13_for_mapping(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Split w13 into w1 and w3 for HF mapping"""

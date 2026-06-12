@@ -50,11 +50,9 @@ def _patch_cp_shard_mask_dispatch() -> None:
             sharded_inputs, _ = original(cp_mesh, inputs, None, None, input_seq_dim)
             return sharded_inputs, adjusted
 
-        return original(
-            cp_mesh, inputs, attention_masks, load_balancer_type, input_seq_dim
-        )
+        return original(cp_mesh, inputs, attention_masks, load_balancer_type, input_seq_dim)
 
-    titan_cp.cp_shard = wrapper  # pyrefly: ignore [bad-assignment]
+    titan_cp.cp_shard = wrapper
     logger.info("[Patch] Registered Context-Parallel cp_shard mask-handler dispatch.")
 
 

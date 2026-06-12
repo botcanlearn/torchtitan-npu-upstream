@@ -36,6 +36,8 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ParallelismConfig as _BaseParallelismConfig,
+)
+from torchtitan.config import (
     TrainingConfig as _BaseTrainingConfig,
 )
 from torchtitan.tools.profiling import ProfilingConfig as _BaseProfilingConfig

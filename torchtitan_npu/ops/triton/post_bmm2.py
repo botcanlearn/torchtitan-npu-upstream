@@ -52,30 +52,10 @@ if TRITON_AVAILABLE:
         x3 = tl.load(X_base + 3 * stride_x_k).to(tl.float32)
 
         k = tl.arange(0, 4)
-        h0 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 0 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h1 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 1 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h2 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 2 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h3 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 3 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
+        h0 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 0 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h1 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 1 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h2 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 2 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h3 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 3 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
 
         h00 = tlx.extract_slice(h0, [0, 0], [GROUP, 1], [1, 1])
         h01 = tlx.extract_slice(h0, [0, 1], [GROUP, 1], [1, 1])
@@ -141,30 +121,10 @@ if TRITON_AVAILABLE:
 
         # load H rows as (G,4)
         k = tl.arange(0, 4)
-        h0 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 0 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h1 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 1 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h2 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 2 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
-        h3 = tl.load(
-            H_ptr
-            + pids[:, None] * stride_h_bs
-            + 3 * stride_h_n
-            + k[None, :] * stride_h_k
-        ).to(tl.float32)
+        h0 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 0 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h1 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 1 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h2 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 2 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
+        h3 = tl.load(H_ptr + pids[:, None] * stride_h_bs + 3 * stride_h_n + k[None, :] * stride_h_k).to(tl.float32)
 
         # We need H^T coefficients:
         # dx0 uses column 0: [h00, h10, h20, h30]
@@ -300,9 +260,7 @@ def hc_post_bmm2_forward(
 
     GROUP = 1
     if C > 4096 and C % 2 != 0:
-        raise ValueError(
-            f"Channel dimension C must be even to split into two equal blocks, but got {C}"
-        )
+        raise ValueError(f"Channel dimension C must be even to split into two equal blocks, but got {C}")
 
     BLOCK_C = C // 2 if C > 4096 else C
     BS = B * S
@@ -340,7 +298,7 @@ def hc_post_bmm2_backward(H_res: torch.Tensor, x: torch.Tensor, dY: torch.Tensor
       dH_res: [B,S,4,4] fp32
       dX    : [B,S,4,C] fp32 (or cast outside if you want bf16)
     """
-    B, S, N, N2 = H_res.shape
+    B, S, N, _N2 = H_res.shape
     _, _, _, C = x.shape
     BS = B * S
 
@@ -352,9 +310,7 @@ def hc_post_bmm2_backward(H_res: torch.Tensor, x: torch.Tensor, dY: torch.Tensor
     dX_fp32 = torch.empty((BS, N, C), device=x.device, dtype=torch.float32)
     GROUP = 1
     if C > 4096 and C % 2 != 0:
-        raise ValueError(
-            f"Channel dimension C must be even to split into two equal blocks, but got {C}"
-        )
+        raise ValueError(f"Channel dimension C must be even to split into two equal blocks, but got {C}")
 
     BLOCK_C = C // 2 if C > 4096 else C
     grid_dx = (triton.cdiv(BS, GROUP), triton.cdiv(C, BLOCK_C))

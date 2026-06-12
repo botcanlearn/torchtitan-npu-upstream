@@ -37,7 +37,6 @@ import functools
 import torch
 import torchtitan.trainer as titan_trainer
 
-
 _orig_forward_backward_step = titan_trainer.Trainer.forward_backward_step
 
 
@@ -78,9 +77,7 @@ def _patched_forward_backward_step(
             **kwargs,
         )
 
-    inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-        input_dict, labels
-    )
+    inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(input_dict, labels)
 
     def _normalized_loss_fn(pred, target, _orig=orig_loss_fn, _tokens=tokens):
         return _orig(pred, target) / _tokens

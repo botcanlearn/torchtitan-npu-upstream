@@ -44,14 +44,10 @@ def parallelize_qwen3(
         n_heads = first_layer.attention.n_heads  # pyrefly: ignore [missing-attribute]
         if n_heads % cp_degree != 0:
             raise ValueError(
-                f"[Ulysses CP] n_heads={n_heads} must be divisible by "
-                f"context_parallel_degree={cp_degree}."
+                f"[Ulysses CP] n_heads={n_heads} must be divisible by context_parallel_degree={cp_degree}."
             )
 
-        logger.info(
-            f"[Ulysses CP] Qwen3 Ulysses CP enabled: "
-            f"cp_degree={cp_degree}, n_heads={n_heads}"
-        )
+        logger.info(f"[Ulysses CP] Qwen3 Ulysses CP enabled: cp_degree={cp_degree}, n_heads={n_heads}")
 
         from torchtitan_npu.distributed.context_parallel.registry import (
             apply_cp_to_attention_module as apply_cp,

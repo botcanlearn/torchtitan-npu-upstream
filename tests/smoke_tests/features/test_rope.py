@@ -5,18 +5,24 @@
 
 import pytest
 import torch
-
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex as llama_apply_rotary_emb,
+)
+from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin as qwen_apply_rotary_emb,
+)
+from torchtitan.models.common.rope import (
     apply_rotary_emb_single_complex as deepseek_apply_rotary_emb,
 )
 
 from tests.conftest import assert_tensor_finite, stable_randn
-
 from torchtitan_npu.converters.kernels.rope import (
     npu_apply_rotary_emb_complex as npu_apply_rotary_emb_llama,
+)
+from torchtitan_npu.converters.kernels.rope import (
     npu_apply_rotary_emb_cos_sin as npu_apply_rotary_emb_qwen,
+)
+from torchtitan_npu.converters.kernels.rope import (
     npu_apply_rotary_emb_single_complex as npu_apply_rotary_emb_deepseek,
 )
 
@@ -37,9 +43,9 @@ def _assert_tensors_close(
     rtol: float,
     atol: float,
 ):
-    assert torch.allclose(
-        expected.float(), actual.float(), rtol=rtol, atol=atol
-    ), f"{message_prefix}: max_diff={torch.max(torch.abs(expected.float() - actual.float())).item()}"
+    assert torch.allclose(expected.float(), actual.float(), rtol=rtol, atol=atol), (
+        f"{message_prefix}: max_diff={torch.max(torch.abs(expected.float() - actual.float())).item()}"
+    )
 
 
 def test_rope_deepseek(npu_device):
@@ -84,12 +90,8 @@ def test_npu_apply_rotary_emb_llama_precision(npu_device):
 
     assert expected_q.shape == actual_q.shape
     assert expected_k.shape == actual_k.shape
-    _assert_tensors_close(
-        expected_q, actual_q, "Query output mismatch", rtol=1e-5, atol=1e-5
-    )
-    _assert_tensors_close(
-        expected_k, actual_k, "Key output mismatch", rtol=1e-5, atol=1e-5
-    )
+    _assert_tensors_close(expected_q, actual_q, "Query output mismatch", rtol=1e-5, atol=1e-5)
+    _assert_tensors_close(expected_k, actual_k, "Key output mismatch", rtol=1e-5, atol=1e-5)
 
 
 def test_npu_apply_rotary_emb_qwen_precision(npu_device):
@@ -102,12 +104,8 @@ def test_npu_apply_rotary_emb_qwen_precision(npu_device):
 
     assert expected_q.shape == actual_q.shape
     assert expected_k.shape == actual_k.shape
-    _assert_tensors_close(
-        expected_q, actual_q, "Query output mismatch", rtol=1e-5, atol=1e-5
-    )
-    _assert_tensors_close(
-        expected_k, actual_k, "Key output mismatch", rtol=1e-5, atol=1e-5
-    )
+    _assert_tensors_close(expected_q, actual_q, "Query output mismatch", rtol=1e-5, atol=1e-5)
+    _assert_tensors_close(expected_k, actual_k, "Key output mismatch", rtol=1e-5, atol=1e-5)
 
 
 def test_npu_apply_rotary_emb_deepseek_precision(npu_device):

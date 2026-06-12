@@ -29,7 +29,6 @@ def _create_fake_pg(common_opts, backend_opts):
 
 
 dist.Backend.register_backend(
-    # pyrefly: ignore [missing-attribute]
     dist.Backend.FAKE,
     _create_fake_pg,
     extended_api=True,

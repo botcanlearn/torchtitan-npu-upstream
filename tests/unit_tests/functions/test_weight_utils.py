@@ -74,10 +74,7 @@ def test_split_w13_for_mapping_uses_views_without_losing_values_or_dtype():
     assert torch.equal(w3, w13[:, 4:, :])
     assert w1.untyped_storage().data_ptr() == w13.untyped_storage().data_ptr()
     assert w3.untyped_storage().data_ptr() == w13.untyped_storage().data_ptr()
-    assert (
-        result["model.layers.0.attention.weight"]
-        is state_dict["model.layers.0.attention.weight"]
-    )
+    assert result["model.layers.0.attention.weight"] is state_dict["model.layers.0.attention.weight"]
 
 
 def test_convert_expert_format_splits_dtensor_w13_with_placements(monkeypatch):
@@ -156,11 +153,5 @@ def test_split_w13_for_mapping_dtensor_uses_views_without_losing_values(monkeypa
     assert w3.placements == ("shard",)
     assert torch.equal(w1.to_local(), local_w13[:, :4, :])
     assert torch.equal(w3.to_local(), local_w13[:, 4:, :])
-    assert (
-        w1.to_local().untyped_storage().data_ptr()
-        == local_w13.untyped_storage().data_ptr()
-    )
-    assert (
-        w3.to_local().untyped_storage().data_ptr()
-        == local_w13.untyped_storage().data_ptr()
-    )
+    assert w1.to_local().untyped_storage().data_ptr() == local_w13.untyped_storage().data_ptr()
+    assert w3.to_local().untyped_storage().data_ptr() == local_w13.untyped_storage().data_ptr()

@@ -42,7 +42,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-
 # ============================================================================
 # Distributed Test Base Classes (following PyTorch patterns)
 # ============================================================================
@@ -175,9 +174,7 @@ def npu_available() -> bool:
     return hasattr(torch, "npu") and torch.npu.is_available()
 
 
-def skip_on_runtime_unsupported(
-    error: RuntimeError, unsupported_markers: tuple[str, ...], reason: str
-):
+def skip_on_runtime_unsupported(error: RuntimeError, unsupported_markers: tuple[str, ...], reason: str):
     """Skip smoke tests when the current runtime/SOC does not support the requested op shape or dtype."""
     message = str(error)
     if any(marker in message for marker in unsupported_markers):

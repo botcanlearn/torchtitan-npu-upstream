@@ -7,14 +7,11 @@
 import os
 
 import torch
-
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
 
 import torchtitan_npu  # noqa: F401
-
 from torchtitan_npu.converters.registry import has_npu_converter
-
 from torchtitan_npu.train import (
     _patch_for_garbage_collection_run,
     _patch_for_parallel_dims_build_mesh,
@@ -77,18 +74,14 @@ def main() -> None:
             if isinstance(layer_cfg.attention.inner_attention, FlexAttention.Config):
                 layer_cfg.attention.inner_attention = ScaledDotProductAttention.Config()
                 layer_cfg.attention.mask_type = "causal"
-                logger.info(
-                    "Replaced FlexAttention with ScaledDotProductAttention for NPU compatibility"
-                )
+                logger.info("Replaced FlexAttention with ScaledDotProductAttention for NPU compatibility")
 
     if (
         config.compile.enable  # pyrefly: ignore [missing-attribute]
         and config.activation_checkpoint.mode  # pyrefly: ignore [missing-attribute]
         != "none"
     ):
-        logger.warning(
-            "There might be performance issues with activation checkpointing and torch.compile enabled!"
-        )
+        logger.warning("There might be performance issues with activation checkpointing and torch.compile enabled!")
 
     if config.compile.enable:  # pyrefly: ignore [missing-attribute]
         has_bypass_triton_codegen = _has_model_converter(
@@ -101,14 +94,11 @@ def main() -> None:
                 # MLA performs shape inference according to the value tensor;
                 # patch the meta registration so dynamo traces the right shapes.
                 try:
-                    # pyrefly: ignore [missing-import]
                     from torch_npu.op_plugin.meta._meta_registrations import (
                         npu_fusion_attention_forward as original_meta_func,
                     )
                 except ImportError:
-                    logger.info(
-                        "torch_npu meta registrations not available, skipping compile patch"
-                    )
+                    logger.info("torch_npu meta registrations not available, skipping compile patch")
                 else:
                     from torchtitan_npu.patches.torch_npu._meta_registrations import (
                         npu_fusion_attention_forward,
@@ -155,9 +145,7 @@ def main() -> None:
         patch_llama4_checkpoint_support()
 
     if model_name == "deepseek_v3":
-        logger.warning(
-            "deepseek_v3 checkpoint patch is temporarily disabled due to config system migration."
-        )
+        logger.warning("deepseek_v3 checkpoint patch is temporarily disabled due to config system migration.")
 
     try:
         trainer = config.build()  # pyrefly: ignore [missing-attribute]
@@ -165,9 +153,9 @@ def main() -> None:
         if (
             config.checkpoint.create_seed_checkpoint  # pyrefly: ignore [missing-attribute]
         ):
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
             assert (
                 config.checkpoint.enable  # pyrefly: ignore [missing-attribute]
             ), "Must enable checkpointing when creating a seed checkpoint."

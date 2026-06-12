@@ -18,7 +18,7 @@
 import logging
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, cast, ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -64,16 +64,12 @@ def _initialize_state(optimizer, p, amsgrad):
     if len(state) != 0:
         return state
 
-    local_exp, local_exp_avg_sq = optimizer.virtual_allocator.init_exp(
-        unwrap_dtensor(p)
-    )
+    local_exp, local_exp_avg_sq = optimizer.virtual_allocator.init_exp(unwrap_dtensor(p))
     state["exp_avg"] = wrap_like_param(local_exp, p)
     state["exp_avg_sq"] = wrap_like_param(local_exp_avg_sq, p)
 
     if amsgrad:
-        state["max_exp_avg_sq"] = torch.zeros_like(
-            p, memory_format=torch.preserve_format
-        )
+        state["max_exp_avg_sq"] = torch.zeros_like(p, memory_format=torch.preserve_format)
     return state
 
 
@@ -122,9 +118,7 @@ def virtual_optimizer_step_impl(self, closure=None):
                 "grads": [p.grad],
                 "exp_avgs": [state["exp_avg"]],
                 "exp_avg_sqs": [state["exp_avg_sq"]],
-                "max_exp_avg_sqs": [state["max_exp_avg_sq"]]
-                if group["amsgrad"]
-                else [],
+                "max_exp_avg_sqs": [state["max_exp_avg_sq"]] if group["amsgrad"] else [],
                 "step_tensors": [state["step"]],
             }
 
@@ -141,9 +135,7 @@ class VirtualAllocator:
         self.pp_stages = pp_stages
         self.pp_rank = pp_rank
         self.virtual_optimizer_size = virtual_optimizer_size
-        self.swap_size_this_pp_rank = self.get_swap_memory_sizes()[self.pp_rank] * (
-            1024**3
-        )
+        self.swap_size_this_pp_rank = self.get_swap_memory_sizes()[self.pp_rank] * (1024**3)
         self.actually_swap_size: float = 0.0
 
     @classmethod
@@ -152,10 +144,7 @@ class VirtualAllocator:
         return torch.zeros_like(p, memory_format=torch.preserve_format)
 
     def get_swap_memory_sizes(self) -> list[float]:
-        if (
-            isinstance(self.virtual_optimizer_size, str)
-            and self.virtual_optimizer_size.lower() == "all"
-        ):
+        if isinstance(self.virtual_optimizer_size, str) and self.virtual_optimizer_size.lower() == "all":
             return [65.0] * self.pp_stages
 
         if isinstance(self.virtual_optimizer_size, (int, float)):
@@ -167,9 +156,7 @@ class VirtualAllocator:
             if len(self.virtual_optimizer_size) == self.pp_stages:
                 return list(self.virtual_optimizer_size)
 
-        raise ValueError(
-            f"virtual_optimizer_size configuration error for pp={self.pp_stages}"
-        )
+        raise ValueError(f"virtual_optimizer_size configuration error for pp={self.pp_stages}")
 
     def init_exp(self, p: torch.Tensor):
         """Create exp_avg and exp_avg_sq based on input param."""
@@ -256,7 +243,7 @@ def _save_original_states(self):
     if not hasattr(self, "virtual_allocator"):
         return original_states
     for p, state in self.state.items():
-        original_states[p] = {k: v for k, v in state.items()}
+        original_states[p] = dict(state.items())
         for k in OPTIMIZER_STATE_KEYS:
             if k in state and isinstance(state[k], torch.Tensor):
                 _process_state_tensor(state, k)
@@ -276,7 +263,7 @@ def _restore_original_states(self, original_states):
 def patched_state_dict(self) -> dict[str, Any]:
     original_states = _save_original_states(self)
     sd = self._original_state_dict()  # type: ignore[assignment]
-    sd = cast(dict[str, Any], sanitize(sd))
+    sd = cast("dict[str, Any]", sanitize(sd))
     _restore_original_states(self, original_states)
     return sd
 
@@ -291,9 +278,8 @@ def _restore_single_tensor(state, k, p, allocator):
 
 
 def _process_step_device(state, p):
-    if "step" in state and isinstance(state["step"], torch.Tensor):
-        if state["step"].device.type == "cpu":
-            state["step"] = state["step"].to(p.device)
+    if "step" in state and isinstance(state["step"], torch.Tensor) and state["step"].device.type == "cpu":
+        state["step"] = state["step"].to(p.device)
 
 
 def _update_param_states(optimizer, p):
@@ -340,9 +326,7 @@ def swap_tensor_copy_wrapper(func):
 
         if dst_swap or src_swap:
             if dst.shape != src.shape:
-                raise RuntimeError(
-                    f"Shape mismatch in swap tensor copy: {dst.shape} vs {src.shape}"
-                )
+                raise RuntimeError(f"Shape mismatch in swap tensor copy: {dst.shape} vs {src.shape}")
             if dst_dev.type == "cpu" and src_dev.type == "cpu":
                 func(dst, src, non_blocking=non_blocking)
 
@@ -354,9 +338,7 @@ def swap_tensor_copy_wrapper(func):
                 src_npu = src.to(dst_dev, non_blocking=non_blocking)
                 dst.fill_(1).mul_(src_npu)
 
-            elif (dst_dev.type == "npu" or dst_swap) and (
-                src_dev.type == "npu" or src_swap
-            ):
+            elif (dst_dev.type == "npu" or dst_swap) and (src_dev.type == "npu" or src_swap):
                 if dst_dev == src_dev:
                     dst.fill_(1).mul_(src)
                 else:

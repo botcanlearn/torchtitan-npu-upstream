@@ -5,8 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.models.qwen3 import (
-    model_registry as _upstream_model_registry,
     Qwen3StateDictAdapter,
+)
+from torchtitan.models.qwen3 import (
+    model_registry as _upstream_model_registry,
 )
 
 from torchtitan_npu.models.qwen3.parallelize import parallelize_qwen3

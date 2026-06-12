@@ -11,9 +11,9 @@ from torch.distributed._tensor import DTensor
 from torchtitan.models.common.attention import ScaledDotProductAttention
 
 from torchtitan_npu.distributed.context_parallel.ulysses_cp import (
-    all_to_all,
     AllToAll,
     UlyssesCP,
+    all_to_all,
 )
 
 
@@ -36,9 +36,7 @@ def _make_cpu_mesh_ulysses():
 
 @pytest.fixture
 def mock_all_to_all_identity_for_gloo():
-    def _fake_all_to_all(
-        output_tensor_list, input_tensor_list, group=None, async_op=False
-    ):
+    def _fake_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
         assert len(output_tensor_list) == len(input_tensor_list)
         for out_t, in_t in zip(output_tensor_list, input_tensor_list, strict=True):
             out_t.copy_(in_t)
@@ -48,9 +46,7 @@ def mock_all_to_all_identity_for_gloo():
         yield
 
 
-@pytest.mark.usefixtures(
-    "single_rank_process_group", "mock_all_to_all_identity_for_gloo"
-)
+@pytest.mark.usefixtures("single_rank_process_group", "mock_all_to_all_identity_for_gloo")
 class TestAllToAll:
     @staticmethod
     def test_single_rank_preserves_shape_and_values():

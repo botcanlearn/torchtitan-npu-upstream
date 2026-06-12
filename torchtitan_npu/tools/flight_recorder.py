@@ -20,9 +20,7 @@ def init_distributed_with_hccl_flight_recorder(
 ) -> int:
     def _warn_overwrite_env(env, val):
         if env in os.environ:
-            logger.warning(
-                f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
-            )
+            logger.warning(f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config")
         os.environ[env] = val
 
     # enable torch hccl flight recorder in the mode that would dump files if timeout is detected

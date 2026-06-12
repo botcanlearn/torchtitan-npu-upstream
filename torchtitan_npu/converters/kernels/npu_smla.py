@@ -7,7 +7,7 @@
 import importlib
 import logging
 from collections.abc import Callable
-from typing import Any, cast, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import torch
 import torch.nn as nn
@@ -81,9 +81,7 @@ class _SMLALayerView:
             index += len(self)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        return _SMLALayerConfig(
-            attention=_SMLAAttentionConfig(inner_attention=self._inner_attention)
-        )
+        return _SMLALayerConfig(attention=_SMLAAttentionConfig(inner_attention=self._inner_attention))
 
 
 def build_smla_attention_masks(
@@ -93,23 +91,19 @@ def build_smla_attention_masks(
     batch_size, total_seq_len = positions.shape
     seq_len = total_seq_len - model_args.num_mtp_modules
     device = positions.device
-    cmp_ratios = model_args.compress_ratios + (model_args.mtp_layer_compress_ratio,)
+    cmp_ratios = (*model_args.compress_ratios, model_args.mtp_layer_compress_ratio)
     residual_cmp_ratio_set = set()
     for ratio in cmp_ratios:
         if ratio > 1:
             residual_cmp_ratio_set.add(ratio)
     residual_cmp_ratios = tuple(sorted(residual_cmp_ratio_set))
-    actual_seq_qlen = torch.full(
-        (batch_size,), seq_len, dtype=torch.int32, device=device
-    )
+    actual_seq_qlen = torch.full((batch_size,), seq_len, dtype=torch.int32, device=device)
     actual_seq_klen = actual_seq_qlen.clone()
     return DeepSeekV4SMLAAttentionMasks(
         actual_seq_qlen=actual_seq_qlen,
         actual_seq_klen=actual_seq_klen,
         cmp_residual_kv={
-            ratio: torch.full(
-                (batch_size,), seq_len % ratio, dtype=torch.int32, device=device
-            )
+            ratio: torch.full((batch_size,), seq_len % ratio, dtype=torch.int32, device=device)
             for ratio in residual_cmp_ratios
         },
         batch_size=batch_size,
@@ -129,10 +123,7 @@ def _cp_smla_seq_lengths(seq_len: int, cp_degree: int, cp_rank: int) -> tuple[in
     if cp_degree <= 1:
         return seq_len, seq_len
     if seq_len % cp_degree != 0:
-        raise ValueError(
-            f"DeepSeek-V4 SMLA+CP requires seq_len ({seq_len}) divisible by "
-            f"cp_degree ({cp_degree})."
-        )
+        raise ValueError(f"DeepSeek-V4 SMLA+CP requires seq_len ({seq_len}) divisible by cp_degree ({cp_degree}).")
     local_s = seq_len // cp_degree
     return local_s, (cp_rank + 1) * local_s
 
@@ -150,22 +141,14 @@ def _smla_cp_mask_handler(attention_masks, cp_mesh):
     cp_degree = cp_mesh.size()
     if cp_degree <= 1:
         return masks
-    q_len, kv_len = _cp_smla_seq_lengths(
-        masks.seq_len, cp_degree, cp_mesh.get_local_rank()
-    )
+    q_len, kv_len = _cp_smla_seq_lengths(masks.seq_len, cp_degree, cp_mesh.get_local_rank())
     device = masks.actual_seq_qlen.device
     batch_size = masks.batch_size
     return masks._replace(
-        actual_seq_qlen=torch.full(
-            (batch_size,), q_len, dtype=torch.int32, device=device
-        ),
-        actual_seq_klen=torch.full(
-            (batch_size,), kv_len, dtype=torch.int32, device=device
-        ),
+        actual_seq_qlen=torch.full((batch_size,), q_len, dtype=torch.int32, device=device),
+        actual_seq_klen=torch.full((batch_size,), kv_len, dtype=torch.int32, device=device),
         cmp_residual_kv={
-            ratio: torch.full(
-                (batch_size,), kv_len % ratio, dtype=torch.int32, device=device
-            )
+            ratio: torch.full((batch_size,), kv_len % ratio, dtype=torch.int32, device=device)
             for ratio in masks.cmp_residual_kv
         },
         q_seq_len=q_len,
@@ -198,9 +181,7 @@ def _smla_get_attention_masks(
         positions = extra_inputs.get("positions")
     if positions is None:
         if input_batch is None:
-            raise ValueError(
-                "DeepSeek-V4 SMLA attention masks require positions or input_batch."
-            )
+            raise ValueError("DeepSeek-V4 SMLA attention masks require positions or input_batch.")
         positions = torch.arange(
             input_batch.shape[1],
             dtype=torch.int32,
@@ -292,9 +273,7 @@ def _include_deepseek_v4_in_native_attention_mask_dispatch() -> None:
         if decoder_config is None:
             continue
 
-        configs = (
-            decoder_config if isinstance(decoder_config, tuple) else (decoder_config,)
-        )
+        configs = decoder_config if isinstance(decoder_config, tuple) else (decoder_config,)
         if DeepSeekV4Model.Config in configs:
             continue
 
@@ -306,7 +285,7 @@ def _enable_native_smla_attention_mask_building() -> None:
     # presenting DeepSeek-V4 as a varlen-attention decoder config. This keeps the
     # input metadata path in the model/converter instead of patching trainer code.
     DeepSeekV4Model.get_attention_masks = _smla_get_attention_masks
-    config_cls = cast(Any, DeepSeekV4Model.Config)
+    config_cls = cast("Any", DeepSeekV4Model.Config)
     if not getattr(config_cls, "npu_smla_attn_type_dispatch", False):
         config_cls.attn_type = property(_smla_attn_type)
         config_cls.npu_smla_attn_type_dispatch = True
@@ -320,9 +299,7 @@ def _none_grads(count: int) -> tuple[None, ...]:
     return (None,) * count
 
 
-def _add_offset_to_valid_sparse_indices(
-    sparse_indices: torch.Tensor, offset: int
-) -> torch.Tensor:
+def _add_offset_to_valid_sparse_indices(sparse_indices: torch.Tensor, offset: int) -> torch.Tensor:
     if offset == 0:
         return sparse_indices
     sentinel_mask: torch.Tensor = sparse_indices.eq(-1)
@@ -373,9 +350,7 @@ def _require_attention_masks(
     attention_masks: DeepSeekV4SMLAAttentionMasks | None,
 ) -> DeepSeekV4SMLAAttentionMasks:
     if attention_masks is None:
-        raise RuntimeError(
-            "DeepSeek-V4 SMLA attention_masks are required for this kernel."
-        )
+        raise RuntimeError("DeepSeek-V4 SMLA attention_masks are required for this kernel.")
     return attention_masks
 
 
@@ -582,13 +557,8 @@ def npu_sparse_attn_shared_kv(
     layout_q = layout_kv = "BSND"
     query = query.contiguous()  # [S, B, N, D] --> [B, S, N, D]
     ori_kv = ori_kv.unsqueeze(2).contiguous()  # [S, B, D] --> [B, S, 1, D]
-    cmp_kv = (
-        cmp_kv if cmp_kv is None else cmp_kv.unsqueeze(2).contiguous()
-    )  # [S, B, D] --> [B, S, 1, D]
-    if cmp_ratio != 4:
-        cmp_sparse_indices = None
-    else:
-        cmp_sparse_indices = cmp_sparse_indices.unsqueeze(2).contiguous()
+    cmp_kv = cmp_kv if cmp_kv is None else cmp_kv.unsqueeze(2).contiguous()  # [S, B, D] --> [B, S, 1, D]
+    cmp_sparse_indices = None if cmp_ratio != 4 else cmp_sparse_indices.unsqueeze(2).contiguous()
 
     output = SparseAttnSharedKV.apply(
         query,
@@ -627,10 +597,7 @@ def _compute_li_loss(
     student = softmax_out.float().clamp_min(1e-10)
     teacher = F.normalize(cmp_softmax_l1.float().clamp_min(0), p=1, dim=-1)
     teacher = teacher.clamp_min(1e-10)
-    return (
-        F.kl_div(student.log(), teacher, reduction="none").sum(dim=-1).mean()
-        * loss_scale
-    )
+    return F.kl_div(student.log(), teacher, reduction="none").sum(dim=-1).mean() * loss_scale
 
 
 class LightningIndexerConfig(NamedTuple):
@@ -703,7 +670,7 @@ class InnerAttentionSMLAForwardInputs(NamedTuple):
 def _bind_named_call(input_cls, field_names: tuple[str, ...], args, kwargs):
     if len(args) > len(field_names):
         raise TypeError(f"expected at most {len(field_names)} arguments")
-    values = dict(zip(field_names, args))
+    values = dict(zip(field_names, args, strict=False))
     duplicates = set(values).intersection(kwargs)
     if duplicates:
         name = next(iter(duplicates))
@@ -740,9 +707,7 @@ class SparseFlashMLAForwardInputs(NamedTuple):
 
 
 def _run_sparse_flash_mla_forward(inputs: SparseFlashMLAForwardInputs):
-    metadata = SparseFlashMLA.sparse_attn_metadata(
-        inputs.metadata_cache, inputs.attention_masks, inputs.cmp_ratio
-    )
+    metadata = SparseFlashMLA.sparse_attn_metadata(inputs.metadata_cache, inputs.attention_masks, inputs.cmp_ratio)
     return torch_npu.npu_sparse_attn_sharedkv(
         q=inputs.query,
         ori_kv=inputs.ori_kv,
@@ -832,9 +797,7 @@ def _run_sparse_flash_mla_grad(
     saved: SparseFlashMLASavedTensors,
     grad_output: torch.Tensor,
 ) -> SparseFlashMLAGradOutputs:
-    fag_metadata = SparseFlashMLA.sparse_flash_mla_grad_metadata(
-        ctx.metadata_cache, ctx.attention_masks, ctx.cmp_ratio
-    )
+    fag_metadata = SparseFlashMLA.sparse_flash_mla_grad_metadata(ctx.metadata_cache, ctx.attention_masks, ctx.cmp_ratio)
     (
         dq,
         dori_kv,
@@ -878,9 +841,7 @@ def _scale_lightning_indexer_klloss_grads(
     dw: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     token_scale = 1.0 / float(cmp_softmax_l1.sum(dim=-1).numel())
-    loss_backward_scale = dsa_indexer_loss.LOSS_SCALE.to(
-        device=dindexer_q.device, dtype=torch.float32
-    )
+    loss_backward_scale = dsa_indexer_loss.LOSS_SCALE.to(device=dindexer_q.device, dtype=torch.float32)
     grad_scale = loss_backward_scale * (ctx.softmax_scale * token_scale)
     return (
         dindexer_q * grad_scale.to(dindexer_q.dtype),
@@ -932,12 +893,8 @@ def _run_lightning_indexer_klloss_grad(
     if logger.isEnabledFor(logging.DEBUG):
         li_loss = _compute_li_loss(softmax_out, cmp_softmax_l1, ctx.softmax_scale)
         if ctx.layer_number is not None:
-            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                li_loss, ctx.layer_number, ctx.num_layers
-            )
-    return _scale_lightning_indexer_klloss_grads(
-        ctx, cmp_softmax_l1, dindexer_q, dindexer_k, dw
-    )
+            DSAIndexerLossLoggingHelper.save_loss_to_tracker(li_loss, ctx.layer_number, ctx.num_layers)
+    return _scale_lightning_indexer_klloss_grads(ctx, cmp_softmax_l1, dindexer_q, dindexer_k, dw)
 
 
 def _sparse_flash_mla_backward_grads(
@@ -947,12 +904,16 @@ def _sparse_flash_mla_backward_grads(
     dw: torch.Tensor | None,
 ) -> tuple:
     return (
-        (grad_outputs.dq, grad_outputs.dori_kv, grad_outputs.dcmp_kv)
-        + _none_grads(5)
-        + (grad_outputs.dsinks,)
-        + _none_grads(8)
-        + (dindexer_q, dindexer_k, dw)
-        + _none_grads(4)
+        grad_outputs.dq,
+        grad_outputs.dori_kv,
+        grad_outputs.dcmp_kv,
+        *_none_grads(5),
+        grad_outputs.dsinks,
+        *_none_grads(8),
+        dindexer_q,
+        dindexer_k,
+        dw,
+        *_none_grads(4),
     )
 
 
@@ -972,12 +933,8 @@ class SparseFlashMLA(torch.autograd.Function):
         (grad_output,) = grad_outputs
         saved = SparseFlashMLASavedTensors(*ctx.saved_tensors)
         sparse_grads = _run_sparse_flash_mla_grad(ctx, saved, grad_output)
-        dindexer_q, dindexer_k, dw = _run_lightning_indexer_klloss_grad(
-            ctx, saved, sparse_grads.cmp_softmax_l1
-        )
-        return _sparse_flash_mla_backward_grads(
-            sparse_grads, dindexer_q, dindexer_k, dw
-        )
+        dindexer_q, dindexer_k, dw = _run_lightning_indexer_klloss_grad(ctx, saved, sparse_grads.cmp_softmax_l1)
+        return _sparse_flash_mla_backward_grads(sparse_grads, dindexer_q, dindexer_k, dw)
 
     @staticmethod
     def sparse_attn_metadata(
@@ -1074,9 +1031,7 @@ class LightningIndexer(torch.autograd.Function):
     @staticmethod
     def forward(*args, **kwargs):
         if kwargs:
-            raise TypeError(
-                "LightningIndexer.forward does not accept keyword arguments."
-            )
+            raise TypeError("LightningIndexer.forward does not accept keyword arguments.")
         _, query, key, weights, config = args
         metadata = LightningIndexer.op_metadata(
             config.metadata_cache,
@@ -1143,9 +1098,7 @@ def npu_lightning_indexer(q_indexer, k_indexer, weights, config):
     )
 
 
-def _format_cmp_sparse_indices(
-    cmp_ratio: int, sparse_indices: torch.Tensor | None
-) -> torch.Tensor | None:
+def _format_cmp_sparse_indices(cmp_ratio: int, sparse_indices: torch.Tensor | None) -> torch.Tensor | None:
     if sparse_indices is None:
         return None
     if cmp_ratio != 4:
@@ -1159,18 +1112,12 @@ def _build_sparse_flash_mla_inputs(
     attention_masks = _require_attention_masks(inputs.attention_masks)
     if inputs.metadata_cache is None:
         raise RuntimeError("DeepSeek-V4 SMLA metadata cache is not bound.")
-    cmp_sparse_indices = _format_cmp_sparse_indices(
-        inputs.cmp_ratio, inputs.cmp_sparse_indices
-    )
-    cmp_sparse_indices = (
-        None if cmp_sparse_indices is None else cmp_sparse_indices.contiguous()
-    )
+    cmp_sparse_indices = _format_cmp_sparse_indices(inputs.cmp_ratio, inputs.cmp_sparse_indices)
+    cmp_sparse_indices = None if cmp_sparse_indices is None else cmp_sparse_indices.contiguous()
     return SparseFlashMLAForwardInputs(
         query=inputs.query.contiguous(),
         ori_kv=inputs.ori_kv.unsqueeze(2).contiguous(),
-        cmp_kv=None
-        if inputs.cmp_kv is None
-        else inputs.cmp_kv.unsqueeze(2).contiguous(),
+        cmp_kv=None if inputs.cmp_kv is None else inputs.cmp_kv.unsqueeze(2).contiguous(),
         cu_seq_lens_q=None,
         cu_seq_lens_ori_kv=None,
         cu_seq_lens_cmp_kv=None,
@@ -1274,11 +1221,7 @@ def _run_inner_attention_li_compute_smla(
     inputs: InnerAttentionSMLAForwardInputs,
 ):
     offset = 0 if inner_attn.use_smla else inputs.kv.size(1)
-    has_li = (
-        inner_attn.compress_ratio > 1
-        and hasattr(inner_attn, "li_compute")
-        and inputs.q_indexer is not None
-    )
+    has_li = inner_attn.compress_ratio > 1 and hasattr(inner_attn, "li_compute") and inputs.q_indexer is not None
     if not has_li:
         return None, None, None, 0
 
@@ -1342,7 +1285,7 @@ class NpuLiComputeSMLA(LiCompute):
             args,
             kwargs,
         )
-        metadata_cache = cast(SMLAMetadataCache, self._smla_metadata_cache)
+        metadata_cache = cast("SMLAMetadataCache", self._smla_metadata_cache)
         return sdpa_to_li_adapter_smla(
             self,
             LIAdapterSMLAInputs(
@@ -1374,7 +1317,7 @@ class NpuInnerAttentionSMLA(InnerAttention):
             args,
             kwargs,
         )
-        metadata_cache = cast(SMLAMetadataCache, self._smla_metadata_cache)
+        metadata_cache = cast("SMLAMetadataCache", self._smla_metadata_cache)
         return _run_inner_attention_smla(self, inputs, metadata_cache)
 
 
@@ -1396,9 +1339,8 @@ class NpuSparseAttention(SparseAttention):
         kv_compress: torch.Tensor | None = None,
         compress_topk_idxs: torch.Tensor | None = None,
     ):
-        if compress_topk_idxs is not None:
-            if compress_topk_idxs.dtype != torch.int32:
-                compress_topk_idxs = compress_topk_idxs.to(torch.int32)
+        if compress_topk_idxs is not None and compress_topk_idxs.dtype != torch.int32:
+            compress_topk_idxs = compress_topk_idxs.to(torch.int32)
 
         return npu_sparse_attn_shared_kv(
             query=query_states,
@@ -1453,9 +1395,7 @@ class NpuLiCompute(LiCompute):
 
         compress_topk_idxs = compress_topk_idxs.squeeze(2)
         index_score = index_score.squeeze(2)
-        compress_topk_idxs = _add_offset_to_valid_sparse_indices(
-            compress_topk_idxs, offset
-        )
+        compress_topk_idxs = _add_offset_to_valid_sparse_indices(compress_topk_idxs, offset)
 
         return compress_topk_idxs, index_score
 
@@ -1480,9 +1420,7 @@ class SparseLightningIndexerGradKLLossWrapper(torch.autograd.Function):
         layer_number=None,
         num_layers=0,
     ):
-        ctx.save_for_backward(
-            query, key, query_index, key_index, weights, sparse_indices
-        )
+        ctx.save_for_backward(query, key, query_index, key_index, weights, sparse_indices)
         ctx.scale_value = scale_value
         ctx.cmp_ratio = cmp_ratio
         ctx.layer_number = layer_number
@@ -1541,9 +1479,7 @@ class SparseLightningIndexerGradKLLossWrapper(torch.autograd.Function):
         loss = loss * token_scale * loss_scale
 
         if ctx.layer_number is not None:
-            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                loss[0], ctx.layer_number, ctx.num_layers
-            )
+            DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss[0], ctx.layer_number, ctx.num_layers)
         return (
             *_none_grads(2),
             d_query_index,
@@ -1673,16 +1609,12 @@ class NpuSMLAConverter(ModelCustomConverter):
 
         for name, module in list(model.named_modules()):
             if isinstance(module, SparseAttention):
-                _sas_op = build_op(
-                    "sparse_attn_sharedkv", ["sparse_attn_sharedkv/binding.cpp"]
-                )
+                _sas_op = build_op("sparse_attn_sharedkv", ["sparse_attn_sharedkv/binding.cpp"])
                 replace_module_with_name(model, name, NpuSparseAttention(module))
                 logger.info("[NpuSMLAConverter] [SparseAttention forward] Applied.")
 
             if isinstance(module, LiCompute):
-                _li_op = build_op(
-                    "lightning_indexer", ["lightning_indexer/binding.cpp"]
-                )
+                _li_op = build_op("lightning_indexer", ["lightning_indexer/binding.cpp"])
                 replace_module_with_name(model, name, NpuLiCompute(module))
                 logger.info("[NpuSMLAConverter] [LiCompute forward] Applied.")
 

@@ -50,8 +50,7 @@ class TestAllgatherSeq:
         gathered = _allgather_seq(x, mesh)
 
         assert gathered.requires_grad, (
-            "_allgather_seq must preserve requires_grad; "
-            "calling .wait() on AsyncCollectiveTensor would detach it"
+            "_allgather_seq must preserve requires_grad; calling .wait() on AsyncCollectiveTensor would detach it"
         )
 
     @staticmethod
@@ -63,9 +62,7 @@ class TestAllgatherSeq:
         gathered.sum().backward()
 
         assert x.grad is not None, "Gradient should flow back through _allgather_seq"
-        assert torch.allclose(
-            x.grad, torch.ones_like(x)
-        ), "grad of allgather+sum should be all-ones"
+        assert torch.allclose(x.grad, torch.ones_like(x)), "grad of allgather+sum should be all-ones"
 
     @staticmethod
     def test_returns_plain_tensor():
@@ -75,8 +72,7 @@ class TestAllgatherSeq:
         gathered = _allgather_seq(x, mesh)
 
         assert type(gathered) is torch.Tensor, (
-            "_allgather_seq must return a plain torch.Tensor, "
-            "not DTensor or AsyncCollectiveTensor"
+            "_allgather_seq must return a plain torch.Tensor, not DTensor or AsyncCollectiveTensor"
         )
         assert not isinstance(gathered, ft_c.AsyncCollectiveTensor)
 
@@ -141,9 +137,7 @@ class TestWindowExchange:
         ctx.forward_recvd = False
 
         grad_output = torch.randn(2, 32, 4)
-        grad_tensor, grad_window, grad_group = _WindowExchange.backward(
-            ctx, grad_output
-        )
+        grad_tensor, grad_window, grad_group = _WindowExchange.backward(ctx, grad_output)
 
         assert torch.allclose(grad_tensor, grad_output)
         assert grad_window is None
@@ -172,9 +166,7 @@ class TestDetectDSv4:
             config = DeepSeekV4Model.Config()
             attn = Attention.Config(layer_id=0, args=config).build()
 
-        assert (
-            _detect_dsv4(attn) is True
-        ), "DS V4 Attention must be detected: has compress_ratio + pre_attention"
+        assert _detect_dsv4(attn) is True, "DS V4 Attention must be detected: has compress_ratio + pre_attention"
         assert hasattr(attn, "compress_ratio")
         assert hasattr(attn, "pre_attention")
 
@@ -190,8 +182,7 @@ class TestDetectDSv4:
         mock = SimpleNamespace(pre_attention=MagicMock())
 
         assert _detect_dsv4(mock) is False, (
-            "Module with pre_attention but without compress_ratio "
-            "must not be detected (this is the V32 case)"
+            "Module with pre_attention but without compress_ratio must not be detected (this is the V32 case)"
         )
         assert hasattr(mock, "pre_attention")
         assert not hasattr(mock, "compress_ratio")
@@ -223,8 +214,7 @@ class TestDetectDSv4:
             attn = cfg.build()
 
         assert _detect_dsv4(attn) is False, (
-            "DS V3 Attention must not be detected: "
-            "lacks both compress_ratio and pre_attention"
+            "DS V3 Attention must not be detected: lacks both compress_ratio and pre_attention"
         )
         assert not hasattr(attn, "compress_ratio")
         assert not hasattr(attn, "pre_attention")

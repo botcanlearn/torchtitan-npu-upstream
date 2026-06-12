@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is copied from torchtitan,
 # https://github.com/pytorch/torchtitan/blob/v0.2.2/scripts/download_hf_assets.py
@@ -63,9 +62,7 @@ def download_hf_assets(
 
     # Extract model name from repo_id (part after "/")
     if "/" not in repo_id:
-        raise ValueError(
-            f"Invalid repo_id format: '{repo_id}'. Expected format: 'organization/model-name'"
-        )
+        raise ValueError(f"Invalid repo_id format: '{repo_id}'. Expected format: 'organization/model-name'")
     model_name = repo_id.split("/")[-1].strip()
     model_dir = os.path.join(local_dir, model_name)
 
@@ -120,9 +117,8 @@ def download_hf_assets(
                 if basename == pattern_lower:
                     return True
                 # Do wildcard match if wildcards are in pattern
-                if "*" in pattern_lower or "?" in pattern_lower:
-                    if fnmatch(basename, pattern_lower):
-                        return True
+                if ("*" in pattern_lower or "?" in pattern_lower) and fnmatch(basename, pattern_lower):
+                    return True
             return False
 
         try:
@@ -131,9 +127,7 @@ def download_hf_assets(
             available_files = list_repo_files(repo_id=repo_id, token=hf_token)
 
             # Filter for requested asset files
-            files_found = [
-                f for f in available_files if should_download(total_patterns, f)
-            ]
+            files_found = [f for f in available_files if should_download(total_patterns, f)]
 
             # Check each asset type individually to see if files were not found
             for asset_type in asset_types:
@@ -146,9 +140,7 @@ def download_hf_assets(
                             break
 
                     if not matches_found:
-                        print(
-                            f"Warning: No matching files found for asset_type '{asset_type}' in {repo_id}"
-                        )
+                        print(f"Warning: No matching files found for asset_type '{asset_type}' in {repo_id}")
 
             if not files_found:
                 print(f"Warning: No matching files found in {repo_id}")
@@ -157,9 +149,7 @@ def download_hf_assets(
 
         except HTTPError as e:
             if e.response and e.response.status_code == 401:
-                print(
-                    "You need to pass a valid `--hf_token=...` to download private checkpoints."
-                )
+                print("You need to pass a valid `--hf_token=...` to download private checkpoints.")
             raise e
 
     print(f"Found {len(files_found)} files:")
@@ -195,9 +185,7 @@ def download_hf_assets(
                     raise e
 
     if downloaded_files:
-        print(
-            f"\nSuccessfully downloaded {len(downloaded_files)} files to: {model_dir}"
-        )
+        print(f"\nSuccessfully downloaded {len(downloaded_files)} files to: {model_dir}")
     if missed_files:
         print(f"Warning: Some files could not be downloaded: \n{missed_files}")
 
@@ -242,15 +230,11 @@ if __name__ == "__main__":
         help="Additional file patterns to search for and download from the HuggingFace Hub repository",
     )
 
-    parser.add_argument(
-        "--all", action="store_true", default=False, help="Download all files in repo"
-    )
+    parser.add_argument("--all", action="store_true", default=False, help="Download all files in repo")
 
     args = parser.parse_args()
     if not args.all and not args.assets and not args.additional_patterns:
-        parser.error(
-            "At least one of --all, --assets or --additional_patterns must be specified."
-        )
+        parser.error("At least one of --all, --assets or --additional_patterns must be specified.")
 
     download_hf_assets(
         args.repo_id,

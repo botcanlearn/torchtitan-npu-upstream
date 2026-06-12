@@ -6,7 +6,6 @@
 
 import torch
 
-
 PADDED_PATCH_COORDINATE = -1
 
 
@@ -89,7 +88,7 @@ def build_encoder_full_mask(
         raise ValueError("valid_tokens must have shape (batch, seq_len)")
 
     valid_tokens = valid_tokens.to(dtype=torch.bool)
-    batch, seq_len = valid_tokens.shape
+    _batch, seq_len = valid_tokens.shape
     mask = valid_tokens[:, :, None] & valid_tokens[:, None, :]
 
     if not allow_padding_self_attention:

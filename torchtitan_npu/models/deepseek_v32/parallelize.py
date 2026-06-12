@@ -20,18 +20,18 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
-    parallelize_module,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
+    parallelize_module,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
+    TORCH_DTYPE_MAP,
     ActivationCheckpointConfig,
     CompileConfig,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
@@ -41,7 +41,7 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     TensorParallel,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
+from torchtitan.distributed.tensor_parallel import NoParallel, maybe_enable_async_tp
 from torchtitan.models.common import moe as moe_module
 from torchtitan.models.llama3.parallelize import apply_replicate
 from torchtitan.models.llama4.parallelize import apply_fsdp
@@ -87,9 +87,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
         self.bwd_allreduce_inputs = bwd_allreduce_inputs
 
         if self.prepare_module_input.input_layouts is not None:
-            assert len(self.bwd_allreduce_inputs) == len(
-                self.prepare_module_input.input_layouts
-            ), (
+            assert len(self.bwd_allreduce_inputs) == len(self.prepare_module_input.input_layouts), (
                 f"bwd_allreduce_inputs must have the same length as input_layouts! "
                 f"Got {len(self.bwd_allreduce_inputs)} vs {len(self.prepare_module_input.input_layouts)}"
             )
@@ -102,9 +100,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
             module: The module to register hooks on
             inputs: Tuple of input tensors to the module
         """
-        for _, (inp, needs_allreduce) in enumerate(
-            zip(inputs, self.bwd_allreduce_inputs, strict=True)
-        ):
+        for _, (inp, needs_allreduce) in enumerate(zip(inputs, self.bwd_allreduce_inputs, strict=True)):
             if not needs_allreduce:
                 continue
 
@@ -115,9 +111,7 @@ class PrepareModuleInputOutputWithBwdAllReduce(PrepareModuleInputOutput):
                 # Ensure gradient is contiguous for efficient communication
                 if not grad.is_contiguous():
                     grad = grad.contiguous()
-                torch.distributed.all_reduce(
-                    grad, op=torch.distributed.ReduceOp.SUM, group=self.group
-                )
+                torch.distributed.all_reduce(grad, op=torch.distributed.ReduceOp.SUM, group=self.group)
                 return grad
 
             inp.register_hook(_allreduce_grad_hook)
@@ -146,16 +140,14 @@ def parallelize_deepseekv32(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    assert (
-        parallel_dims.fsdp_enabled
-    ), "Mixed precision training for deepseek_v32 is only supported when fsdp is enabled. "
+    assert parallel_dims.fsdp_enabled, (
+        "Mixed precision training for deepseek_v32 is only supported when fsdp is enabled. "
+    )
 
     assert not (
         has_npu_converter(model_converters.converters, "npu_gmm")
@@ -180,9 +172,7 @@ def parallelize_deepseekv32(
         # passes only ``model_converters``); derive the float8 recipe from
         # the converter container, mirroring upstream parallelize_deepseekv3.
         float8_cfg = find_float8_linear_config(model_converters.converters)
-        float8_recipe_name = (
-            getattr(float8_cfg, "recipe_name", None) if float8_cfg is not None else None
-        )
+        float8_recipe_name = getattr(float8_cfg, "recipe_name", None) if float8_cfg is not None else None
         float8_is_rowwise = float8_recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
@@ -190,9 +180,7 @@ def parallelize_deepseekv32(
 
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
         if enable_float8_tensorwise_tp:
-            raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for deepseekv3"
-            )
+            raise NotImplementedError("Currently, float8 tensorwise TP is not tested for deepseekv3")
 
         tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
@@ -253,9 +241,7 @@ def parallelize_deepseekv32(
             use_deepep=use_deepep,
         )
 
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
+    model_compile_enabled = compile_config.enable and "model" in compile_config.components
 
     if ac_config.mode != "none":
         apply_ac(
@@ -271,17 +257,11 @@ def parallelize_deepseekv32(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        dp_mesh_names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
+        dp_mesh_names = ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
-        )
+        edp_mesh_names = ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
         edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
@@ -337,7 +317,7 @@ def apply_non_moe_tp(
     enable_mla_absorb = getattr(
         model.config.layers[0].attention,  # pyrefly: ignore [missing-attribute]
         "enable_mla_absorb",
-        True,  # pyrefly: ignore [missing-attribute]
+        True,
     )
     enable_activation_checkpoint = ac_config.mode in [
         "full",
@@ -449,9 +429,7 @@ def apply_non_moe_tp(
             # NOTE: here we patch the indexer_loss computation with npu fusion kernel module
             #       then we set the specific parallelize_plan for this module to ensure the correctness of loss
             # pyrefly: ignore [missing-attribute]
-            transformer_block.attention.inner_attention.compute_dsa_indexer_loss = (
-                SparseLightningIndexerKLLoss()
-            )
+            transformer_block.attention.inner_attention.compute_dsa_indexer_loss = SparseLightningIndexerKLLoss()
 
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -473,18 +451,10 @@ def apply_non_moe_tp(
             "attention.pre_attention.kv_norm": NoParallel(),
             # the indxer module params are not parallelized
             "attention.pre_attention.indexer": indexer_plan,
-            "attention.pre_attention.indexer.wq_b": NoParallel(
-                local_output_grad_placements=(Replicate(),)
-            ),
-            "attention.pre_attention.indexer.wk": NoParallel(
-                local_output_grad_placements=(Replicate(),)
-            ),
-            "attention.pre_attention.indexer.k_norm": NoParallel(
-                local_output_grad_placements=(Replicate(),)
-            ),
-            "attention.pre_attention.indexer.weights_proj": NoParallel(
-                local_output_grad_placements=(Replicate(),)
-            ),
+            "attention.pre_attention.indexer.wq_b": NoParallel(local_output_grad_placements=(Replicate(),)),
+            "attention.pre_attention.indexer.wk": NoParallel(local_output_grad_placements=(Replicate(),)),
+            "attention.pre_attention.indexer.k_norm": NoParallel(local_output_grad_placements=(Replicate(),)),
+            "attention.pre_attention.indexer.weights_proj": NoParallel(local_output_grad_placements=(Replicate(),)),
             "attention.inner_attention": attention_kernel_plan,
             "attention.inner_attention.compute_dsa_indexer_loss": indexer_loss_plan,
             "attention.post_attention.wo": rowwise_parallel(output_layouts=Shard(1)),
@@ -495,18 +465,14 @@ def apply_non_moe_tp(
         if transformer_block.attention.pre_attention.q_lora_rank == 0:
             layer_plan.update(
                 {
-                    "attention.wq": colwise_parallel(
-                        use_local_output=False
-                    ),  # This is only used when q_lora_rank==0
+                    "attention.wq": colwise_parallel(use_local_output=False),  # This is only used when q_lora_rank==0
                 }
             )
         else:
             layer_plan.update(
                 {
                     "attention.pre_attention.wq_a": NoParallel(),
-                    "attention.pre_attention.wq_b": colwise_parallel(
-                        use_local_output=False
-                    ),
+                    "attention.pre_attention.wq_b": colwise_parallel(use_local_output=False),
                     "attention.pre_attention.q_norm": NoParallel(),
                 }
             )
@@ -517,11 +483,7 @@ def apply_non_moe_tp(
             # Use AwaitRowwiseParallel when activation checkpoint is enabled to handle
             # async redistribution. The custom implementation ensures wait_tensor() is called
             # on _local_tensor to prevent memory leaks caused by incomplete async operations.
-            safe_rowwise_parallel = (
-                await_rowwise_parallel
-                if enable_activation_checkpoint
-                else rowwise_parallel
-            )
+            safe_rowwise_parallel = await_rowwise_parallel if enable_activation_checkpoint else rowwise_parallel
             layer_plan.update(
                 {
                     "feed_forward": prepare_module_input(
@@ -551,10 +513,7 @@ def apply_non_moe_tp(
             parallelize_plan=layer_plan,
         )
 
-    logger.info(
-        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
-        "Tensor Parallelism to the model"
-    )
+    logger.info(f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}Tensor Parallelism to the model")
 
 
 def apply_moe_ep_tp(
@@ -565,9 +524,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     use_deepep: bool = False,
 ):
-    assert (
-        tp_mesh is not None or ep_mesh is not None
-    ), f"""
+    assert tp_mesh is not None or ep_mesh is not None, f"""
         At least one of Tensor Parallel mesh (tp_mesh) or Expert Parallel mesh (ep_mesh) must be provided.
         Current status: tp_mesh={tp_mesh}, ep_mesh={ep_mesh}
         """
@@ -588,9 +545,7 @@ def apply_moe_ep_tp(
                     output_layouts=(Shard(1),),
                     desired_output_layouts=(Shard(1),),
                 ),
-                "moe.router.gate": SequenceParallel(
-                    sequence_dim=0, use_local_output=True
-                ),
+                "moe.router.gate": SequenceParallel(sequence_dim=0, use_local_output=True),
             }
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
@@ -604,9 +559,7 @@ def apply_moe_ep_tp(
                             desired_input_layouts=(Replicate(),),
                         ),
                         "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Shard(0)
-                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(output_layouts=Shard(0)),
                         "moe.shared_experts.w3": ColwiseParallel(),
                     }
                 )
@@ -693,9 +646,7 @@ def apply_distributed_indexer_loss_tracking(parallel_dims: ParallelDims):
         logger.info(f"indexer loss: {loss.item()}")
 
     # Apply the monkey patch
-    DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics = (
-        distributed_track_dsa_indexer_metrics
-    )
+    DSAIndexerLossLoggingHelper.track_dsa_indexer_metrics = distributed_track_dsa_indexer_metrics
 
 
 def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
@@ -733,9 +684,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                     setattr(
                         moe,
                         attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
+                        torch.compile(submod, backend=compile_config.backend, fullgraph=True),
                     )
             elif isinstance(submod, Attention):
                 attention = submod
@@ -745,9 +694,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                     setattr(
                         attention,
                         attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
+                        torch.compile(submod, backend=compile_config.backend, fullgraph=True),
                     )
             elif isinstance(submod, NPURMSNorm):
                 continue
@@ -755,9 +702,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                 setattr(
                     block,
                     attr_name,
-                    torch.compile(
-                        submod, backend=compile_config.backend, fullgraph=True
-                    ),
+                    torch.compile(submod, backend=compile_config.backend, fullgraph=True),
                 )
 
         # pyrefly: ignore [missing-attribute]

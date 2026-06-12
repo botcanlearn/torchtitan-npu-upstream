@@ -7,9 +7,7 @@ import logging
 
 import torch
 import torch.nn as nn
-
 import torch_npu
-
 from torchtitan.protocols.module import Module
 
 from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingHelper
@@ -17,7 +15,6 @@ from torchtitan_npu.models.common.dsa_indexer_loss import DSAIndexerLossLoggingH
 from ..convert_utils import replace_methods
 from ..model_custom_interface import ModelCustomConfig, ModelCustomConverter
 from ..registry import register_model_converter
-
 
 logger = logging.getLogger(__name__)
 
@@ -183,9 +180,7 @@ class LILossTrain(torch.autograd.Function):
             d_key_index = d_key_index * grad_output[0]
             d_weights = d_weights * grad_output[0]
         bsz, sq = query.shape[0], query.shape[1]
-        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-            loss[0] / (bsz * sq), ctx.layer_number, ctx.num_layers
-        )
+        DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss[0] / (bsz * sq), ctx.layer_number, ctx.num_layers)
         backward_grads = (
             None,
             None,
@@ -214,9 +209,7 @@ def dsa_forward(
     Forward pass of the dsa module.
     """
     if k.shape[1] != 1 or v.shape[1] != 1:
-        raise NotImplementedError(
-            "Only support num_head_kv == 1 in dsa forward under absorb mode."
-        )
+        raise NotImplementedError("Only support num_head_kv == 1 in dsa forward under absorb mode.")
 
     # Fuse LILossTrain includes LIG
     # NOTE: set return_value=False to avoid torch.compile / DTensor meta path failure
@@ -239,12 +232,8 @@ def dsa_forward(
     v = v.transpose(1, 2)
 
     # Split q_nope / q_pe
-    q_nope, q_pe = torch.split(
-        q, [self.config.kv_lora_rank, self.config.qk_rope_head_dim], dim=-1
-    )
-    k_nope, k_pe = torch.split(
-        k, [self.config.kv_lora_rank, self.config.qk_rope_head_dim], dim=-1
-    )
+    q_nope, q_pe = torch.split(q, [self.config.kv_lora_rank, self.config.qk_rope_head_dim], dim=-1)
+    k_nope, k_pe = torch.split(k, [self.config.kv_lora_rank, self.config.qk_rope_head_dim], dim=-1)
 
     output, softmax_max, softmax_sum, *_ = torch_npu.npu_sparse_flash_attention(
         q_nope,
@@ -294,19 +283,12 @@ _DSV32_MODEL_PACKAGE = "torchtitan_npu.models.deepseek_v32"
 class NpuDSAConverter(ModelCustomConverter):
     def convert(self, model: nn.Module) -> None:
         if self.model_name != "deepseek_v32":
-            logger.info(
-                f"NpuDSAConverter: skipped for model {self.model_name!r} "
-                f"(only deepseek_v32 is supported)"
-            )
+            logger.info(f"NpuDSAConverter: skipped for model {self.model_name!r} (only deepseek_v32 is supported)")
             return
 
-        count = replace_methods(
-            "DSV32_SDPA", "forward", dsa_forward, package=_DSV32_MODEL_PACKAGE
-        )
+        count = replace_methods("DSV32_SDPA", "forward", dsa_forward, package=_DSV32_MODEL_PACKAGE)
         logger.info(f"  [DSV32_SDPA forward] Applied {count} replacement(s)")
-        logger.info(
-            "  Only matrix absorb mode is supported, and LI Loss is enabled by default."
-        )
+        logger.info("  Only matrix absorb mode is supported, and LI Loss is enabled by default.")
 
         # When TP is disabled the indexer_loss patch in deepseek_v32_parallelize.py
         # is never applied; install ``SparseLightningIndexerKLLoss`` here as a
@@ -316,12 +298,8 @@ class NpuDSAConverter(ModelCustomConverter):
         # pyrefly: ignore [missing-attribute]
         for layer_id, transformer_block in model.layers.named_children():
             inner_attention = transformer_block.attention.inner_attention
-            if not isinstance(
-                inner_attention.compute_dsa_indexer_loss, SparseLightningIndexerKLLoss
-            ):
-                inner_attention.compute_dsa_indexer_loss = (
-                    SparseLightningIndexerKLLoss()
-                )
+            if not isinstance(inner_attention.compute_dsa_indexer_loss, SparseLightningIndexerKLLoss):
+                inner_attention.compute_dsa_indexer_loss = SparseLightningIndexerKLLoss()
             inner_attention.layer_number = int(layer_id)
             inner_attention.num_layers = num_layers
 

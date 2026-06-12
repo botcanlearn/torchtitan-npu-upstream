@@ -27,9 +27,7 @@ class NpuOptimizerDispatcher:
         is_swap = getattr(self, "swap_optimizer", False)
 
         if is_virtual and is_swap:
-            raise ValueError(
-                "Cannot enable both virtual_optimizer and swap_optimizer at the same time."
-            )
+            raise ValueError("Cannot enable both virtual_optimizer and swap_optimizer at the same time.")
 
         if is_virtual:
             logger.info("[OptimizerDispatcher] Using VirtualOptimizer")

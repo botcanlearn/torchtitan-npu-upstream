@@ -15,6 +15,7 @@ this version drives everything from ``Attention.Config`` (built via
 ``_make_dsv32_attn_config``) and a stand-alone ``RoPE`` instance for the
 freqs_cis cache.
 """
+
 from dataclasses import dataclass
 
 import torch
@@ -22,7 +23,7 @@ import torch_npu
 from torchtitan.models.common.rope import RoPE
 
 from torchtitan_npu.models.deepseek_v32 import _make_dsv32_attn_config
-from torchtitan_npu.models.deepseek_v32.model import apply_rotary_emb, Attention
+from torchtitan_npu.models.deepseek_v32.model import Attention, apply_rotary_emb
 
 
 @dataclass
@@ -116,9 +117,7 @@ def _build_query_key_tensors(attention, attention_state):
     key = attention_state.kv.unsqueeze(2)
     value = attention_state.kv.unsqueeze(2)
     if query.shape[2] not in (64, 128):
-        raise AssertionError(
-            f"DSA helper produced invalid query head count: {query.shape}"
-        )
+        raise AssertionError(f"DSA helper produced invalid query head count: {query.shape}")
     return query, key, value
 
 
@@ -185,15 +184,9 @@ def _build_softmax_stats(attention, kernel_inputs, batch_size, seq_len):
 
 
 def run_lightning_indexer_smoke(npu_device, *, batch_size=1, seq_len=128):
-    q_indexer = torch.randn(
-        batch_size, seq_len, 64, 128, dtype=torch.bfloat16, device=npu_device
-    )
-    k_indexer = torch.randn(
-        batch_size, seq_len, 1, 128, dtype=torch.bfloat16, device=npu_device
-    )
-    weights = torch.randn(
-        batch_size, seq_len, 64, dtype=torch.bfloat16, device=npu_device
-    )
+    q_indexer = torch.randn(batch_size, seq_len, 64, 128, dtype=torch.bfloat16, device=npu_device)
+    k_indexer = torch.randn(batch_size, seq_len, 1, 128, dtype=torch.bfloat16, device=npu_device)
+    weights = torch.randn(batch_size, seq_len, 64, dtype=torch.bfloat16, device=npu_device)
     return torch_npu.npu_lightning_indexer(
         q_indexer,
         k_indexer,
@@ -208,19 +201,13 @@ def run_lightning_indexer_smoke(npu_device, *, batch_size=1, seq_len=128):
     )
 
 
-def build_model_backed_dsa_inputs(
-    device, *, batch_size=1, seq_len=2048, requires_grad=False
-):
+def build_model_backed_dsa_inputs(device, *, batch_size=1, seq_len=2048, requires_grad=False):
     cfg = _build_attn_config(seq_len)
     # ``num_total_layers=1`` keeps PostAttention's loss tracker sized for a
     # single layer (the helper exercises one Attention in isolation).
-    attention = Attention(cfg, num_total_layers=1).to(
-        device=device, dtype=torch.bfloat16
-    )
+    attention = Attention(cfg, num_total_layers=1).to(device=device, dtype=torch.bfloat16)
     attention.eval()
-    attention_state = _build_attention_tensors(
-        attention, cfg, batch_size, seq_len, device
-    )
+    attention_state = _build_attention_tensors(attention, cfg, batch_size, seq_len, device)
     query, key, value = _build_query_key_tensors(attention, attention_state)
     kernel_inputs = _build_indexer_outputs(attention, attention_state)
     kernel_inputs.query = query
@@ -228,9 +215,7 @@ def build_model_backed_dsa_inputs(
     kernel_inputs.value = value
     kernel_inputs.query_rope = attention_state.q_pe
     kernel_inputs.key_rope = attention_state.k_pe
-    softmax_max, softmax_sum = _build_softmax_stats(
-        attention, kernel_inputs, batch_size, seq_len
-    )
+    softmax_max, softmax_sum = _build_softmax_stats(attention, kernel_inputs, batch_size, seq_len)
 
     query_indexer = kernel_inputs.query_indexer.detach()
     key_indexer = kernel_inputs.key_indexer.detach()

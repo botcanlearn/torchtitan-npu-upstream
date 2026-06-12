@@ -7,7 +7,6 @@ import logging
 from dataclasses import dataclass
 
 import torch.nn as nn
-
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConverter
@@ -24,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 class ModelCustomConfigConverter(Configurable, ModelConverter):
-
     _model_config: ModelCustomConfig
 
     @dataclass(kw_only=True, slots=True)
@@ -45,9 +43,7 @@ class ModelCustomConfigConverter(Configurable, ModelConverter):
 
     def convert(self, model: nn.Module):
         try:
-            logger.info(
-                f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} start ..."
-            )
+            logger.info(f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} start ...")
 
             model_converter = self._model_config.model_converter
             if model_converter is not None:
@@ -57,21 +53,13 @@ class ModelCustomConfigConverter(Configurable, ModelConverter):
             parallelize_plan_updater = self._model_config.parallelize_plan_updater
             if parallelize_plan_updater is not None:
                 apply_parallelize_plan_update(parallelize_plan_updater)
-                logger.info(
-                    f"[ModelCustomConfigConverter] Applied {parallelize_plan_updater}."
-                )
+                logger.info(f"[ModelCustomConfigConverter] Applied {parallelize_plan_updater}.")
 
             state_dict_updater = self._model_config.state_dict_updater
             if state_dict_updater is not None:
                 apply_state_dict_update(state_dict_updater, self.model_spec)
-                logger.info(
-                    f"[ModelCustomConfigConverter] Applied {state_dict_updater}."
-                )
+                logger.info(f"[ModelCustomConfigConverter] Applied {state_dict_updater}.")
 
-            logger.info(
-                f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} end."
-            )
+            logger.info(f"[ModelCustomConfigConverter] Applied {self._model_config.name!r} end.")
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to apply custom model config {self._model_config.name!r} : {e}"
-            ) from e
+            raise RuntimeError(f"Failed to apply custom model config {self._model_config.name!r} : {e}") from e

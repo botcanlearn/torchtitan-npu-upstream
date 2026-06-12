@@ -25,9 +25,7 @@ def scatter_visual_embeddings(
       - ``visual_token_mask``: ``(num_images, image_seq_len)`` with dtype ``torch.bool``
     """
     if hidden_states.ndim != 3:
-        raise ValueError(
-            f"hidden_states must have shape (batch, seq_len, dim), got {tuple(hidden_states.shape)}"
-        )
+        raise ValueError(f"hidden_states must have shape (batch, seq_len, dim), got {tuple(hidden_states.shape)}")
     if tokens.shape != hidden_states.shape[:2]:
         raise ValueError(
             "tokens must have shape matching hidden_states leading dims "
@@ -35,8 +33,7 @@ def scatter_visual_embeddings(
         )
     if visual_embeddings.ndim != 3:
         raise ValueError(
-            "visual_embeddings must have shape (num_images, image_seq_len, dim), "
-            f"got {tuple(visual_embeddings.shape)}"
+            f"visual_embeddings must have shape (num_images, image_seq_len, dim), got {tuple(visual_embeddings.shape)}"
         )
     if visual_token_mask.shape != visual_embeddings.shape[:2]:
         raise ValueError(
@@ -44,9 +41,7 @@ def scatter_visual_embeddings(
             f"{tuple(visual_embeddings.shape[:2])}, got {tuple(visual_token_mask.shape)}"
         )
     if visual_token_mask.dtype is not torch.bool:
-        raise ValueError(
-            f"visual_token_mask must have dtype torch.bool, got {visual_token_mask.dtype}"
-        )
+        raise ValueError(f"visual_token_mask must have dtype torch.bool, got {visual_token_mask.dtype}")
     if visual_embeddings.shape[-1] != hidden_states.shape[-1]:
         raise ValueError(
             "visual_embeddings hidden dim must match hidden_states hidden dim, "

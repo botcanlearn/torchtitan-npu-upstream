@@ -47,26 +47,20 @@ def _clip_grad_norm_with_ep(
         else:
             non_ep_params.append(p)
             non_ep_grads.append(p.grad)
-    ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        ep_grads, norm_type, error_if_nonfinite, foreach
-    )
+    ep_grads_total_norm = torch.nn.utils.get_total_norm(ep_grads, norm_type, error_if_nonfinite, foreach)
     # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
     # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        non_ep_grads, norm_type, error_if_nonfinite, foreach
-    )
+    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(non_ep_grads, norm_type, error_if_nonfinite, foreach)
     if isinstance(non_ep_grads_total_norm, DTensor):
         non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

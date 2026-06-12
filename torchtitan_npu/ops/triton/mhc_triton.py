@@ -33,13 +33,8 @@ class MHCPreTriton(torch.autograd.Function):
 
         # Step 1: RMSNorm
         x_flat = x.reshape(-1, nD)  # [B*S, nD]
-        if not mhc_use_gamma:
-            norm_gamma = torch.ones(nD, device=x.device, dtype=torch.float32)
-        else:
-            norm_gamma = norm_gamma.float()
-        x_norm_flat, rstd = torch_npu.npu_rms_norm(
-            x_flat, gamma=norm_gamma, epsilon=eps
-        )
+        norm_gamma = torch.ones(nD, device=x.device, dtype=torch.float32) if not mhc_use_gamma else norm_gamma.float()
+        x_norm_flat, rstd = torch_npu.npu_rms_norm(x_flat, gamma=norm_gamma, epsilon=eps)
         # Step 2: Linear projection
         x_norm_mat = x_norm_flat.reshape(B, S, nD)
         x_proj = torch.matmul(x_norm_mat, weight)
@@ -114,9 +109,7 @@ class MHCPreTriton(torch.autograd.Function):
 
         grad_weight = None
         if ctx.needs_input_grad[1]:
-            grad_weight = torch.matmul(
-                x_norm_flat.t(), grad_x_proj.reshape(-1, branch_beta.shape[-1])
-            )
+            grad_weight = torch.matmul(x_norm_flat.t(), grad_x_proj.reshape(-1, branch_beta.shape[-1]))
 
         grad_x_norm_mat = torch.matmul(grad_x_proj, weight.t())
 
@@ -185,7 +178,7 @@ class MHCPostTriton(torch.autograd.Function):
     def backward(ctx, grad_output):
         D = ctx.D
         N = ctx.N
-        x, residual, h_post, h_res, residual_unflat = ctx.saved_tensors
+        x, _residual, h_post, h_res, residual_unflat = ctx.saved_tensors
         B, S = x.shape[:2]
 
         # Reshape upstream gradient to 4D
@@ -196,9 +189,7 @@ class MHCPostTriton(torch.autograd.Function):
 
         grad_x, grad_h_post = hc_post_bmm1_backward(x, h_post, grad_bmm1)
 
-        grad_h_res, grad_residual = hc_post_bmm2_backward(
-            h_res, residual_unflat, grad_bmm2
-        )
+        grad_h_res, grad_residual = hc_post_bmm2_backward(h_res, residual_unflat, grad_bmm2)
         grad_residual = grad_residual.flatten(-2)
 
         grads = [grad_x, grad_residual, grad_h_post, grad_h_res.permute(0, 1, 3, 2)]
@@ -227,13 +218,8 @@ class MHCPreOnlyTriton(torch.autograd.Function):
         branch_beta = branch_beta.float()
 
         x_flat = x.reshape(-1, nD)
-        if not mhc_use_gamma:
-            norm_gamma = torch.ones(nD, device=x.device, dtype=torch.float32)
-        else:
-            norm_gamma = norm_gamma.float()
-        x_norm_flat, rstd = torch_npu.npu_rms_norm(
-            x_flat, gamma=norm_gamma, epsilon=eps
-        )
+        norm_gamma = torch.ones(nD, device=x.device, dtype=torch.float32) if not mhc_use_gamma else norm_gamma.float()
+        x_norm_flat, rstd = torch_npu.npu_rms_norm(x_flat, gamma=norm_gamma, epsilon=eps)
         x_norm_mat = x_norm_flat.reshape(B, S, nD)
         x_proj = torch.matmul(x_norm_mat, weight)
         h_pre = hc_pre_only_fwd(
@@ -297,9 +283,7 @@ class MHCPreOnlyTriton(torch.autograd.Function):
 
         grad_weight = None
         if ctx.needs_input_grad[1]:
-            grad_weight = torch.matmul(
-                x_norm_flat.t(), grad_x_proj.reshape(-1, branch_beta.shape[-1])
-            )
+            grad_weight = torch.matmul(x_norm_flat.t(), grad_x_proj.reshape(-1, branch_beta.shape[-1]))
 
         grad_x_norm_mat = torch.matmul(grad_x_proj, weight.t())
 

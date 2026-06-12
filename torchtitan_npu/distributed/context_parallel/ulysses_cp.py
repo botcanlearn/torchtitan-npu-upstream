@@ -18,8 +18,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.parallel import parallelize_module, ParallelStyle
-
+from torch.distributed.tensor.parallel import ParallelStyle, parallelize_module
 from torchtitan.models.common.attention import ScaledDotProductAttention
 
 from .registry import register_cp_strategy
@@ -41,10 +40,7 @@ class AllToAll(torch.autograd.Function):
         ctx.gather_dim = gather_dim
 
         world_size = mesh.size()
-        input_list = [
-            t.contiguous()
-            for t in list(input_tensor.chunk(world_size, dim=scatter_dim))
-        ]
+        input_list = [t.contiguous() for t in list(input_tensor.chunk(world_size, dim=scatter_dim))]
         output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
         dist.all_to_all(output_list, input_list, group=mesh.get_group())
         output = torch.cat(output_list, dim=gather_dim)
@@ -55,10 +51,7 @@ class AllToAll(torch.autograd.Function):
     def backward(ctx, grad_output):
         world_size = ctx.mesh.size()
 
-        grad_list = [
-            t.contiguous()
-            for t in list(grad_output.chunk(world_size, dim=ctx.gather_dim))
-        ]
+        grad_list = [t.contiguous() for t in list(grad_output.chunk(world_size, dim=ctx.gather_dim))]
         grad_output_list = [torch.empty_like(grad_list[0]) for _ in range(world_size)]
         dist.all_to_all(grad_output_list, grad_list, group=ctx.mesh.get_group())
         grad_input = torch.cat(grad_output_list, dim=ctx.scatter_dim)
@@ -87,7 +80,7 @@ class UlyssesCP(ParallelStyle):
         q = all_to_all(args[0], mesh, scatter_dim=2, gather_dim=1)
         k = all_to_all(args[1], mesh, scatter_dim=2, gather_dim=1)
         v = all_to_all(args[2], mesh, scatter_dim=2, gather_dim=1)
-        return (q, k, v) + args[3:], kwargs
+        return (q, k, v, *args[3:]), kwargs
 
     @staticmethod
     def _post_hook(
@@ -98,16 +91,10 @@ class UlyssesCP(ParallelStyle):
     ) -> Any:
         return all_to_all(output, mesh, scatter_dim=1, gather_dim=2)
 
-    def _apply(
-        self, module: torch.nn.Module, device_mesh: DeviceMesh
-    ) -> torch.nn.Module:
+    def _apply(self, module: torch.nn.Module, device_mesh: DeviceMesh) -> torch.nn.Module:
         if not isinstance(module, ScaledDotProductAttention):
-            raise TypeError(
-                f"UlyssesCP expects ScaledDotProductAttention, got {type(module).__name__}"
-            )
-        module.register_forward_pre_hook(
-            partial(self._pre_hook, mesh=device_mesh), with_kwargs=True
-        )
+            raise TypeError(f"UlyssesCP expects ScaledDotProductAttention, got {type(module).__name__}")
+        module.register_forward_pre_hook(partial(self._pre_hook, mesh=device_mesh), with_kwargs=True)
         module.register_forward_hook(partial(self._post_hook, mesh=device_mesh))
         return module
 

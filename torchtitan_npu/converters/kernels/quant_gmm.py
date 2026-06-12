@@ -4,7 +4,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-
 import torch_npu
 from einops import rearrange
 
@@ -17,9 +16,7 @@ class GMMFunctionMxfp8(torch.autograd.Function):
     def forward(ctx, x, weight, group_list):
         ctx.save_for_backward(x, weight)
         ctx.group_list = group_list
-        x_mxfp8, x_scale = torch_npu.npu_dynamic_mx_quant(
-            x, axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1
-        )
+        x_mxfp8, x_scale = torch_npu.npu_dynamic_mx_quant(x, axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1)
         weight_mxfp8, weight_scale = torch_npu.npu_dynamic_mx_quant(
             weight, axis=-2, dst_type=torch.float8_e4m3fn, scale_alg=1
         )
@@ -103,9 +100,7 @@ class GMMFunctionHif8(torch.autograd.Function):
     def forward(ctx, x, weight, group_list):
         ctx.save_for_backward(x, weight)
         ctx.group_list = group_list
-        x_quant, x_scale, w_quant, w_scale = GMMFunctionHif8.quantize(
-            x, weight, torch_npu.hifloat8, torch_npu.hifloat8
-        )
+        x_quant, x_scale, w_quant, w_scale = GMMFunctionHif8.quantize(x, weight, torch_npu.hifloat8, torch_npu.hifloat8)
         gmm_kwargs = {"x_dtype": torch_npu.hifloat8, "weight_dtype": torch_npu.hifloat8}
         return torch_npu.npu_grouped_matmul(
             [x_quant],
@@ -118,7 +113,7 @@ class GMMFunctionHif8(torch.autograd.Function):
             split_item=3,
             output_dtype=x.dtype,
             group_list_type=0,
-            **gmm_kwargs
+            **gmm_kwargs,
         )[0]
 
     @staticmethod
@@ -142,7 +137,7 @@ class GMMFunctionHif8(torch.autograd.Function):
             split_item=3,
             output_dtype=grad.dtype,
             group_list_type=0,
-            **gmm_kwargs
+            **gmm_kwargs,
         )[0]
 
         x_quant, x_scale, grad_quant, grad_scale = GMMFunctionHif8.quantize(
@@ -159,7 +154,7 @@ class GMMFunctionHif8(torch.autograd.Function):
             split_item=3,
             output_dtype=x.dtype,
             group_list_type=0,
-            **gmm_kwargs
+            **gmm_kwargs,
         )[0]
 
         return grad_input, grad_weight, None

@@ -18,7 +18,6 @@ import os
 from collections.abc import Callable
 
 import torch
-
 from torchtitan.tools.logging import logger
 
 # NPU deterministic env vars and the values we set when determinism is enabled.

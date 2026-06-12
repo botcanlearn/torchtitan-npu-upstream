@@ -108,24 +108,16 @@ def _convert_to_hf_and_save(state_dict: dict[str, Any], output_dir: str):
 
         # Filtering non-model parameters
         excluded = ("train_state", "optimizer", "lr_scheduler", "dataloader")
-        model_state_dict = {
-            k: v
-            for k, v in state_dict.items()
-            if not any(k.startswith(p) for p in excluded)
-        }
+        model_state_dict = {k: v for k, v in state_dict.items() if not any(k.startswith(p) for p in excluded)}
         # Acquire configs and key-mapping
         total_experts = _get_total_experts()
-        experts_per_rank = (
-            total_experts // world_size if total_experts > 0 and world_size > 1 else 0
-        )
+        experts_per_rank = total_experts // world_size if total_experts > 0 and world_size > 1 else 0
         # pyrefly: ignore [missing-attribute]
         hf_state_dict = _config.get_adapter().to_hf(model_state_dict)
 
         # Separate expert and non-expert weights
-        expert_keys = sorted([k for k in hf_state_dict.keys() if ".experts" in k])
-        non_expert_keys = sorted(
-            [k for k in hf_state_dict.keys() if ".experts." not in k]
-        )
+        expert_keys = sorted([k for k in hf_state_dict if ".experts" in k])
+        non_expert_keys = sorted([k for k in hf_state_dict if ".experts." not in k])
 
         # Determine if remapping is needed
         expert_ids_in_hf = set()
@@ -136,14 +128,10 @@ def _convert_to_hf_and_save(state_dict: dict[str, Any], output_dir: str):
 
         min_expert_id = min(expert_ids_in_hf) if expert_ids_in_hf else 0
         max_expert_id = max(expert_ids_in_hf) if expert_ids_in_hf else 0
-        already_global = (max_expert_id >= experts_per_rank) or (
-            rank > 0 and min_expert_id > 0
-        )
+        already_global = (max_expert_id >= experts_per_rank) or (rank > 0 and min_expert_id > 0)
 
         if is_main:
-            logger.info(
-                f"experts_per_rank = {experts_per_rank}, already_global = {already_global}"
-            )
+            logger.info(f"experts_per_rank = {experts_per_rank}, already_global = {already_global}")
 
         # Handling non-expert weights
         cpu_non_expert = {}
@@ -209,14 +197,12 @@ def _convert_to_hf_and_save(state_dict: dict[str, Any], output_dir: str):
                 save_file(cpu_state, save_path)
 
                 total_size = sum(
-                    t.numel() * t.element_size()
-                    for t in cpu_state.values()
-                    if isinstance(t, torch.Tensor)
+                    t.numel() * t.element_size() for t in cpu_state.values() if isinstance(t, torch.Tensor)
                 )
 
                 # Statistical expert number
                 saved_expert_ids = set()
-                for key in cpu_state.keys():
+                for key in cpu_state:
                     match = re.search(r"\.experts\.(\d+)\.", key)
                     if match:
                         saved_expert_ids.add(int(match.group(1)))
@@ -224,9 +210,7 @@ def _convert_to_hf_and_save(state_dict: dict[str, Any], output_dir: str):
                 # generate index.json
                 index = {
                     "metadata": {"total_size": total_size},
-                    "weight_map": {
-                        k: "model.safetensors" for k in sorted(cpu_state.keys())
-                    },
+                    "weight_map": dict.fromkeys(sorted(cpu_state.keys()), "model.safetensors"),
                 }
                 index_path = os.path.join(output_dir, "model.safetensors.index.json")
                 with open(index_path, "w") as f:
@@ -312,9 +296,7 @@ def apply_patch() -> bool:
         if hasattr(CheckpointManager, "_flattened_model_states_sd"):
             if _original_model_states_sd is None:
                 _original_model_states_sd = CheckpointManager._flattened_model_states_sd
-            CheckpointManager._flattened_model_states_sd = (
-                _create_patched_model_states_sd(_original_model_states_sd)
-            )
+            CheckpointManager._flattened_model_states_sd = _create_patched_model_states_sd(_original_model_states_sd)
 
         # Patch "save" file saving
         if _original_save is None:
@@ -331,7 +313,6 @@ def apply_patch() -> bool:
 
 
 def patch_llama4_checkpoint_support():
-
     import torchtitan.models.llama4 as llama4_module
     from torchtitan.components.checkpoint import CheckpointManager
     from torchtitan.protocols.train_spec import (  # pyrefly: ignore [missing-import]
@@ -339,8 +320,8 @@ def patch_llama4_checkpoint_support():
     )
 
     from torchtitan_npu.models.llama4.state_dict_adapter import (  # pyrefly: ignore [missing-import]
-        dcp_load,
         Llama4StateDictAdapterNpu,
+        dcp_load,
     )
 
     CheckpointManager.dcp_load = dcp_load

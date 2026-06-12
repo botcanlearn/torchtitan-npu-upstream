@@ -41,7 +41,6 @@ from torchtitan.components.checkpoint import AsyncMode, CheckpointManager
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
-
 _ORIGINAL_FILESYSTEM_WRITER_WRITE_DATA = FileSystemWriter._write_data
 _ORIGINAL_CHECKPOINT_MANAGER_INIT = CheckpointManager.__init__
 _ORIGINAL_CHECKPOINT_MANAGER_SAVE = CheckpointManager.save
@@ -68,9 +67,7 @@ def drop_page_cache_for_path(path: str | os.PathLike[str]) -> None:
                 os.close(fd)
 
 
-def _apply_filesystem_writer_options(
-    manager: CheckpointManager, writer: FileSystemWriter
-) -> None:
+def _apply_filesystem_writer_options(manager: CheckpointManager, writer: FileSystemWriter) -> None:
     writer.sync_files = getattr(manager, "_npu_checkpoint_sync_files", True)
     writer_with_options: Any = writer
     writer_with_options._npu_drop_page_cache_after_save = bool(
@@ -78,9 +75,7 @@ def _apply_filesystem_writer_options(
     )
 
 
-def _create_filesystem_writer(
-    manager: CheckpointManager, checkpoint_id: str
-) -> FileSystemWriter:
+def _create_filesystem_writer(manager: CheckpointManager, checkpoint_id: str) -> FileSystemWriter:
     writer = FileSystemWriter(checkpoint_id)
     _apply_filesystem_writer_options(manager, writer)
     return writer
@@ -116,12 +111,8 @@ def _patched_checkpoint_manager_init(self, *args, **kwargs):
     _ORIGINAL_CHECKPOINT_MANAGER_INIT(self, *args, **kwargs)
 
     self._npu_checkpoint_sync_files = getattr(checkpoint_config, "sync_files", True)
-    self._npu_checkpoint_drop_page_cache_after_save = getattr(
-        checkpoint_config, "drop_page_cache_after_save", False
-    )
-    self._npu_checkpoint_empty_cache_after_save = getattr(
-        checkpoint_config, "empty_cache_after_save", True
-    )
+    self._npu_checkpoint_drop_page_cache_after_save = getattr(checkpoint_config, "drop_page_cache_after_save", False)
+    self._npu_checkpoint_empty_cache_after_save = getattr(checkpoint_config, "empty_cache_after_save", True)
 
 
 @torch.no_grad()
@@ -140,8 +131,7 @@ def _patched_checkpoint_manager_dcp_save(
     fqn_to_index_mapping = None
     if to_hf:
         assert self.sd_adapter is not None, (
-            "trying to save checkpoint in HF safetensors format, but sd_adapter "
-            "is not provided."
+            "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
         )
         state_dict = self.sd_adapter.to_hf(state_dict)
 

@@ -31,16 +31,14 @@ def _complex_freqs(shape):
 
 
 def test_rope_replacement_mapping_tracks_current_upstream_api():
-    assert _ROPE_REPLACEMENTS == {
+    assert {
         "apply_rotary_emb_complex": npu_apply_rotary_emb_complex,
         "apply_rotary_emb_single_complex": npu_apply_rotary_emb_single_complex,
         "apply_rotary_emb_cos_sin": npu_apply_rotary_emb_cos_sin,
-    }
+    } == _ROPE_REPLACEMENTS
 
 
-@pytest.mark.parametrize(
-    "func_name,impl", list(_ROPE_REPLACEMENTS.items()), ids=list(_ROPE_REPLACEMENTS)
-)
+@pytest.mark.parametrize("func_name,impl", list(_ROPE_REPLACEMENTS.items()), ids=list(_ROPE_REPLACEMENTS))
 def test_replace_one_invokes_replace_functions_for_each_entry(func_name, impl):
     fake_model = MagicMock()
     fake_model.__class__.__module__ = "torchtitan.models.llama3.model"
@@ -65,13 +63,8 @@ def test_convert_iterates_all_replacements():
         converter.convert(fake_model)
 
     assert mock_replace_one.call_count == len(_ROPE_REPLACEMENTS)
-    called_pairs = {
-        (call.args[0], call.args[1].__name__)
-        for call in mock_replace_one.call_args_list
-    }
-    expected_pairs = {
-        (name, impl.__name__) for name, impl in _ROPE_REPLACEMENTS.items()
-    }
+    called_pairs = {(call.args[0], call.args[1].__name__) for call in mock_replace_one.call_args_list}
+    expected_pairs = {(name, impl.__name__) for name, impl in _ROPE_REPLACEMENTS.items()}
     assert called_pairs == expected_pairs
     for call in mock_replace_one.call_args_list:
         assert call.args[2] is fake_model
@@ -91,18 +84,12 @@ def test_replace_one_walks_three_packages_for_npu_model():
         "torchtitan_npu.converters.kernels.rope.replace_functions",
         return_value=0,
     ) as mock_replace:
-        NpuRoPEConverter._replace_one(
-            "apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model
-        )
+        NpuRoPEConverter._replace_one("apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model)
 
     assert mock_replace.call_count == 3
     assert mock_replace.call_args_list[0].kwargs == {"model": fake_model}
-    assert mock_replace.call_args_list[1].kwargs == {
-        "package": "torchtitan.models.deepseek_v4.model"
-    }
-    assert mock_replace.call_args_list[2].kwargs == {
-        "package": "torchtitan.models.common"
-    }
+    assert mock_replace.call_args_list[1].kwargs == {"package": "torchtitan.models.deepseek_v4.model"}
+    assert mock_replace.call_args_list[2].kwargs == {"package": "torchtitan.models.common"}
 
 
 def test_replace_one_walks_two_packages_when_model_is_already_upstream():
@@ -113,15 +100,11 @@ def test_replace_one_walks_two_packages_when_model_is_already_upstream():
         "torchtitan_npu.converters.kernels.rope.replace_functions",
         return_value=0,
     ) as mock_replace:
-        NpuRoPEConverter._replace_one(
-            "apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model
-        )
+        NpuRoPEConverter._replace_one("apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model)
 
     assert mock_replace.call_count == 2
     assert mock_replace.call_args_list[0].kwargs == {"model": fake_model}
-    assert mock_replace.call_args_list[1].kwargs == {
-        "package": "torchtitan.models.common"
-    }
+    assert mock_replace.call_args_list[1].kwargs == {"package": "torchtitan.models.common"}
 
 
 def test_replace_one_walks_only_model_when_already_in_common_pkg():
@@ -132,9 +115,7 @@ def test_replace_one_walks_only_model_when_already_in_common_pkg():
         "torchtitan_npu.converters.kernels.rope.replace_functions",
         return_value=0,
     ) as mock_replace:
-        NpuRoPEConverter._replace_one(
-            "apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model
-        )
+        NpuRoPEConverter._replace_one("apply_rotary_emb_complex", npu_apply_rotary_emb_complex, fake_model)
 
     assert mock_replace.call_count == 1
     assert mock_replace.call_args_list[0].kwargs == {"model": fake_model}

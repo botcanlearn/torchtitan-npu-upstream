@@ -5,6 +5,7 @@
 
 
 """MoE Unpermute API"""
+
 import torch
 import torch_npu
 

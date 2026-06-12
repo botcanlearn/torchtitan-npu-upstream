@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from tests.smoke_tests.conftest import skip_on_runtime_unsupported
-
 from torchtitan_npu.converters.kernels.quant_gmm import (
     GMMFunctionHif8,
     group_size_params,
@@ -22,9 +21,7 @@ def test_quant_linear_mxfp8(npu_device):
     weight = torch.randn(512, 256, dtype=torch.bfloat16, device=npu_device)
 
     try:
-        x_quant, x_scale = torch_npu.npu_dynamic_mx_quant(
-            x, axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1
-        )
+        x_quant, x_scale = torch_npu.npu_dynamic_mx_quant(x, axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1)
         weight_quant, weight_scale = torch_npu.npu_dynamic_mx_quant(
             weight, axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1
         )
@@ -48,9 +45,7 @@ def test_quant_linear_hif8(npu_device):
     weight = torch.randn(256, 256, dtype=torch.bfloat16, device=npu_device)
 
     try:
-        x_quant, x_scale = torch_npu.npu_dynamic_quant(
-            x, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
-        )
+        x_quant, x_scale = torch_npu.npu_dynamic_quant(x, dst_type=torch_npu.hifloat8, quant_mode="pertensor")
         weight_quant, weight_scale = torch_npu.npu_dynamic_quant(
             weight, dst_type=torch_npu.hifloat8, quant_mode="pertensor"
         )

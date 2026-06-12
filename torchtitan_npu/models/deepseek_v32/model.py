@@ -11,18 +11,18 @@ from typing import ClassVar
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-
 from scipy.linalg import hadamard
 from torch import nn
-from torch.nn.attention import sdpa_kernel, SDPBackend
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rmsnorm import RMSNorm as TorchTitanRMSNorm
-
 from torchtitan.models.common.rope import (
     _reshape_for_broadcast_complex as reshape_for_broadcast_complex,
 )
 from torchtitan.models.deepseek_v3.model import (
     Attention as DeepSeekV3Attention,
+)
+from torchtitan.models.deepseek_v3.model import (
     DeepSeekV3TransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -57,9 +57,7 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         num_mtp_modules: int = 0
 
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
-            DeepSeekV3ModelNpu.Config.update_from_config(
-                self, trainer_config=trainer_config, **kwargs
-            )
+            DeepSeekV3ModelNpu.Config.update_from_config(self, trainer_config=trainer_config, **kwargs)
             if not hasattr(trainer_config.training, "num_mtp_modules"):
                 return
             new_mtp = trainer_config.training.num_mtp_modules
@@ -82,16 +80,12 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
             from torchtitan_npu.models.deepseek_v32 import _extend_dsv32_layers_with_mtp
 
             n_dense_layers = sum(1 for l in self.layers if l.feed_forward is not None)
-            new_layers = _extend_dsv32_layers_with_mtp(
-                self.layers, n_dense_layers, new_mtp
-            )
+            new_layers = _extend_dsv32_layers_with_mtp(self.layers, n_dense_layers, new_mtp)
             ref_attn = self.layers[0].attention
             for layer_cfg in new_layers:
                 layer_cfg.attention.rope_max_seq_len = ref_attn.rope_max_seq_len
                 layer_cfg.attention.rope_factor = ref_attn.rope_factor
-                layer_cfg.attention.rope_original_seq_len = (
-                    ref_attn.rope_original_seq_len
-                )
+                layer_cfg.attention.rope_original_seq_len = ref_attn.rope_original_seq_len
             self.layers.extend(new_layers)
             self.num_mtp_modules = new_mtp
 
@@ -101,7 +95,6 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         self.tok_embeddings = config.tok_embeddings.build()
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
-        # pyrefly: ignore [bad-assignment]
         self.norm = RMSNorm(config.dim)
         self.output = config.output.build()
 
@@ -110,9 +103,7 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         self.layers = ModuleDict()
         for layer_id, layer_cfg in enumerate(config.layers):
             if layer_id < n_main:
-                self.layers[str(layer_id)] = TransformerBlockV32(
-                    layer_cfg, layer_id, n_total
-                )
+                self.layers[str(layer_id)] = TransformerBlockV32(layer_cfg, layer_id, n_total)
             else:
                 self.layers[str(layer_id)] = MTPModule(layer_cfg, layer_id, n_total)
         self.num_mtp_modules = config.num_mtp_modules
@@ -145,37 +136,25 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         """
         residual = None
         seq_len = tokens.shape[1]
-        # pyrefly: ignore [missing-attribute]
         seq_len -= self.num_mtp_modules
-        h = (
-            self.tok_embeddings(tokens[:, :seq_len])
-            if self.tok_embeddings is not None
-            else tokens[:, :seq_len]
-        )
+        h = self.tok_embeddings(tokens[:, :seq_len]) if self.tok_embeddings is not None else tokens[:, :seq_len]
         # Main model calculate
-        layer_id = 0
-        for layer in self.layers.values():
+        for layer_id, layer in enumerate(self.layers.values()):
             if layer_id < self.n_main_layers:
-                h, residual = layer(
-                    h, residual, self.freqs_cis, attention_masks, positions
-                )
+                h, residual = layer(h, residual, self.freqs_cis, attention_masks, positions)
             else:
                 break
-            layer_id += 1
         if residual is not None:
             h = h + residual
         prev_embed = h
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h.float()) if self.output is not None else h
-        # pyrefly: ignore [missing-attribute]
         if self.num_mtp_modules <= 0:
             return output
         else:
-            # pyrefly: ignore [missing-attribute]
             output_list = [None] * (1 + self.num_mtp_modules)
             output_list[0] = output  # pyrefly: ignore [unsupported-operation]
         # MTP module calculate
-        # pyrefly: ignore [missing-attribute]
         for mtp_layer_id in range(self.num_mtp_modules):
             token_offset_id = mtp_layer_id + 1
             token_end_idx = token_offset_id + seq_len
@@ -276,7 +255,6 @@ def hadamard_transform_ref(x, scale=1.0):
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-
     hadamard_transform = hadamard_transform_ref
     hidden_size = x.size(-1)
     return hadamard_transform(x, scale=hidden_size**-0.5)
@@ -310,9 +288,7 @@ class Indexer(Module):
         self.wk = _Linear(self.dim, self.head_dim, bias=False)
         self.k_norm = _LayerNorm(self.head_dim)
         # weights_proj in the checkpoint is stored in bf16, while the parameters here are stored in fp32 for convenient.
-        self.weights_proj = _Linear(
-            self.dim, self.n_heads, dtype=torch.float32, bias=False
-        )
+        self.weights_proj = _Linear(self.dim, self.n_heads, dtype=torch.float32, bias=False)
         self.softmax_scale = self.head_dim**-0.5
 
     def forward(
@@ -328,21 +304,15 @@ class Indexer(Module):
         end_pos = start_pos + seqlen
         q = self.wq_b(qr)
         q = q.view(bsz, seqlen, self.n_heads, self.head_dim)
-        q_pe, q_nope = torch.split(
-            q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1
-        )
+        q_pe, q_nope = torch.split(q, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
         q_pe = apply_rotary_emb(q_pe, freqs_cis, positions, interleaved=False)
         q = torch.cat([q_pe, q_nope], dim=-1)
         k = self.wk(x)
         k = self.k_norm(k)
-        k_pe, k_nope = torch.split(
-            k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1
-        )
+        k_pe, k_nope = torch.split(k, [self.rope_head_dim, self.head_dim - self.rope_head_dim], dim=-1)
         # rope in indexer is not interleaved
-        k_pe = apply_rotary_emb(
-            k_pe.unsqueeze(2), freqs_cis, positions, interleaved=False
-        ).squeeze(2)
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, positions, interleaved=False).squeeze(2)
         k = torch.cat([k_pe, k_nope], dim=-1).unsqueeze(2)
         q = rotate_activation(q)
         k = rotate_activation(k)
@@ -362,8 +332,7 @@ def get_attn_scores(
     num_head_k = key.shape[1]
     if num_head_q != num_head_k and num_head_k != 1:
         raise NotImplementedError(
-            f"Only support num_head_q == num_head_k or num_head_k == 1. "
-            f"Current {num_head_q=}, {num_head_k=}."
+            f"Only support num_head_q == num_head_k or num_head_k == 1. Current {num_head_q=}, {num_head_k=}."
         )
 
     attn = (query @ key.transpose(-1, -2)) * attn_scale
@@ -458,18 +427,12 @@ class DSV32_SDPA(Module):  # noqa: N801
         index_score += attn_mask
         # pyrefly: ignore [bad-argument-type]
         topk_score, topk_indices = index_score.topk(min(index_topk, end_pos), dim=-1)
-        query_positions = (
-            torch.arange(seqlen, device=topk_indices.device).unsqueeze(0).unsqueeze(-1)
-        )
+        query_positions = torch.arange(seqlen, device=topk_indices.device).unsqueeze(0).unsqueeze(-1)
         valid_positions = topk_indices <= query_positions
         # scatter_/gather reject -1; invalid slots use seqlen-1, a causal-masked
         # future token, so the scattered 0 is absorbed (gather path zeros them below).
-        topk_indices = torch.where(
-            valid_positions, topk_indices, torch.full_like(topk_indices, seqlen - 1)
-        )
-        index_mask = torch.full(
-            (bsz, seqlen, seqlen), float("-inf"), device=q.device
-        ).scatter_(-1, topk_indices, 0)
+        topk_indices = torch.where(valid_positions, topk_indices, torch.full_like(topk_indices, seqlen - 1))
+        index_mask = torch.full((bsz, seqlen, seqlen), float("-inf"), device=q.device).scatter_(-1, topk_indices, 0)
         attention_masks = attn_mask + index_mask
         attention_masks = torch.isinf(attention_masks) & (attention_masks < 0)
         attention_masks = attention_masks.unsqueeze(1)
@@ -477,22 +440,16 @@ class DSV32_SDPA(Module):  # noqa: N801
         # compute sparse attention
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             attn_mask = ~attention_masks
-            output = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, scale=scale, is_causal=False
-            )
+            output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=False)
 
         # compute sparse lightning_indexer loss
         q_det = q.detach()
         k_det = k.detach()
         main_attn_dist = get_attn_scores(q_det, k_det, attention_masks, scale)
-        selected_main_attn_dist = torch.gather(
-            main_attn_dist, dim=-1, index=topk_indices
-        )
+        selected_main_attn_dist = torch.gather(main_attn_dist, dim=-1, index=topk_indices)
         # Zero out sentinel-slot reads so the indexer KL loss does not depend on the
         # implicit softmax(-inf)=0 invariant of main_attn_dist[..., seqlen-1].
-        selected_main_attn_dist = selected_main_attn_dist.masked_fill(
-            ~valid_positions, 0.0
-        )
+        selected_main_attn_dist = selected_main_attn_dist.masked_fill(~valid_positions, 0.0)
         loss = self.compute_dsa_indexer_loss(
             selected_main_attn_dist,
             topk_score,
@@ -524,8 +481,7 @@ class PreAttention(Module):
 
         # v32 always uses LoRA query projection (q_lora_rank > 0).
         assert config.wq_a is not None and config.wq_b is not None, (
-            "DeepSeek V3.2 requires q_lora_rank > 0; "
-            "Attention.Config must provide wq_a/wq_b"
+            "DeepSeek V3.2 requires q_lora_rank > 0; Attention.Config must provide wq_a/wq_b"
         )
         self.wq_a = config.wq_a.build()
         self.q_norm = config.q_norm.build()
@@ -563,30 +519,20 @@ class PreAttention(Module):
         # Query projection
         qr = self.q_norm(self.wq_a(x))
         q = self.wq_b(qr)
-        q = q.view(
-            bsz, seqlen, -1, self.qk_head_dim
-        )  # (bsz, seqlen, n_heads, qk_head_dim)
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
+        q = q.view(bsz, seqlen, -1, self.qk_head_dim)  # (bsz, seqlen, n_heads, qk_head_dim)
+        q_nope, q_pe = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_pe = apply_rotary_emb(q_pe, freqs_cis, positions=positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        k_pe = apply_rotary_emb(
-            k_pe.unsqueeze(2), freqs_cis, positions=positions
-        )  # (bsz, seqlen, 1, qk_rope_head_dim)
+        k_pe = apply_rotary_emb(k_pe.unsqueeze(2), freqs_cis, positions=positions)  # (bsz, seqlen, 1, qk_rope_head_dim)
 
         if not self.enable_mla_absorb:
-            kv = self.wkv_b(
-                self.kv_norm(kv)
-            )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+            kv = self.wkv_b(self.kv_norm(kv))  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
             kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(
-                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
+            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat([k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1)
 
             q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
@@ -611,9 +557,7 @@ class PreAttention(Module):
             )
         else:
             kv = self.kv_norm(kv)
-            wkv_b_weight = self.wkv_b.weight.reshape(
-                -1, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank
-            )
+            wkv_b_weight = self.wkv_b.weight.reshape(-1, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank)
             w_uk = wkv_b_weight[:, : self.qk_nope_head_dim, :]
             w_uv = wkv_b_weight[:, self.qk_nope_head_dim :, :]
             w_uv_t = w_uv.permute(0, 2, 1).contiguous()
@@ -670,9 +614,7 @@ class PostAttention(Module):
             output = torch.einsum("bhsr,hrv->bhsv", output, w_uv_t)
 
         # Reshape and project output
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
+        output = output.transpose(1, 2).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         output = self.wo(output)
         DSAIndexerLossLoggingHelper.save_loss_to_tracker(loss, layer_id, self.n_layers)
@@ -759,9 +701,9 @@ class TransformerBlockV32(DeepSeekV3TransformerBlock):
         self.layer_id = layer_id
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
-        assert isinstance(
-            config.attention, Attention.Config
-        ), "TransformerBlockV32 requires attention to be Attention.Config"
+        assert isinstance(config.attention, Attention.Config), (
+            "TransformerBlockV32 requires attention to be Attention.Config"
+        )
         self.attention = Attention(config.attention, num_total_layers)
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -798,10 +740,7 @@ class TransformerBlockV32(DeepSeekV3TransformerBlock):
         x = x + residual
         residual = x
         x = self.ffn_norm(x)
-        if self.moe_enabled:
-            x = self.moe(x)
-        else:
-            x = self.feed_forward(x)
+        x = self.moe(x) if self.moe_enabled else self.feed_forward(x)
         return x, residual
 
 
@@ -854,10 +793,7 @@ class MTPModule(TransformerBlockV32):
         h = h + residual
         residual = h
         h = self.ffn_norm(h)
-        if self.moe_enabled:
-            h = self.moe(h)
-        else:
-            h = self.feed_forward(h)
+        h = self.moe(h) if self.moe_enabled else self.feed_forward(h)
         return h, residual
 
     def init_states(

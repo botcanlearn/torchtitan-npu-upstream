@@ -11,7 +11,6 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.protocols import ModelConvertersContainer
@@ -44,8 +43,7 @@ def parallelize_deepseekv3(
         n_heads = first_layer.attention.n_heads  # pyrefly: ignore [missing-attribute]
         if n_heads % cp_degree != 0:
             raise ValueError(
-                f"[Ulysses CP] n_heads={n_heads} must be divisible by "
-                f"context_parallel_degree={cp_degree}."
+                f"[Ulysses CP] n_heads={n_heads} must be divisible by context_parallel_degree={cp_degree}."
             )
 
         from torchtitan_npu.distributed.context_parallel.registry import (
@@ -54,6 +52,4 @@ def parallelize_deepseekv3(
 
         titan_deepseekv3_parallelize.apply_cp_to_attention_module = apply_cp
 
-    return titan_deepseekv3_parallelize.parallelize_deepseekv3(
-        model, **_upstream_kwargs
-    )
+    return titan_deepseekv3_parallelize.parallelize_deepseekv3(model, **_upstream_kwargs)

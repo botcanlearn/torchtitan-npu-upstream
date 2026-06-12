@@ -16,15 +16,13 @@ Reason:
 """
 
 import torch
-import torch.distributed.tensor  # noqa: F401 - explicit import needed for isinstance check
+import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.tensor import Replicate
-
 from torchtitan.components import optimizer as tt_optimizer
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
-
 
 _ORIG_REGISTER_MOE_LOAD_BALANCING_HOOK = getattr(
     tt_optimizer,
@@ -36,10 +34,7 @@ _ORIG_REGISTER_MOE_LOAD_BALANCING_HOOK = getattr(
 def _get_layers(model_part: nn.Module) -> nn.ModuleDict:
     layers = model_part.get_submodule("layers")
     if not isinstance(layers, nn.ModuleDict):
-        raise TypeError(
-            f"Expected model_part.layers to be nn.ModuleDict, "
-            f"got {type(layers).__name__}"
-        )
+        raise TypeError(f"Expected model_part.layers to be nn.ModuleDict, got {type(layers).__name__}")
     return layers
 
 
@@ -86,8 +81,7 @@ def register_moe_load_balancing_hook_with_expert_bias_guard(
         if loss_mesh is not None:
             if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
                 tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
-                    placements=[Replicate()]
-                    * tokens_per_expert_by_layer.device_mesh.ndim
+                    placements=[Replicate()] * tokens_per_expert_by_layer.device_mesh.ndim
                 )
             else:
                 pg = loss_mesh.get_group()
@@ -106,9 +100,7 @@ def register_moe_load_balancing_hook_with_expert_bias_guard(
                         continue
                     moe = transformer_block.moe
 
-                    tokens_per_expert = tokens_per_expert_by_layer[
-                        moe_layer_idx
-                    ].float()
+                    tokens_per_expert = tokens_per_expert_by_layer[moe_layer_idx].float()
                     moe_layer_idx += 1
 
                     # pyrefly: ignore [missing-attribute]
@@ -132,10 +124,6 @@ def register_moe_load_balancing_hook_with_expert_bias_guard(
 
 
 if _ORIG_REGISTER_MOE_LOAD_BALANCING_HOOK is not None:
-    tt_optimizer.register_moe_load_balancing_hook = (
-        register_moe_load_balancing_hook_with_expert_bias_guard
-    )
+    tt_optimizer.register_moe_load_balancing_hook = register_moe_load_balancing_hook_with_expert_bias_guard
 else:
-    logger.warning(
-        "[Optimizer Patch] register_moe_load_balancing_hook not found in upstream; skip patching"
-    )
+    logger.warning("[Optimizer Patch] register_moe_load_balancing_hook not found in upstream; skip patching")

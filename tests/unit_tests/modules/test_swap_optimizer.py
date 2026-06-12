@@ -11,7 +11,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, DTensor, Replicate
-
 from torchtitan.components.optimizer import OptimizersContainer
 
 from torchtitan_npu.config.configs import OptimizerConfig
@@ -94,9 +93,7 @@ def test_swap_config_routes_to_swap_container_when_enabled(monkeypatch):
         def __init__(self, *, config, model_parts):
             instantiated.append((config, model_parts))
 
-    monkeypatch.setattr(
-        swap_optimizer.SwapOptimizersContainer.Config, "_owner", FakeOwner
-    )
+    monkeypatch.setattr(swap_optimizer.SwapOptimizersContainer.Config, "_owner", FakeOwner)
 
     config = swap_optimizer.SwapOptimizersContainer.Config(
         swap_optimizer=True,
@@ -124,9 +121,7 @@ def test_importing_swap_optimizer_preserves_optimizer_dispatcher():
 
         assert OptimizerConfig.build is NpuOptimizerDispatcher.dispatch_build
         with pytest.raises(ValueError, match="Cannot enable both"):
-            OptimizerConfig(swap_optimizer=True, virtual_optimizer=True).build(
-                model_parts=[]
-            )
+            OptimizerConfig(swap_optimizer=True, virtual_optimizer=True).build(model_parts=[])
     finally:
         patch_npu_optimizer_framework()
 
@@ -187,9 +182,7 @@ def _build_swapped_optimizer(
         None,
     )
 
-    container = swap_optimizer.SwapOptimizersContainer.__new__(
-        swap_optimizer.SwapOptimizersContainer
-    )
+    container = swap_optimizer.SwapOptimizersContainer.__new__(swap_optimizer.SwapOptimizersContainer)
     container.model_parts = [model]
     container.optimizers = [optimizer]
 
@@ -228,13 +221,8 @@ def test_state_dict_uses_cpu_cache_snapshot_and_restores_swap_state(monkeypatch)
     assert "state.weight.max_exp_avg_sq" not in state_dict
     assert state_dict["state.weight.step"].item() == 5
     assert state_dict["param_groups.weight.step"].item() == 5
-    assert (
-        state_dict["state.weight.step"] is not fixture.optimizer.param_groups[0]["step"]
-    )
-    assert (
-        state_dict["param_groups.weight.step"]
-        is not fixture.optimizer.param_groups[0]["step"]
-    )
+    assert state_dict["state.weight.step"] is not fixture.optimizer.param_groups[0]["step"]
+    assert state_dict["param_groups.weight.step"] is not fixture.optimizer.param_groups[0]["step"]
 
     state = fixture.optimizer.state[fixture.param]
     assert state["exp_avg"] is fixture.live_exp_avg
@@ -287,9 +275,7 @@ def test_state_dict_preserves_dtensor_layout_for_cpu_cache(monkeypatch):
     mesh = _make_cpu_mesh()
     local_param = torch.randn(2, 2)
     param = DTensor.from_local(local_param, mesh, [Replicate()])
-    live_exp_avg = DTensor.from_local(
-        torch.zeros_like(local_param), mesh, [Replicate()]
-    )
+    live_exp_avg = DTensor.from_local(torch.zeros_like(local_param), mesh, [Replicate()])
     cpu_exp_avg = torch.ones_like(local_param, device="cpu")
     state = {"exp_avg": live_exp_avg}
 
@@ -319,10 +305,7 @@ def test_state_dict_preserves_dtensor_layout_for_cpu_cache(monkeypatch):
     assert value.placements == param.placements
     local_value = value.to_local()
     assert local_value.device.type == "cpu"
-    assert (
-        local_value.untyped_storage().data_ptr()
-        == cpu_exp_avg.untyped_storage().data_ptr()
-    )
+    assert local_value.untyped_storage().data_ptr() == cpu_exp_avg.untyped_storage().data_ptr()
 
 
 def test_state_dict_rejects_nonempty_cache_placeholder_without_storage():
@@ -346,12 +329,8 @@ def test_load_state_dict_rebuilds_swap_state_without_mutating_checkpoint(monkeyp
     checkpoint_state_dict = source.container.state_dict()
     original_exp_avg = checkpoint_state_dict["state.weight.exp_avg"].clone()
     original_exp_avg_sq = checkpoint_state_dict["state.weight.exp_avg_sq"].clone()
-    original_exp_avg_storage = (
-        checkpoint_state_dict["state.weight.exp_avg"].untyped_storage().size()
-    )
-    original_exp_avg_sq_storage = (
-        checkpoint_state_dict["state.weight.exp_avg_sq"].untyped_storage().size()
-    )
+    original_exp_avg_storage = checkpoint_state_dict["state.weight.exp_avg"].untyped_storage().size()
+    original_exp_avg_sq_storage = checkpoint_state_dict["state.weight.exp_avg_sq"].untyped_storage().size()
 
     target = _build_swapped_optimizer(
         monkeypatch,
@@ -362,28 +341,16 @@ def test_load_state_dict_rebuilds_swap_state_without_mutating_checkpoint(monkeyp
     target.container.load_state_dict(checkpoint_state_dict)
 
     assert torch.equal(checkpoint_state_dict["state.weight.exp_avg"], original_exp_avg)
-    assert torch.equal(
-        checkpoint_state_dict["state.weight.exp_avg_sq"], original_exp_avg_sq
-    )
-    assert (
-        checkpoint_state_dict["state.weight.exp_avg"].untyped_storage().size()
-        == original_exp_avg_storage
-    )
-    assert (
-        checkpoint_state_dict["state.weight.exp_avg_sq"].untyped_storage().size()
-        == original_exp_avg_sq_storage
-    )
+    assert torch.equal(checkpoint_state_dict["state.weight.exp_avg_sq"], original_exp_avg_sq)
+    assert checkpoint_state_dict["state.weight.exp_avg"].untyped_storage().size() == original_exp_avg_storage
+    assert checkpoint_state_dict["state.weight.exp_avg_sq"].untyped_storage().size() == original_exp_avg_sq_storage
 
     assert target.optimizer.param_groups[0]["step"].item() == 5
-    target_cpu_state = swap_optimizer.SwapOptimizersContainer.param_to_cpu_states_map[
-        target.param
-    ]
+    target_cpu_state = swap_optimizer.SwapOptimizersContainer.param_to_cpu_states_map[target.param]
     assert torch.equal(target_cpu_state["exp_avg"], original_exp_avg)
     assert torch.equal(target_cpu_state["exp_avg_sq"], original_exp_avg_sq)
     assert target.optimizer.state[target.param]["exp_avg"].untyped_storage().size() == 0
-    assert (
-        target.optimizer.state[target.param]["exp_avg_sq"].untyped_storage().size() == 0
-    )
+    assert target.optimizer.state[target.param]["exp_avg_sq"].untyped_storage().size() == 0
     assert target.optimizer.state[target.param]["max_exp_avg_sq"] is None
 
 
@@ -415,9 +382,7 @@ def test_shared_parameter_aliases_use_canonical_save_and_alias_load(monkeypatch)
         if key.startswith("state.embedding.weight."):
             key = key.replace("state.embedding.weight.", "state.lm_head.weight.", 1)
         elif key.startswith("param_groups.embedding.weight."):
-            key = key.replace(
-                "param_groups.embedding.weight.", "param_groups.lm_head.weight.", 1
-            )
+            key = key.replace("param_groups.embedding.weight.", "param_groups.lm_head.weight.", 1)
         alias_state_dict[key] = value
 
     target_model = _TiedEmbeddingModel()
@@ -434,9 +399,7 @@ def test_shared_parameter_aliases_use_canonical_save_and_alias_load(monkeypatch)
 
     assert target.optimizer.param_groups[0]["lr"] == 1e-3
     assert target.optimizer.param_groups[0]["step"].item() == 5
-    target_cpu_state = swap_optimizer.SwapOptimizersContainer.param_to_cpu_states_map[
-        target.param
-    ]
+    target_cpu_state = swap_optimizer.SwapOptimizersContainer.param_to_cpu_states_map[target.param]
     assert torch.equal(
         target_cpu_state["exp_avg"],
         alias_state_dict["state.lm_head.weight.exp_avg"],

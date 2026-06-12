@@ -20,8 +20,8 @@ from torch._inductor.exc import (
     MissingOperatorWithoutDecomp,
 )
 from torch._inductor.lowering import (
-    constrain_to_fake_tensors,
     FALLBACK_ALLOW_LIST,
+    constrain_to_fake_tensors,
     lowerings,
     make_fallback,
     maybe_layout_constraints,
@@ -32,9 +32,7 @@ from torch._library.utils import get_layout_constraint_tag
 logger = logging.getLogger(__name__)
 
 
-def graphlowering_call_function(
-    self, target: Callable, args: Any, kwargs: dict[str, Any]
-) -> Any:  # type: ignore[type-arg, override]
+def graphlowering_call_function(self, target: Callable, args: Any, kwargs: dict[str, Any]) -> Any:  # type: ignore[type-arg, override]
     """
     torch._inductor.graph.py
 
@@ -45,23 +43,17 @@ def graphlowering_call_function(
         return torch.fx.Interpreter.call_function(self, target, args, kwargs)
 
     # hasattr on OpOverloadPacket is slow, check isinstance first
-    if not isinstance(target, torch._ops.OpOverloadPacket) and hasattr(
-        target, "_inductor_lowering_function"
-    ):
+    if not isinstance(target, torch._ops.OpOverloadPacket) and hasattr(target, "_inductor_lowering_function"):
         # passthrough lowerings from .pattern_matcher
         return target(*args, **kwargs)
 
     if target not in lowerings:
-        assert isinstance(
-            target, torch._ops.OpOverload
-        ), f"{target} is not an OpOverload"
+        assert isinstance(target, torch._ops.OpOverload), f"{target} is not an OpOverload"
         base_name = target.name().split(".")[0]
         if base_name in FALLBACK_ALLOW_LIST:
             make_fallback(target, warn=False, override_decomp=True)
         elif config.implicit_fallbacks:
-            default_tag: torch._C.Tag = get_layout_constraint_tag(
-                target, with_default=True
-            )
+            default_tag: torch._C.Tag = get_layout_constraint_tag(target, with_default=True)
             decided_constraint = tag_to_layout_constraint(default_tag)
 
             make_fallback(target, layout_constraint=decided_constraint)
@@ -94,9 +86,7 @@ def graphlowering_call_function(
                     assert isinstance(target, torch._ops.OpOverload)
 
                     def normalize(args: Any, kwargs: Any) -> tuple[Any, Any]:
-                        result = torch.fx.operator_schemas.normalize_function(
-                            target, args, kwargs
-                        )
+                        result = torch.fx.operator_schemas.normalize_function(target, args, kwargs)
                         assert result is not None
                         return result[0], result[1]
 
@@ -104,9 +94,7 @@ def graphlowering_call_function(
                     args, kwargs = normalize(args, kwargs)
                     old_args, old_kwargs = normalize(old_args, old_kwargs)
 
-                    args, kwargs = constrain_to_fake_tensors(
-                        args, kwargs, fake_args, fake_kwargs
-                    )
+                    args, kwargs = constrain_to_fake_tensors(args, kwargs, fake_args, fake_kwargs)
             else:
                 args, kwargs = layout_constraints(n, *args, **kwargs)
 
@@ -120,6 +108,4 @@ def graphlowering_call_function(
 
         return out
     except Exception as e:
-        raise LoweringException(e, target, args, kwargs).with_traceback(
-            e.__traceback__
-        ) from None
+        raise LoweringException(e, target, args, kwargs).with_traceback(e.__traceback__) from None

@@ -10,7 +10,7 @@ import re
 from typing import Any
 
 import torch
-from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.distributed.tensor import DTensor, distribute_tensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from torchtitan_npu.tools.weight_utils import (
@@ -40,8 +40,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         super().__init__(model_config, hf_assets_path)
 
         self.use_gmm = any(
-            layer_cfg.moe is not None and layer_cfg.moe.experts.use_grouped_mm
-            for layer_cfg in model_config.layers
+            layer_cfg.moe is not None and layer_cfg.moe.experts.use_grouped_mm for layer_cfg in model_config.layers
         )
         self._input_format = "hf"
         self._input_expert_format = "standard"
@@ -79,11 +78,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         }
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        filtered = {
-            k: v
-            for k, v in hf_state_dict.items()
-            if not k.endswith(".weight_scale_inv")
-        }
+        filtered = {k: v for k, v in hf_state_dict.items() if not k.endswith(".weight_scale_inv")}
 
         state_dict = {}
         expert_weights_by_layer = {}
@@ -102,9 +97,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
                     expert_weights_by_layer[layer_num] = {}
                 if titan_abstract_key not in expert_weights_by_layer[layer_num]:
                     expert_weights_by_layer[layer_num][titan_abstract_key] = {}
-                expert_weights_by_layer[layer_num][titan_abstract_key][
-                    int(expert_num)
-                ] = tensor
+                expert_weights_by_layer[layer_num][titan_abstract_key][int(expert_num)] = tensor
 
                 if titan_abstract_key in self.local_experts_indices:
                     stacked = self._concatenate_expert_weights_dtensor(
@@ -117,9 +110,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
                         expert_weights_by_layer,
                         titan_abstract_key,
                         layer_num,
-                        next(
-                            l for l in self.model_config.layers if l.moe is not None
-                        ).moe.num_experts,
+                        next(l for l in self.model_config.layers if l.moe is not None).moe.num_experts,
                     )
                 if stacked is not None:
                     state_dict[new_key] = stacked
@@ -134,7 +125,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         return state_dict
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        has_w13 = any(".moe.experts.w13" in k for k in state_dict.keys())
+        has_w13 = any(".moe.experts.w13" in k for k in state_dict)
         if has_w13:
             state_dict = _split_w13_for_mapping(state_dict)
 
@@ -150,9 +141,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
                 new_abstract_key = to_hf_map[abstract_key]
 
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
+                    self.grouped_expert_weight_placements[abstract_key] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
@@ -164,12 +153,8 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
                     )
                     hf_state_dict.update(local_expert_fqn)
                 else:
-                    moe_layer = next(
-                        l for l in self.model_config.layers if l.moe is not None
-                    )
-                    split_values = self._split_experts_weights(
-                        value, moe_layer.moe.num_experts
-                    )
+                    moe_layer = next(l for l in self.model_config.layers if l.moe is not None)
+                    split_values = self._split_experts_weights(value, moe_layer.moe.num_experts)
                     for expert_num in range(moe_layer.moe.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
@@ -210,9 +195,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         from torch.distributed.checkpoint import HuggingFaceStorageReader
 
         if from_quantized:
-            logger.warning(
-                "Loading from quantized checkpoint is not supported for 16B model."
-            )
+            logger.warning("Loading from quantized checkpoint is not supported for 16B model.")
         return HuggingFaceStorageReader(path)
 
     def _reverse_convert_kv_weights(self, state_dict: dict, hf_state_dict: dict):
@@ -223,7 +206,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         hd = self.head_dim
 
         layer_indices = set()
-        for k in state_dict.keys():
+        for k in state_dict:
             m = re.search(r"layers\.(\d+)\.attention\.wkv_a", k)
             if m:
                 layer_indices.add(int(m.group(1)))
@@ -246,11 +229,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
             # Skip during DCP template creation.
             wkv_b_key = f"layers.{li}.attention.wkv_b.weight"
             kv_norm_key = f"layers.{li}.attention.kv_norm.weight"
-            if (
-                not self._skip_wkv_b_fold
-                and wkv_b_key in state_dict
-                and kv_norm_key in state_dict
-            ):
+            if not self._skip_wkv_b_fold and wkv_b_key in state_dict and kv_norm_key in state_dict:
                 wkv_b = state_dict[wkv_b_key]
                 kv_norm_w = state_dict[kv_norm_key]
                 if isinstance(wkv_b, DTensor):
@@ -261,12 +240,8 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
             else:
                 kv_comp = kv_comp_raw
 
-            k_nope = torch.zeros(
-                n_h * qn, wkv_a.shape[1], dtype=wkv_a.dtype, device=wkv_a.device
-            )
-            v_w = torch.zeros(
-                n_h * vh, wkv_a.shape[1], dtype=wkv_a.dtype, device=wkv_a.device
-            )
+            k_nope = torch.zeros(n_h * qn, wkv_a.shape[1], dtype=wkv_a.dtype, device=wkv_a.device)
+            v_w = torch.zeros(n_h * vh, wkv_a.shape[1], dtype=wkv_a.dtype, device=wkv_a.device)
             for h in range(n_h):
                 s = h * (qn + vh)
                 k_nope_start = h * qn
@@ -280,9 +255,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
                 k_nope[k_nope_start:k_nope_end] = kv_comp[kv_k_start:kv_k_end]
                 v_w[v_start:v_end] = kv_comp[kv_v_start:kv_v_end]
 
-            k_pe_replicated = (
-                k_pe_shared.unsqueeze(0).expand(n_h, -1, -1).reshape(n_h * qr, -1)
-            )
+            k_pe_replicated = k_pe_shared.unsqueeze(0).expand(n_h, -1, -1).reshape(n_h * qr, -1)
             k_w = torch.cat(
                 [
                     k_nope.view(n_h, qn, -1),
@@ -294,9 +267,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
             hf_state_dict[f"model.layers.{li}.self_attn.k_proj.weight"] = k_w
             hf_state_dict[f"model.layers.{li}.self_attn.v_proj.weight"] = v_w
 
-            logger.info(
-                f"Layer {li}: MLA→MHA k_proj{list(k_w.shape)} v_proj{list(v_w.shape)}"
-            )
+            logger.info(f"Layer {li}: MLA→MHA k_proj{list(k_w.shape)} v_proj{list(v_w.shape)}")
 
     def _map_key(self, hf_key: str, tensor: torch.Tensor, state_dict: dict) -> bool:
         for hf_pattern, titan_pattern in self.from_hf_map.items():
@@ -327,7 +298,7 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
         hd = self.head_dim
 
         layer_indices = set()
-        for k in hf_state_dict.keys():
+        for k in hf_state_dict:
             m = re.search(r"model\.layers\.(\d+)\.self_attn\.k_proj", k)
             if m:
                 layer_indices.add(int(m.group(1)))
@@ -395,20 +366,15 @@ class DeepSeek16BStateDictAdapterNpu(MoEStateDictAdapter):
             state_dict[f"layers.{li}.attention.wkv_b.weight"] = self._maybe_distribute(
                 wkv_b, f"layers.{li}.attention.wkv_b.weight"
             )
-            state_dict[
-                f"layers.{li}.attention.kv_norm.weight"
-            ] = self._maybe_distribute(
+            state_dict[f"layers.{li}.attention.kv_norm.weight"] = self._maybe_distribute(
                 kv_norm_w, f"layers.{li}.attention.kv_norm.weight"
             )
 
             logger.info(
-                f"Layer {li}: MHA→MLA wkv_a{list(wkv_a.shape)} "
-                f"wkv_b{list(wkv_b.shape)} kv_norm{list(kv_norm_w.shape)}"
+                f"Layer {li}: MHA→MLA wkv_a{list(wkv_a.shape)} wkv_b{list(wkv_b.shape)} kv_norm{list(kv_norm_w.shape)}"
             )
 
-    def _maybe_distribute(
-        self, tensor: torch.Tensor, titan_key: str
-    ) -> torch.Tensor | DTensor:
+    def _maybe_distribute(self, tensor: torch.Tensor, titan_key: str) -> torch.Tensor | DTensor:
         meta = self._mla_dtensor_meta.get(titan_key)
         if meta is None:
             return tensor

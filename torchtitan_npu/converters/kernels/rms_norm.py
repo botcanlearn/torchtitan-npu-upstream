@@ -8,7 +8,6 @@ import logging
 import torch
 import torch.nn as nn
 import torch_npu
-
 from torchtitan.models.common.rmsnorm import RMSNorm
 
 from torchtitan_npu.converters.convert_utils import replace_module_with_name

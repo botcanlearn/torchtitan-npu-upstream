@@ -18,9 +18,8 @@ MoE expert parallelism uses all-to-all exchanged token counts as split sizes.
 
 import torch
 import torch.nn as nn
-
 import torchtitan.distributed.expert_parallel as ep_module
-from torch.distributed.tensor import DeviceMesh, distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import DeviceMesh, DTensor, Shard, distribute_tensor
 
 from torchtitan_npu.distributed.process_group import is_fake_process_group
 
@@ -50,9 +49,7 @@ def _distribute_w13_interleaved(w13_param, device_mesh):
 def _tp_partition_fn(self, name, module, device_mesh):
     # w1 has shape (experts, out_dim, in_dim)
     if module.w1 is not None:
-        module.register_parameter(
-            "w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(1)]))
-        )
+        module.register_parameter("w1", nn.Parameter(distribute_tensor(module.w1, device_mesh, [Shard(1)])))
 
     # w2 has shape (experts, in_dim, out_dim)
     module.register_parameter(
@@ -89,9 +86,7 @@ def _distribute_w13_interleaved_etp(w13_param, device_mesh):
     w1_local = w1_dt.to_local()
     w3_local = w3_dt.to_local()
     w13_local = torch.cat([w1_local, w3_local], dim=1)
-    return DTensor.from_local(
-        w13_local, device_mesh, [Shard(0), Shard(1)], run_check=False
-    )
+    return DTensor.from_local(w13_local, device_mesh, [Shard(0), Shard(1)], run_check=False)
 
 
 def _etp_partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
@@ -148,11 +143,7 @@ def _expert_parallel_token_dispatch(self, mod: nn.Module, inputs: tuple, device_
     num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
 
     with torch.no_grad():
-        input_splits = (
-            num_tokens_per_expert.view(ep_degree, -1)
-            .sum(dim=1)
-            .to(torch.device("cpu"), non_blocking=False)
-        )
+        input_splits = num_tokens_per_expert.view(ep_degree, -1).sum(dim=1).to(torch.device("cpu"), non_blocking=False)
         self.input_splits = input_splits.tolist()
         self.output_splits = list(self.input_splits)
 
@@ -174,9 +165,7 @@ def _expert_parallel_token_dispatch(self, mod: nn.Module, inputs: tuple, device_
     return routed_input, num_tokens_per_expert_group
 
 
-def _expert_parallel_token_combine(
-    self, mod: nn.Module, routed_output: torch.Tensor, device_mesh
-):
+def _expert_parallel_token_combine(self, mod: nn.Module, routed_output: torch.Tensor, device_mesh):
     if not is_fake_process_group(device_mesh.get_group()):
         return _ORIG_EXPERT_TOKEN_COMBINE(self, mod, routed_output, device_mesh)
 

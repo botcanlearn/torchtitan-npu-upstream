@@ -26,7 +26,6 @@ from torchtitan_npu.converters.registry import get_model_converter_config
 
 from . import model_registry
 
-
 VLM_TOKENIZER_ASSETS_PATH = "./tests/assets/tokenizer/vlm_tokenizer"
 
 
@@ -34,9 +33,7 @@ def vlm_debugmodel_npu() -> MultiModalTrainerConfig:
     return MultiModalTrainerConfig(
         hf_assets_path=VLM_TOKENIZER_ASSETS_PATH,
         model_spec=model_registry("debugmodel"),
-        model_converters=ModelConvertersContainer.Config(
-            converters=[get_model_converter_config("npu_vlm")]
-        ),
+        model_converters=ModelConvertersContainer.Config(converters=[get_model_converter_config("npu_vlm")]),
         metrics=MetricsProcessor.Config(log_freq=1),
         dataloader=HuggingFaceMultiModalDataLoader.Config(dataset="cc12m-test"),
         optimizer=OptimizersContainer.Config(

@@ -12,6 +12,7 @@
                 <filteritem type="filepath" name=".*.png" desc="Image files, no license required"/>
                 <filteritem type="filepath" name=".*.toml" desc="Configuration files, no license required"/>
                 <filteritem type="filename" name=".flake8" desc="Configuration files, no license required"/>
+                <filteritem type="filename" name=".clang-format" desc="Configuration files, no license required"/>
                 <filteritem type="filename" name=".pre-commit-config.yaml" desc="Configuration files, no license required"/>
             </filefilter>
         </filefilterlist>

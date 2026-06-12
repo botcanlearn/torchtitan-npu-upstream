@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
-
 from torchtitan.protocols.module import Module
 
 logger = logging.getLogger(__name__)
@@ -94,14 +93,9 @@ class DSAIndexerLossLoggingHelper:
 
         layer_number = int(layer_number)
         if not 0 <= layer_number < num_layers:
-            raise ValueError(
-                f"DSA indexer layer_number must be in [0, {num_layers}), "
-                f"got {layer_number}."
-            )
+            raise ValueError(f"DSA indexer layer_number must be in [0, {num_layers}), got {layer_number}.")
 
-        tracker["values"][layer_number] += (
-            loss.to_local().detach() if isinstance(loss, DTensor) else loss.detach()
-        )
+        tracker["values"][layer_number] += loss.to_local().detach() if isinstance(loss, DTensor) else loss.detach()
 
     @staticmethod
     def clean_loss_in_tracker():

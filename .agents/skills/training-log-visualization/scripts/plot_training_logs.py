@@ -75,11 +75,7 @@ def _resolve_pr_image_output(
 ) -> Path | None:
     if not generate_pr_image and not pr_image_output:
         return None
-    pr_output = (
-        Path(pr_image_output)
-        if pr_image_output
-        else _default_pr_image_output_path(output)
-    )
+    pr_output = Path(pr_image_output) if pr_image_output else _default_pr_image_output_path(output)
     if pr_output.suffix.lower() != ".png":
         pr_output = pr_output.with_suffix(".png")
     return pr_output
@@ -170,18 +166,14 @@ def _plot_single_log(
     no_show: bool,
 ):
     """Plot single log with 2-column layout."""
-    selected = ["loss", "grad_norm"] + [
-        metric for metric in metrics if metric not in {"loss", "grad_norm"}
-    ]
+    selected = ["loss", "grad_norm"] + [metric for metric in metrics if metric not in {"loss", "grad_norm"}]
     n_metrics = len(selected)
 
     # Calculate grid: 2 columns, enough rows
     n_cols = 2
     n_rows = (n_metrics + 1) // 2
 
-    figure, axes = plt.subplots(
-        n_rows, n_cols, figsize=(14, 3.5 * n_rows), sharex=False
-    )
+    figure, axes = plt.subplots(n_rows, n_cols, figsize=(14, 3.5 * n_rows), sharex=False)
     if n_metrics == 1:
         axes = [[axes]]
     elif n_rows == 1:
@@ -239,9 +231,7 @@ def _plot_single_log(
             figure.savefig(pr_image_output, dpi=PR_IMAGE_DPI)
         except OSError as error:
             plt.close(figure)
-            raise RuntimeError(
-                f"failed to save PR image to '{pr_image_output}': {error}"
-            ) from error
+            raise RuntimeError(f"failed to save PR image to '{pr_image_output}': {error}") from error
         finally:
             figure.set_size_inches(original_width, original_height)
 
@@ -284,15 +274,11 @@ def _plot_compare(
     # Compute signed errors for loss and grad_norm
     losses_a = [float(r["loss"]) for r in aligned.records_a]
     losses_b = [float(r["loss"]) for r in aligned.records_b]
-    loss_abs_err, loss_rel_err = module.compute_signed_errors(
-        losses_a, losses_b, baseline=baseline
-    )
+    loss_abs_err, loss_rel_err = module.compute_signed_errors(losses_a, losses_b, baseline=baseline)
 
     grad_norms_a = [float(r.get("grad_norm", 0)) for r in aligned.records_a]
     grad_norms_b = [float(r.get("grad_norm", 0)) for r in aligned.records_b]
-    grad_abs_err, grad_rel_err = module.compute_signed_errors(
-        grad_norms_a, grad_norms_b, baseline=baseline
-    )
+    grad_abs_err, grad_rel_err = module.compute_signed_errors(grad_norms_a, grad_norms_b, baseline=baseline)
 
     # Compute error statistics
     loss_abs_stats = _compute_error_stats(loss_abs_err)
@@ -340,9 +326,7 @@ def _plot_compare(
     # Row 1: absolute errors (no threshold lines)
     # Loss abs error
     ax_loss_abs = axes[1][0]
-    ax_loss_abs.plot(
-        aligned.steps, loss_abs_err, label="loss abs error", color="blue", linewidth=1.0
-    )
+    ax_loss_abs.plot(aligned.steps, loss_abs_err, label="loss abs error", color="blue", linewidth=1.0)
     ax_loss_abs.axhline(y=0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
     ax_loss_abs.set_ylabel("loss abs error")
     ax_loss_abs.grid(True, linestyle="--", alpha=0.4)
@@ -405,9 +389,7 @@ def _plot_compare(
         color="green",
         linewidth=1.0,
     )
-    ax_loss_rel.axhline(
-        y=0.02, color="red", linestyle="--", linewidth=1.5, label="threshold ±0.02"
-    )
+    ax_loss_rel.axhline(y=0.02, color="red", linestyle="--", linewidth=1.5, label="threshold ±0.02")
     ax_loss_rel.axhline(y=-0.02, color="red", linestyle="--", linewidth=1.5)
     ax_loss_rel.axhline(y=0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
     ax_loss_rel.set_ylabel("loss relative error")
@@ -439,9 +421,7 @@ def _plot_compare(
         color="green",
         linewidth=1.0,
     )
-    ax_grad_rel.axhline(
-        y=0.02, color="red", linestyle="--", linewidth=1.5, label="threshold ±0.02"
-    )
+    ax_grad_rel.axhline(y=0.02, color="red", linestyle="--", linewidth=1.5, label="threshold ±0.02")
     ax_grad_rel.axhline(y=-0.02, color="red", linestyle="--", linewidth=1.5)
     ax_grad_rel.axhline(y=0, color="gray", linestyle="-", linewidth=0.8, alpha=0.5)
     ax_grad_rel.set_ylabel("grad_norm relative error")
@@ -472,9 +452,7 @@ def _plot_compare(
 
         values_a = []
         values_b = []
-        for record_a, record_b in zip(
-            aligned.records_a, aligned.records_b, strict=True
-        ):
+        for record_a, record_b in zip(aligned.records_a, aligned.records_b, strict=True):
             value_a = record_a.get(metric)
             value_b = record_b.get(metric)
             values_a.append(float(value_a) if value_a is not None else float("nan"))
@@ -537,9 +515,7 @@ def _plot_compare(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Plot training metrics from torchtitan-npu logs"
-    )
+    parser = argparse.ArgumentParser(description="Plot training metrics from torchtitan-npu logs")
     parser.add_argument("--log-a", required=True, help="path to primary log")
     parser.add_argument("--log-b", default=None, help="path to comparison log")
     parser.add_argument(
@@ -565,12 +541,8 @@ def main() -> int:
         default="a",
         help="baseline for relative error (default: a, i.e., log-a)",
     )
-    parser.add_argument(
-        "--format", choices=["png", "pdf"], default="png", help="output format"
-    )
-    parser.add_argument(
-        "--no-show", action="store_true", help="disable interactive display"
-    )
+    parser.add_argument("--format", choices=["png", "pdf"], default="png", help="output format")
+    parser.add_argument("--no-show", action="store_true", help="disable interactive display")
     args = parser.parse_args()
 
     module = _load_train_log_plot_module()
@@ -593,16 +565,10 @@ def main() -> int:
             logger.info(f"[error] failed to read log-b '{args.log_b}': {error}")
             return 1
         if not records_b:
-            logger.info(
-                f"[error] no valid training metrics found in log-b: {args.log_b}"
-            )
+            logger.info(f"[error] no valid training metrics found in log-b: {args.log_b}")
             return 1
 
-    output = (
-        Path(args.output)
-        if args.output
-        else _default_output_path(args.log_a, args.log_b, args.format)
-    )
+    output = Path(args.output) if args.output else _default_output_path(args.log_a, args.log_b, args.format)
     if output.suffix.lower() != f".{args.format}":
         output = output.with_suffix(f".{args.format}")
 
@@ -619,9 +585,7 @@ def main() -> int:
     log_b_name = Path(args.log_b).stem if args.log_b else None
 
     title = args.title or (
-        f"Training Metrics: {log_a_name} vs {log_b_name}"
-        if args.log_b
-        else f"Training Metrics: {log_a_name}"
+        f"Training Metrics: {log_a_name} vs {log_b_name}" if args.log_b else f"Training Metrics: {log_a_name}"
     )
 
     try:

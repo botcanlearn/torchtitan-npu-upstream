@@ -35,7 +35,6 @@ import pickle
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -348,9 +347,7 @@ class SnapshotAnalysis:
     def to_dict(self) -> dict:
         """转为可序列化字典。"""
         peak_category_breakdown = {}
-        for category, size in sorted(
-            self.peak_category_breakdown.items(), key=lambda x: -x[1]
-        ):
+        for category, size in sorted(self.peak_category_breakdown.items(), key=lambda x: -x[1]):
             peak_category_breakdown[category] = {
                 "bytes": size,
                 "readable": _fmt_bytes(size),
@@ -444,9 +441,7 @@ def _analyze_segments(snapshot: dict, top_n: int = 10) -> SnapshotAnalysis:
             if state == "active_allocated":
                 frames = block.get("frames", [])
                 category = _classify_by_frames(frames)
-                result.category_memory[category] = (
-                    result.category_memory.get(category, 0) + size
-                )
+                result.category_memory[category] = result.category_memory.get(category, 0) + size
                 all_active_blocks.append(
                     {
                         "size": size,
@@ -460,9 +455,7 @@ def _analyze_segments(snapshot: dict, top_n: int = 10) -> SnapshotAnalysis:
 
     # 碎片化率
     if result.total_reserved > 0:
-        result.fragmentation_rate = (
-            1 - result.total_allocated / result.total_reserved
-        ) * 100
+        result.fragmentation_rate = (1 - result.total_allocated / result.total_reserved) * 100
 
     # 碎片化深度分析
     result.free_block_sizes = sorted(free_block_sizes, reverse=True)
@@ -576,9 +569,7 @@ def _analyze_timeline(snapshot: dict, result: SnapshotAnalysis) -> None:
             unreleased_cats[a["category"]] += a["size"]
 
         # 如果 "other" 或 "unknown" 类别占未释放总量 > 30%，可能存在泄漏
-        suspicious = sum(
-            v for k, v in unreleased_cats.items() if k in ("other", "unknown")
-        )
+        suspicious = sum(v for k, v in unreleased_cats.items() if k in ("other", "unknown"))
         if unreleased_total > 0 and suspicious / unreleased_total > 0.3:
             result.potential_leak = True
             result.leak_details = (
@@ -595,13 +586,8 @@ def _analyze_timeline(snapshot: dict, result: SnapshotAnalysis) -> None:
         chunk_end = i + chunk_size
         chunk = events[i:chunk_end]
         a = sum(1 for e in chunk if e.get("action") == "alloc")
-        f = sum(
-            1 for e in chunk if e.get("action") in ("free_requested", "free_completed")
-        )
-        net = sum(
-            e.get("size", 0) if e.get("action") == "alloc" else -e.get("size", 0)
-            for e in chunk
-        )
+        f = sum(1 for e in chunk if e.get("action") in ("free_requested", "free_completed"))
+        net = sum(e.get("size", 0) if e.get("action") == "alloc" else -e.get("size", 0) for e in chunk)
         if a > f * 1.5:
             phase_type = "增长 (forward/加载)"
         elif f > a * 1.5:
@@ -683,18 +669,12 @@ def _print_analysis(result: SnapshotAnalysis, label: str = "") -> None:
                 key=lambda x: -x[1],
             ):
                 pct = size / total_peak * 100
-                logger.info(
-                    f"    {_cn(cat):<14} " f"{_fmt_bytes(size):>12} ({pct:.1f}%)"
-                )
+                logger.info(f"    {_cn(cat):<14} {_fmt_bytes(size):>12} ({pct:.1f}%)")
 
         if result.peak_top_allocations:
             logger.info("\n  峰值时刻 Top 分配:")
             for alloc in result.peak_top_allocations[:5]:
-                logger.info(
-                    f"    [{alloc['rank']}] "
-                    f"{alloc['size_readable']} "
-                    f"({alloc['category_cn']})"
-                )
+                logger.info(f"    [{alloc['rank']}] {alloc['size_readable']} ({alloc['category_cn']})")
                 for line in alloc.get("callstack", []):
                     logger.info(f"      {line}")
 
@@ -756,11 +736,7 @@ def _print_analysis(result: SnapshotAnalysis, label: str = "") -> None:
         logger.info(f"{prefix}Top-{len(result.top_allocations)} 大块内存分配")
         logger.info(f"{'=' * 70}")
         for alloc in result.top_allocations:
-            logger.info(
-                f"  [{alloc['rank']}] "
-                f"{alloc['size_readable']} "
-                f"({alloc['category_cn']})"
-            )
+            logger.info(f"  [{alloc['rank']}] {alloc['size_readable']} ({alloc['category_cn']})")
             for line in alloc.get("callstack", []):
                 logger.info(f"    {line}")
 
@@ -802,9 +778,7 @@ def _print_diagnosis(result: SnapshotAnalysis, prefix: str = "") -> None:
             )
         elif cat == "communication" and pct > 20:
             suggestions.append(
-                f"通信缓冲占比 {pct:.1f}% (> 20%)，建议:\n"
-                f"    - 调整并行策略减少通信量\n"
-                f"    - 检查 HCCL 缓冲区配置"
+                f"通信缓冲占比 {pct:.1f}% (> 20%)，建议:\n    - 调整并行策略减少通信量\n    - 检查 HCCL 缓冲区配置"
             )
         elif cat in ("other", "unknown") and pct > 20:
             suggestions.append(
@@ -817,15 +791,12 @@ def _print_diagnosis(result: SnapshotAnalysis, prefix: str = "") -> None:
     # 2. 碎片化检查
     if result.fragmentation_rate > 20:
         suggestions.append(
-            f"碎片化率 {result.fragmentation_rate:.1f}% (> 20%)，"
-            f"建议在合适时机调用 torch.npu.empty_cache()"
+            f"碎片化率 {result.fragmentation_rate:.1f}% (> 20%)，建议在合适时机调用 torch.npu.empty_cache()"
         )
 
     # 3. 泄漏检查
     if result.potential_leak:
-        suggestions.append(
-            f"⚠️  检测到潜在内存泄漏: {result.leak_details}\n" f"    建议对比多个 step 的 snapshot 确认"
-        )
+        suggestions.append(f"⚠️  检测到潜在内存泄漏: {result.leak_details}\n    建议对比多个 step 的 snapshot 确认")
 
     if suggestions:
         for i, s in enumerate(suggestions, 1):
@@ -870,12 +841,7 @@ def _print_comparison(
             diff_str = f"-{_fmt_bytes(abs(diff))}"
         else:
             diff_str = "0"
-        logger.info(
-            f"  {name:<16} "
-            f"{_fmt_bytes(val_a):>14} "
-            f"{_fmt_bytes(val_b):>14} "
-            f"{diff_str:>14}"
-        )
+        logger.info(f"  {name:<16} {_fmt_bytes(val_a):>14} {_fmt_bytes(val_b):>14} {diff_str:>14}")
 
     # 碎片化对比
     logger.info(
@@ -886,12 +852,7 @@ def _print_comparison(
     )
 
     # 分类对比
-    all_cats = sorted(
-        set(
-            list(baseline.category_memory.keys())
-            + list(modified.category_memory.keys())
-        )
-    )
+    all_cats = sorted(set(list(baseline.category_memory.keys()) + list(modified.category_memory.keys())))
     if all_cats:
         logger.info("\n  按类别对比:")
         logger.info(f"  {'类别':<16} {label_a:>14} {label_b:>14} {'差异':>14}")
@@ -906,22 +867,15 @@ def _print_comparison(
                 diff_str = f"-{_fmt_bytes(abs(diff))}"
             else:
                 diff_str = "0"
-            logger.info(
-                f"  {_cn(cat):<14} "
-                f"{_fmt_bytes(val_a):>14} "
-                f"{_fmt_bytes(val_b):>14} "
-                f"{diff_str:>14}"
-            )
+            logger.info(f"  {_cn(cat):<14} {_fmt_bytes(val_a):>14} {_fmt_bytes(val_b):>14} {diff_str:>14}")
 
     # 关键洞察
     logger.info("\n  关键洞察:")
     total_diff = modified.total_allocated - baseline.total_allocated
     if total_diff > 0:
-        logger.info(f"    ⬆ {label_b} 比 {label_a} 多使用 " f"{_fmt_bytes(total_diff)} 内存")
+        logger.info(f"    ⬆ {label_b} 比 {label_a} 多使用 {_fmt_bytes(total_diff)} 内存")
     elif total_diff < 0:
-        logger.info(
-            f"    ⬇ {label_b} 比 {label_a} 节省 " f"{_fmt_bytes(abs(total_diff))} 内存"
-        )
+        logger.info(f"    ⬇ {label_b} 比 {label_a} 节省 {_fmt_bytes(abs(total_diff))} 内存")
     else:
         logger.info("    ≈ 两者内存使用基本一致")
 
@@ -929,9 +883,7 @@ def _print_comparison(
     max_diff_cat = ""
     max_diff_val = 0
     for cat in all_cats:
-        diff = abs(
-            modified.category_memory.get(cat, 0) - baseline.category_memory.get(cat, 0)
-        )
+        diff = abs(modified.category_memory.get(cat, 0) - baseline.category_memory.get(cat, 0))
         if diff > max_diff_val:
             max_diff_val = diff
             max_diff_cat = cat
@@ -942,15 +894,10 @@ def _print_comparison(
         if val_a > 0:
             pct_change = abs(val_b - val_a) / val_a * 100
             logger.info(
-                f"    最大变化类别: {_cn(max_diff_cat)} "
-                f"({direction} {_fmt_bytes(max_diff_val)}, "
-                f"{pct_change:.1f}%)"
+                f"    最大变化类别: {_cn(max_diff_cat)} ({direction} {_fmt_bytes(max_diff_val)}, {pct_change:.1f}%)"
             )
         else:
-            logger.info(
-                f"    最大变化类别: {_cn(max_diff_cat)} "
-                f"({direction} {_fmt_bytes(max_diff_val)})"
-            )
+            logger.info(f"    最大变化类别: {_cn(max_diff_cat)} ({direction} {_fmt_bytes(max_diff_val)})")
 
     logger.info("")
 
@@ -960,12 +907,7 @@ def _comparison_to_dict(
     modified: SnapshotAnalysis,
 ) -> dict:
     """双快照对比的 JSON 结构。"""
-    all_cats = sorted(
-        set(
-            list(baseline.category_memory.keys())
-            + list(modified.category_memory.keys())
-        )
-    )
+    all_cats = sorted(set(list(baseline.category_memory.keys()) + list(modified.category_memory.keys())))
     category_diffs = {}
     for cat in all_cats:
         val_a = baseline.category_memory.get(cat, 0)
@@ -981,13 +923,9 @@ def _comparison_to_dict(
         "baseline": baseline.to_dict(),
         "modified": modified.to_dict(),
         "comparison": {
-            "allocated_diff_bytes": (
-                modified.total_allocated - baseline.total_allocated
-            ),
+            "allocated_diff_bytes": (modified.total_allocated - baseline.total_allocated),
             "reserved_diff_bytes": (modified.total_reserved - baseline.total_reserved),
-            "fragmentation_diff": (
-                modified.fragmentation_rate - baseline.fragmentation_rate
-            ),
+            "fragmentation_diff": (modified.fragmentation_rate - baseline.fragmentation_rate),
             "category_diffs": category_diffs,
         },
     }
@@ -1064,15 +1002,8 @@ def _analyze_leak_trend(results: list[SnapshotAnalysis], labels: list[str]) -> N
             else:
                 trend = "— 稳定"
 
-            diff_str = (
-                f"+{_fmt_bytes(diff)}"
-                if diff > 0
-                else (f"-{_fmt_bytes(abs(diff))}" if diff < 0 else "0")
-            )
-            logger.info(
-                f"  {_cn(cat):<14} {_fmt_bytes(first):>12} "
-                f"{_fmt_bytes(last):>12} {diff_str:>12} {trend:>8}"
-            )
+            diff_str = f"+{_fmt_bytes(diff)}" if diff > 0 else (f"-{_fmt_bytes(abs(diff))}" if diff < 0 else "0")
+            logger.info(f"  {_cn(cat):<14} {_fmt_bytes(first):>12} {_fmt_bytes(last):>12} {diff_str:>12} {trend:>8}")
 
         if leaking_cats:
             logger.info("\n  🔍 泄漏嫌疑类别:")
@@ -1109,18 +1040,13 @@ def _leak_trend_to_dict(results: list[SnapshotAnalysis], labels: list[str]) -> d
         }
 
     return {
-        "snapshots": [
-            {"label": label, "analysis": r.to_dict()}
-            for r, label in zip(results, labels)
-        ],
+        "snapshots": [{"label": label, "analysis": r.to_dict()} for r, label in zip(results, labels)],
         "leak_detection": {
             "total_allocated_trend": allocs,
             "total_growth_bytes": allocs[-1] - allocs[0],
             "is_monotonic_growth": is_monotonic and allocs[-1] > allocs[0],
             "category_trends": category_trends,
-            "leaking_categories": [
-                cat for cat, info in category_trends.items() if info["monotonic_growth"]
-            ],
+            "leaking_categories": [cat for cat, info in category_trends.items() if info["monotonic_growth"]],
         },
     }
 

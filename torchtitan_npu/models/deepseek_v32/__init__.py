@@ -18,11 +18,11 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.deepseek_v3 import (
-    _depth_experts_init,
-    _depth_init,
     _EMBEDDING_INIT,
     _LINEAR_INIT,
     _NORM_INIT,
+    _depth_experts_init,
+    _depth_init,
     _output_linear_init,
 )
 from torchtitan.protocols.model_spec import ModelSpec
@@ -70,25 +70,19 @@ def _make_dsv32_attn_config(
         v_head_dim=v_head_dim,
         mscale=mscale,
         wq=None,
-        wq_a=Linear.Config(
-            in_features=dim, out_features=q_lora_rank, param_init=_LINEAR_INIT
-        ),
+        wq_a=Linear.Config(in_features=dim, out_features=q_lora_rank, param_init=_LINEAR_INIT),
         wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * qk_head_dim,
             param_init=_LINEAR_INIT,
         ),
-        q_norm=RMSNorm.Config(
-            normalized_shape=q_lora_rank, eps=norm_eps, param_init=_NORM_INIT
-        ),
+        q_norm=RMSNorm.Config(normalized_shape=q_lora_rank, eps=norm_eps, param_init=_NORM_INIT),
         wkv_a=Linear.Config(
             in_features=dim,
             out_features=kv_lora_rank + qk_rope_head_dim,
             param_init=_LINEAR_INIT,
         ),
-        kv_norm=RMSNorm.Config(
-            normalized_shape=kv_lora_rank, eps=norm_eps, param_init=_NORM_INIT
-        ),
+        kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank, eps=norm_eps, param_init=_NORM_INIT),
         wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
@@ -99,11 +93,7 @@ def _make_dsv32_attn_config(
             out_features=dim,
             param_init=_depth_init(layer_id),
         ),
-        inner_attention=(
-            inner_attention
-            if inner_attention is not None
-            else ScaledDotProductAttention.Config()
-        ),
+        inner_attention=(inner_attention if inner_attention is not None else ScaledDotProductAttention.Config()),
         mask_type=mask_type,
         index_n_heads=index_n_heads,
         index_head_dim=index_head_dim,
@@ -220,12 +210,8 @@ def _build_dsv32_layers(
         layers.append(
             TransformerBlockV32.Config(
                 attention=attn_cfg,
-                attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
-                ),
-                ffn_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT
-                ),
+                attention_norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
+                ffn_norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
             )
@@ -246,26 +232,16 @@ def _extend_dsv32_layers_with_mtp(
     ``mtp_layer_id >= n_dense_layers`` by construction).
     """
     moe_layer = next((l for l in reversed(layers) if l.moe is not None), None)
-    assert (
-        moe_layer is not None
-    ), "_extend_dsv32_layers_with_mtp requires at least one MoE layer template"
+    assert moe_layer is not None, "_extend_dsv32_layers_with_mtp requires at least one MoE layer template"
     attn = moe_layer.attention
     moe = moe_layer.moe
 
     moe_hidden_dim = moe.experts.hidden_dim
-    num_shared_experts = (
-        moe.shared_experts.w1.out_features // moe_hidden_dim
-        if moe.shared_experts is not None
-        else 0
-    )
+    num_shared_experts = moe.shared_experts.w1.out_features // moe_hidden_dim if moe.shared_experts is not None else 0
     # ``dense_hidden_dim`` only affects dense layers, which we slice away
     # below — but pass a real value so the registry helper doesn't trip.
     dense_layer = next((l for l in layers if l.feed_forward is not None), None)
-    dense_hidden_dim = (
-        dense_layer.feed_forward.w1.out_features
-        if dense_layer is not None
-        else moe_hidden_dim
-    )
+    dense_hidden_dim = dense_layer.feed_forward.w1.out_features if dense_layer is not None else moe_hidden_dim
 
     n_main = len(layers)
     all_layers = _build_dsv32_layers(
@@ -352,9 +328,7 @@ def _make_dsv32_model_config(
     return DeepSeekV32ModelNpu.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
+        tok_embeddings=Embedding.Config(num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT),
         norm=RMSNorm.Config(normalized_shape=dim, eps=norm_eps, param_init=_NORM_INIT),
         output=Linear.Config(
             in_features=dim,

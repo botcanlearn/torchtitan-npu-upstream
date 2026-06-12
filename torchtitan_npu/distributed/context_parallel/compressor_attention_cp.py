@@ -40,11 +40,7 @@ class _WindowExchange(torch.autograd.Function):
         world_size = group.size()
 
         send_buf = tensor[:, -window:].contiguous()
-        recv_buf = (
-            torch.empty_like(send_buf)
-            if rank > 0
-            else torch.empty(0, device=tensor.device)
-        )
+        recv_buf = torch.empty_like(send_buf) if rank > 0 else torch.empty(0, device=tensor.device)
 
         ctx.rank = rank
         ctx.world_size = world_size
@@ -104,12 +100,8 @@ class _WindowExchange(torch.autograd.Function):
         return grad_output, None, None
 
 
-def _allgather_seq(
-    tensor: torch.Tensor, mesh: DeviceMesh, seq_dim: int = 1
-) -> torch.Tensor:
-    gathered = ft_c.all_gather_tensor_autograd(
-        tensor.contiguous(), gather_dim=seq_dim, group=mesh.get_group()
-    )
+def _allgather_seq(tensor: torch.Tensor, mesh: DeviceMesh, seq_dim: int = 1) -> torch.Tensor:
+    gathered = ft_c.all_gather_tensor_autograd(tensor.contiguous(), gather_dim=seq_dim, group=mesh.get_group())
     if isinstance(gathered, ft_c.AsyncCollectiveTensor):
         # NOTE: Do NOT call gathered.wait(), as it returns inner elem tensor
         # which was detached by the autograd boundary (_wrap_tensor_autograd
@@ -136,12 +128,8 @@ class CompressorAttentionCP(ParallelStyle):
         self.compress_ratio = compress_ratio
         self.window = max(compress_ratio, 128)
 
-    def _apply(
-        self, module: torch.nn.Module, device_mesh: DeviceMesh
-    ) -> torch.nn.Module:
-        module.register_forward_pre_hook(
-            partial(self._pre_hook, mesh=device_mesh), with_kwargs=True
-        )
+    def _apply(self, module: torch.nn.Module, device_mesh: DeviceMesh) -> torch.nn.Module:
+        module.register_forward_pre_hook(partial(self._pre_hook, mesh=device_mesh), with_kwargs=True)
         module.register_forward_hook(partial(self._post_hook, mesh=device_mesh))
         return module
 
@@ -167,9 +155,7 @@ class CompressorAttentionCP(ParallelStyle):
         # NOTE: Current CP scheme does NOT support any load-balancing (e.g. head-tail rearrangement).
         start = max(0, rank * local_s - W) if rank > 0 else 0
         end = (rank + 1) * local_s
-        kwargs["positions"] = torch.arange(
-            start, end, dtype=torch.int32, device=x.device
-        ).unsqueeze(0)
+        kwargs["positions"] = torch.arange(start, end, dtype=torch.int32, device=x.device).unsqueeze(0)
 
         return (x, freqs_cis, hadamard_mat), kwargs
 
@@ -218,9 +204,7 @@ class CompressorAttentionCP(ParallelStyle):
             k_indexer = k_indexer[:, :slice_blocks]
 
         if kv.size(1) < target_ori_len:
-            kv = torch.nn.functional.pad(
-                kv, (0, 0) * (kv.ndim - 2) + (target_ori_len - kv.size(1), 0)
-            )
+            kv = torch.nn.functional.pad(kv, (0, 0) * (kv.ndim - 2) + (target_ori_len - kv.size(1), 0))
 
         return q, kv, kv_compress, q_indexer, k_indexer, weights
 

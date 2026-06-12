@@ -9,18 +9,17 @@ Registers NPU (PrivateUse1) kernels for fused all-gather+matmul and
 matmul+reduce-scatter, and installs the corresponding Inductor FX inserters.
 """
 
-from functools import lru_cache
+from functools import cache
 
 import torch
 import torch.distributed as dist
 import torch.distributed.distributed_c10d as c10d
-
 import torch_npu
 from torch.distributed import _symmetric_memory
 from torchtitan.distributed import tensor_parallel as _tp_mod
 
 
-@lru_cache(maxsize=None)
+@cache
 def _get_hccl_comm_name(group_name: str) -> str | None:
     if not dist.is_initialized():
         return None
@@ -51,7 +50,7 @@ def _npu_kernel_fused_all_gather_matmul(
     shard_flat = shard_moved.flatten(0, -2)
 
     def unflatten(t: torch.Tensor) -> torch.Tensor:
-        new_shape = [world_size] + leading_dims_before_flat + [t.shape[-1]]
+        new_shape = [world_size, *leading_dims_before_flat, t.shape[-1]]
         t = t.view(*new_shape).flatten(0, 1).movedim(0, gather_dim)
         return t
 
@@ -72,15 +71,11 @@ def _npu_kernel_fused_all_gather_matmul(
     outputs.append(matmul_output)
     left_gathered = gathered_left
     if left_gathered is None and len(Bs) > 1:
-        raise RuntimeError(
-            "[Async-TP] expected gathered left from npu_all_gather_base_mm for multiple Bs"
-        )
+        raise RuntimeError("[Async-TP] expected gathered left from npu_all_gather_base_mm for multiple Bs")
     for B in Bs[1:]:
         outputs.append(torch.matmul(left_gathered, B))
 
-    left_out = (
-        unflatten(left_gathered) if (return_A and left_gathered is not None) else None
-    )
+    left_out = unflatten(left_gathered) if (return_A and left_gathered is not None) else None
     return left_out, [unflatten(out) for out in outputs]
 
 
@@ -100,9 +95,7 @@ def _npu_kernel_fused_matmul_reduce_scatter(
     A_flat = A_moved.flatten(0, -2)
 
     hcom = _get_hccl_comm_name(group_name)
-    result = torch_npu.npu_mm_reduce_scatter_base(
-        A_flat, B, hcom, world_size, reduce_op="sum"
-    )
+    result = torch_npu.npu_mm_reduce_scatter_base(A_flat, B, hcom, world_size, reduce_op="sum")
 
     out_M = leading_dims_before_flat[0] // world_size
     if A.dim() > 2:

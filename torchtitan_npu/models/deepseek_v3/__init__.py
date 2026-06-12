@@ -9,11 +9,11 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
 from torchtitan.models.deepseek_v3 import (
-    _build_dsv3_layers,
     _EMBEDDING_INIT,
     _NORM_INIT,
-    _output_linear_init,
     DeepSeekV3StateDictAdapter,
+    _build_dsv3_layers,
+    _output_linear_init,
 )
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -70,9 +70,7 @@ def _make_dsv3_model_config(
     return DeepSeekV3ModelNpu.Config(
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
+        tok_embeddings=Embedding.Config(num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT),
         norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
         output=Linear.Config(
             in_features=dim,
@@ -181,11 +179,7 @@ deepseekv3_configs = {
 
 def model_registry(flavor: str) -> ModelSpec:
     model_config = deepseekv3_configs[flavor]()
-    adapter_cls = (
-        DeepSeek16BStateDictAdapterNpu
-        if flavor == "16B"
-        else DeepSeekV3StateDictAdapter
-    )
+    adapter_cls = DeepSeek16BStateDictAdapterNpu if flavor == "16B" else DeepSeekV3StateDictAdapter
     return ModelSpec(
         name="deepseek_v3",
         flavor=flavor,

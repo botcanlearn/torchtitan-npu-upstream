@@ -26,9 +26,9 @@ import torch.nn as nn
 
 from tests.conftest import assert_tensor_finite
 from tests.smoke_tests.model_parallel._multi_rank import (
+    MULTI_RANK_AVAILABLE,
     FourRankMultiRankTestBase,
     mark_multi_rank_nightly,
-    MULTI_RANK_AVAILABLE,
     with_comms,
 )
 from tests.testing.parallel_dims import (
@@ -47,7 +47,7 @@ def _build_parallel_dims(*, cp=1, tp=1, ep=1, world_size=1):
 
 def _assert_mesh_partition(device_type, mesh_dim_names, shard_dim_name, tensor_shape):
     from torch.distributed.device_mesh import init_device_mesh
-    from torch.distributed.tensor import distribute_tensor, Shard
+    from torch.distributed.tensor import Shard, distribute_tensor
 
     mesh = init_device_mesh(device_type, (2, 2), mesh_dim_names=mesh_dim_names)
     shard_mesh = mesh[shard_dim_name]

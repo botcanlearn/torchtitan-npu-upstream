@@ -29,7 +29,7 @@ def _apply_patches():
 
     from .patches.optimizer.optimizer_selector import (
         patch_npu_optimizer_framework,
-    )  # noqa: F401 # usort:skip
+    )  # usort:skip
 
     patch_npu_optimizer_framework()
 
@@ -51,8 +51,7 @@ def _apply_patches():
     from .converters import quant_converter  # noqa: F401
 
     # module injection: register NPU-only model variants
-    from .models import deepseek_v32, deepseek_v4, vlm  # noqa: F401
-
+    from .models import deepseek_v4, deepseek_v32, vlm
     from .patches.distributed import cp_shard_mask, utils  # noqa: F401
 
     # patching step timing

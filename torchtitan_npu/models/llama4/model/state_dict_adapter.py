@@ -7,7 +7,6 @@
 from typing import Any
 
 import torch.distributed.checkpoint as dcp
-
 from torchtitan.models.llama4 import Llama4StateDictAdapter
 
 from torchtitan_npu.tools.weight_utils import convert_expert_format
@@ -35,9 +34,7 @@ def dcp_load(
 
     if from_hf:
         hf_state_dict = self.sd_adapter.to_hf(state_dict)
-        hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-            checkpoint_id, from_quantized
-        )
+        hf_storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_id, from_quantized)
 
         dcp.load(
             hf_state_dict,
@@ -65,16 +62,9 @@ class Llama4StateDictAdapterNpu(Llama4StateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert loaded data to runtime format"""
-        filtered = {
-            k: v
-            for k, v in hf_state_dict.items()
-            if not k.endswith(".weight_scale_inv")
-        }
+        filtered = {k: v for k, v in hf_state_dict.items() if not k.endswith(".weight_scale_inv")}
 
-        if self._input_format == "hf":
-            state_dict = super().from_hf(filtered)
-        else:
-            state_dict = filtered
+        state_dict = super().from_hf(filtered) if self._input_format == "hf" else filtered
         target = "gmm" if self.use_gmm else "standard"
         state_dict = convert_expert_format(state_dict, target)
 

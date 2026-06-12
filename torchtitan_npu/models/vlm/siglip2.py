@@ -10,7 +10,6 @@ from dataclasses import dataclass
 import einops as E
 import torch
 import torch.nn.functional as F
-
 from torchtitan.experiments.vlm.model import siglip2 as upstream_siglip2
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -19,9 +18,9 @@ from torchtitan.models.common.attention import (
 from torchtitan.protocols.module import Module, ModuleDict
 
 from torchtitan_npu.models.multimodal import (
+    DenseMaskSDPA,
     build_config,
     config_to_dict,
-    DenseMaskSDPA,
     require_config,
 )
 
@@ -32,9 +31,7 @@ def resize_positional_embeddings_zero_padded(
     max_length: int,
 ) -> torch.Tensor:
     """Resize positional embeddings and leave padded image rows as zeros."""
-    resized_embeddings = pos_embeddings.new_zeros(
-        (spatial_shapes.shape[0], max_length, pos_embeddings.shape[-1])
-    )
+    resized_embeddings = pos_embeddings.new_zeros((spatial_shapes.shape[0], max_length, pos_embeddings.shape[-1]))
 
     pos_embedding_channels_first = E.rearrange(pos_embeddings, "h w d -> 1 d h w")
     shape_to_indices: dict[tuple[int, int], list[int]] = defaultdict(list)
@@ -52,9 +49,7 @@ def resize_positional_embeddings_zero_padded(
             align_corners=False,
             antialias=True,
         )
-        resized_embeddings[indices, : height * width] = E.rearrange(
-            resized_emb, "1 d h w -> (h w) d"
-        )
+        resized_embeddings[indices, : height * width] = E.rearrange(resized_emb, "1 d h w -> (h w) d")
 
     return resized_embeddings
 
@@ -69,9 +64,7 @@ class VisionEmbeddingsNpu(upstream_siglip2.VisionEmbeddings):
     ) -> torch.Tensor:
         patch_embeddings = self.patch_embedding(pixels)
 
-        pos_embeddings = self.position_embedding.weight.reshape(
-            self.n_pos_embs, self.n_pos_embs, -1
-        )
+        pos_embeddings = self.position_embedding.weight.reshape(self.n_pos_embs, self.n_pos_embs, -1)
         spatial_h = E.reduce(grid_hw[:, :, 0], "n l -> n", reduction="max") + 1
         spatial_w = E.reduce(grid_hw[:, :, 1], "n l -> n", reduction="max") + 1
         spatial_shapes = torch.stack([spatial_h, spatial_w], dim=-1).long()
@@ -134,15 +127,9 @@ class VisionTransformerLayerNpu(upstream_siglip2.TransformerLayer):
         # which builds FlexAttention before we replace it. Build the same layer
         # fields manually and use VisionAttentionNpu directly.
         Module.__init__(self)
-        self.layer_norm1 = upstream_siglip2.LayerNorm(
-            config.dim, eps=config.layer_norm_eps
-        )
-        self.self_attn = VisionAttentionNpu(
-            require_config(config.self_attn, VisionAttentionNpu.Config, "self_attn")
-        )
-        self.layer_norm2 = upstream_siglip2.LayerNorm(
-            config.dim, eps=config.layer_norm_eps
-        )
+        self.layer_norm1 = upstream_siglip2.LayerNorm(config.dim, eps=config.layer_norm_eps)
+        self.self_attn = VisionAttentionNpu(require_config(config.self_attn, VisionAttentionNpu.Config, "self_attn"))
+        self.layer_norm2 = upstream_siglip2.LayerNorm(config.dim, eps=config.layer_norm_eps)
         self.mlp = upstream_siglip2.FeedForward(config.mlp)
 
 
@@ -170,9 +157,7 @@ class VisionTransformerNpu(upstream_siglip2.VisionTransformer):
                     f"layers[{i}]",
                 )
             )
-        self.post_layernorm = upstream_siglip2.LayerNorm(
-            config.dim, eps=config.layer_norm_eps
-        )
+        self.post_layernorm = upstream_siglip2.LayerNorm(config.dim, eps=config.layer_norm_eps)
 
 
 def to_npu_vision_embeddings_config(

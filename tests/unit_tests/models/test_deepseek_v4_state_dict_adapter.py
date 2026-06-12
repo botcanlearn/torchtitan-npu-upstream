@@ -40,17 +40,11 @@ def _load_dsv4_adapter_class():
     npu_root = repo_root / "torchtitan_npu"
     _ensure_package_stub("torchtitan_npu", npu_root)
     _ensure_package_stub("torchtitan_npu.models", npu_root / "models")
-    _ensure_package_stub(
-        "torchtitan_npu.models.deepseek_v4", npu_root / "models" / "deepseek_v4"
-    )
+    _ensure_package_stub("torchtitan_npu.models.deepseek_v4", npu_root / "models" / "deepseek_v4")
     _ensure_package_stub("torchtitan_npu.tools", npu_root / "tools")
 
-    _load_module(
-        "torchtitan_npu.tools.weight_utils", npu_root / "tools" / "weight_utils.py"
-    )
-    module = _load_module(
-        module_name, npu_root / "models" / "deepseek_v4" / "state_dict_adapter.py"
-    )
+    _load_module("torchtitan_npu.tools.weight_utils", npu_root / "tools" / "weight_utils.py")
+    module = _load_module(module_name, npu_root / "models" / "deepseek_v4" / "state_dict_adapter.py")
     return module.DeepSeekV4StateDictAdapter
 
 
@@ -107,30 +101,14 @@ def test_mtp_mapping_round_trip_preserves_each_mtp_layer_index():
 
     to_hf_dict = adapter.to_hf_mtp(from_hf_dict)
     assert set(to_hf_dict.keys()) == set(hf_input_dict.keys())
-    assert torch.equal(
-        to_hf_dict["mtp.0.enorm.weight"], hf_input_dict["mtp.0.enorm.weight"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.1.hnorm.weight"], hf_input_dict["mtp.1.hnorm.weight"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.0.e_proj.weight"], hf_input_dict["mtp.0.e_proj.weight"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.1.h_proj.weight"], hf_input_dict["mtp.1.h_proj.weight"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.0.norm.weight"], hf_input_dict["mtp.0.norm.weight"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.1.hc_head_fn"], hf_input_dict["mtp.1.hc_head_fn"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.0.hc_head_base"], hf_input_dict["mtp.0.hc_head_base"]
-    )
-    assert torch.equal(
-        to_hf_dict["mtp.1.hc_head_scale"], hf_input_dict["mtp.1.hc_head_scale"]
-    )
+    assert torch.equal(to_hf_dict["mtp.0.enorm.weight"], hf_input_dict["mtp.0.enorm.weight"])
+    assert torch.equal(to_hf_dict["mtp.1.hnorm.weight"], hf_input_dict["mtp.1.hnorm.weight"])
+    assert torch.equal(to_hf_dict["mtp.0.e_proj.weight"], hf_input_dict["mtp.0.e_proj.weight"])
+    assert torch.equal(to_hf_dict["mtp.1.h_proj.weight"], hf_input_dict["mtp.1.h_proj.weight"])
+    assert torch.equal(to_hf_dict["mtp.0.norm.weight"], hf_input_dict["mtp.0.norm.weight"])
+    assert torch.equal(to_hf_dict["mtp.1.hc_head_fn"], hf_input_dict["mtp.1.hc_head_fn"])
+    assert torch.equal(to_hf_dict["mtp.0.hc_head_base"], hf_input_dict["mtp.0.hc_head_base"])
+    assert torch.equal(to_hf_dict["mtp.1.hc_head_scale"], hf_input_dict["mtp.1.hc_head_scale"])
 
 
 def test_split_w13_for_mapping_preserves_values_instead_of_placeholders():

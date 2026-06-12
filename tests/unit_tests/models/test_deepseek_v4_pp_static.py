@@ -10,7 +10,6 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DSV4_DIR = REPO_ROOT / "torchtitan_npu" / "models" / "deepseek_v4"
 
@@ -32,11 +31,7 @@ def _class_methods(path: Path, class_name: str) -> set[str]:
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == class_name:
-            return {
-                item.name
-                for item in node.body
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-            }
+            return {item.name for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))}
     raise AssertionError(f"{class_name} not found in {path}")
 
 
@@ -63,21 +58,13 @@ class DeepSeekV4PipelineStaticTest(unittest.TestCase):
 
         config = deepseekv4_configs["smoketest"]()
         with self.assertRaisesRegex(NotImplementedError, r"MTP \+ PP"):
-            config.update_from_config(
-                trainer_config=_trainer_config(
-                    num_mtp_modules=1, pipeline_parallel_degree=2
-                )
-            )
+            config.update_from_config(trainer_config=_trainer_config(num_mtp_modules=1, pipeline_parallel_degree=2))
 
     def test_update_from_config_allows_mtp_without_pp(self):
         from torchtitan_npu.models.deepseek_v4 import deepseekv4_configs
 
         config = deepseekv4_configs["smoketest"]()
-        config.update_from_config(
-            trainer_config=_trainer_config(
-                num_mtp_modules=1, pipeline_parallel_degree=1
-            )
-        )
+        config.update_from_config(trainer_config=_trainer_config(num_mtp_modules=1, pipeline_parallel_degree=1))
         self.assertEqual(config.num_mtp_modules, 1)
 
     def test_model_forward_declares_pp_sidecar_protocol(self):
@@ -89,7 +76,7 @@ class DeepSeekV4PipelineStaticTest(unittest.TestCase):
         self.assertIn("input_ids = self._normalize_pp_input_ids(input_ids)", source)
         self.assertIn("if self.output is None:", source)
         self.assertIn("return h", source)
-        self.assertIn("layer_id = cast(Any, layer).layer_id", source)
+        self.assertIn('layer_id = cast("Any", layer).layer_id', source)
         self.assertIn("if layer_id < self.model_args.n_layers", source)
 
     def test_parallelize_uses_dynamic_root_plan_for_pp_chunks(self):
@@ -104,7 +91,7 @@ class DeepSeekV4PipelineStaticTest(unittest.TestCase):
         self.assertIn("hc_head_plan = HcHeadParallelStyle()", source)
         self.assertIn("use_local_input=False", source)
         self.assertIn("apply_distributed_indexer_loss_tracking(", source)
-        self.assertIn("model_args = cast(Any, model).model_args", source)
+        self.assertIn('model_args = cast("Any", model).model_args', source)
         self.assertIn(
             "parallel_dims, model_args.n_layers, model_args.compress_ratios",
             source,
@@ -129,9 +116,7 @@ class DeepSeekV4PipelineStaticTest(unittest.TestCase):
         self.assertNotIn("self._partition_fn", source)
 
     def test_pipelining_patch_injects_deepseek_v4_input_ids(self):
-        patch_source = (
-            REPO_ROOT / "torchtitan_npu" / "patches" / "torch" / "pipelining.py"
-        ).read_text()
+        patch_source = (REPO_ROOT / "torchtitan_npu" / "patches" / "torch" / "pipelining.py").read_text()
         pipeline_source = (DSV4_DIR / "pipeline_parallel.py").read_text()
 
         self.assertIn(
@@ -162,9 +147,7 @@ class DeepSeekV4PipelineStaticTest(unittest.TestCase):
         self.assertIn('kwargs["device_type"] = "npu"', patch_source)
 
     def test_dsa_tracker_records_zero_based_layers_and_distributed_reduce(self):
-        common_source = (
-            REPO_ROOT / "torchtitan_npu" / "models" / "common" / "dsa_indexer_loss.py"
-        ).read_text()
+        common_source = (REPO_ROOT / "torchtitan_npu" / "models" / "common" / "dsa_indexer_loss.py").read_text()
         parallelize_source = (DSV4_DIR / "parallelize.py").read_text()
 
         self.assertIn('tracker["values"][layer_number]', common_source)

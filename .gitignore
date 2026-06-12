@@ -39,9 +39,6 @@ Sessionx.vim
 *~
 .~lock.*
 
-# macOS dir files
-.DS_Store
-
 # torchtitan
 /torchtitan
 # agent
@@ -64,3 +61,10 @@ AGENTS.md
 .agents/skills/gitcode-pr
 .agents/skills/gitcode-pipeline
 .agents/skills/cann-operator-env-config
+
+oat_reports/
+
+log/
+
+UT_Test*.txt
+CANN*.xlsx

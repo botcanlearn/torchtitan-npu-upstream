@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 
 from torchtitan_npu.patches.optimizer.swap_optimizer import (
-    swap_optimizer_step,
     SwapOptimizersContainer,
+    swap_optimizer_step,
 )
 
 pytestmark = pytest.mark.smoke
@@ -71,9 +71,7 @@ def test_swap_optimizer_step_updates_model_parameters(npu_device):
     container = _swap_optimizer_config().build(model_parts=[model])
     optimizer = container.optimizers[0]
     tracked_param = optimizer.param_groups[0]["params"][0]
-    baseline_state = SwapOptimizersContainer.param_to_cpu_states_map[tracked_param][
-        "exp_avg"
-    ].clone()
+    baseline_state = SwapOptimizersContainer.param_to_cpu_states_map[tracked_param]["exp_avg"].clone()
 
     x = torch.randn(4, 8, device=npu_device)
     loss = model(x).sum()
@@ -84,8 +82,6 @@ def test_swap_optimizer_step_updates_model_parameters(npu_device):
         torch.npu.synchronize()
 
     assert "step" in optimizer.param_groups[0]
-    updated_state = SwapOptimizersContainer.param_to_cpu_states_map[tracked_param][
-        "exp_avg"
-    ]
+    updated_state = SwapOptimizersContainer.param_to_cpu_states_map[tracked_param]["exp_avg"]
     assert torch.count_nonzero(updated_state).item() > 0
     assert not torch.equal(updated_state, baseline_state)

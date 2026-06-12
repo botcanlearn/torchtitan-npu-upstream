@@ -103,9 +103,7 @@ def maybe_enable_profiling(
             torch_npu.profiler.ProfilerActivity.CPU,
             torch_npu.profiler.ProfilerActivity.NPU,
         ],
-        schedule=torch_npu.profiler.schedule(
-            wait=wait, warmup=warmup, active=active, repeat=repeat
-        ),
+        schedule=torch_npu.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=repeat),
         on_trace_ready=on_trace_ready_handler,
         record_shapes=profiling_config.profile_record_shapes,
         profile_memory=profiling_config.profile_with_memory,
@@ -120,9 +118,5 @@ def maybe_enable_profiling(
 # at import time (Trainer imports `from torchtitan.tools.profiling import
 # maybe_enable_profiling`, so its local name is fixed when trainer.py is first
 # imported — patching only the source module would not propagate).
-upstream_profiling.maybe_enable_profiling = (
-    maybe_enable_profiling  # pyrefly: ignore [bad-assignment]
-)
-trainer_module.maybe_enable_profiling = (
-    maybe_enable_profiling  # pyrefly: ignore [bad-assignment]
-)
+upstream_profiling.maybe_enable_profiling = maybe_enable_profiling  # pyrefly: ignore [bad-assignment]
+trainer_module.maybe_enable_profiling = maybe_enable_profiling  # pyrefly: ignore [bad-assignment]

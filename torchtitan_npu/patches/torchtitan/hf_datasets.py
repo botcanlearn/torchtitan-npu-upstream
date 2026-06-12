@@ -22,9 +22,9 @@ import functools
 from datasets import load_dataset
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.hf_datasets.text_datasets import (
-    _process_c4_text,
     DATASETS,
     HuggingFaceTextDataLoader,
+    _process_c4_text,
 )
 from torchtitan.tools.logging import init_logger, logger
 
@@ -59,14 +59,10 @@ for name, ds_config in new_datasets.items():
         logger.warning("[Dataset Patch] Dataset %s already exists, skip adding", name)
 
 if added_datasets:
-    logger.info(
-        f"[Dataset Patch] Added {len(added_datasets)} datasets in total: {added_datasets}"
-    )
+    logger.info(f"[Dataset Patch] Added {len(added_datasets)} datasets in total: {added_datasets}")
     logger.info(f"[Dataset Patch] All supported datasets now: {list(DATASETS.keys())}")
 else:
-    logger.info(
-        f"[Dataset Patch] No new datasets to add, current supported: {list(DATASETS.keys())}"
-    )
+    logger.info(f"[Dataset Patch] No new datasets to add, current supported: {list(DATASETS.keys())}")
 
 
 _MTP_ALLOWED_MODELS = frozenset({"deepseek_v32", "deepseek_v4"})

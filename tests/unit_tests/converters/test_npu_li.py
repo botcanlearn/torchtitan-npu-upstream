@@ -25,15 +25,9 @@ class TestLIKernel(unittest.TestCase):
         self.dim = 64
         self.topk = 128
         self.ratio = 4
-        self.q_indexer = torch.randn(
-            self.batch_size, self.seq_len_q, self.dim, dtype=torch.float32
-        )
-        self.k_indexer = torch.randn(
-            self.batch_size, self.seq_len_k, self.dim, dtype=torch.float32
-        )
-        self.weights = torch.randn(
-            self.batch_size, self.seq_len_q, self.dim, dtype=torch.float32
-        )
+        self.q_indexer = torch.randn(self.batch_size, self.seq_len_q, self.dim, dtype=torch.float32)
+        self.k_indexer = torch.randn(self.batch_size, self.seq_len_k, self.dim, dtype=torch.float32)
+        self.weights = torch.randn(self.batch_size, self.seq_len_q, self.dim, dtype=torch.float32)
 
         self.mock_parent = MagicMock()
         self.mock_parent.index_topk = self.topk
@@ -44,13 +38,9 @@ class TestLIKernel(unittest.TestCase):
         mock_li_op = _mock_fused_fn
         mock_li_op.reset_mock()
 
-        mock_indices = torch.full(
-            (self.batch_size, self.seq_len_q, 1, self.topk), 10, dtype=torch.int32
-        )
+        mock_indices = torch.full((self.batch_size, self.seq_len_q, 1, self.topk), 10, dtype=torch.int32)
         mock_indices[0, 0, 0, 0] = -1
-        mock_scores = torch.randn(
-            self.batch_size, self.seq_len_q, 1, self.topk, dtype=torch.bfloat16
-        )
+        mock_scores = torch.randn(self.batch_size, self.seq_len_q, 1, self.topk, dtype=torch.bfloat16)
 
         mock_li_op.return_value = (mock_indices, mock_scores)
 
@@ -74,9 +64,7 @@ class TestLIKernel(unittest.TestCase):
 
         self.assertEqual(args[1].ndim, 4)
 
-        self.assertEqual(
-            res_indices.shape, (self.batch_size, self.seq_len_q, self.topk)
-        )
+        self.assertEqual(res_indices.shape, (self.batch_size, self.seq_len_q, self.topk))
         self.assertEqual(res_scores.shape, (self.batch_size, self.seq_len_q, self.topk))
 
         self.assertEqual(res_indices[0, 0, 0].item(), -1)

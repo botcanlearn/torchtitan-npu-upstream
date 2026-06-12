@@ -24,18 +24,14 @@ def test_rms_norm_forward(npu_device):
     seq_len = 128
     hidden_dim = 64
 
-    x = stable_randn(
-        batch_size, seq_len, hidden_dim, dtype=torch.float32, device=npu_device
-    )
+    x = stable_randn(batch_size, seq_len, hidden_dim, dtype=torch.float32, device=npu_device)
     weight = torch.ones(hidden_dim, dtype=torch.float32, device=npu_device)
     eps = 1e-6
 
     try:
         output = torch_npu.npu_rms_norm(x, weight, eps)[0]
 
-        assert (
-            output.shape == x.shape
-        ), f"Output shape {output.shape} should match input {x.shape}"
+        assert output.shape == x.shape, f"Output shape {output.shape} should match input {x.shape}"
         assert_tensor_finite(output, "Output should be finite")
 
     except AttributeError:
@@ -49,9 +45,7 @@ def test_rms_norm_eps(npu_device):
     seq_len = 64
     hidden_dim = 32
 
-    x = stable_randn(
-        batch_size, seq_len, hidden_dim, dtype=torch.float32, device=npu_device
-    )
+    x = stable_randn(batch_size, seq_len, hidden_dim, dtype=torch.float32, device=npu_device)
     weight = torch.ones(hidden_dim, dtype=torch.float32, device=npu_device)
 
     eps_values = [1e-5, 1e-6, 1e-8]
@@ -80,9 +74,7 @@ def test_rms_norm_gradient(npu_device):
         device=npu_device,
         requires_grad=True,
     )
-    weight = torch.ones(
-        hidden_dim, dtype=torch.float32, device=npu_device, requires_grad=True
-    )
+    weight = torch.ones(hidden_dim, dtype=torch.float32, device=npu_device, requires_grad=True)
     eps = 1e-6
 
     try:

@@ -56,16 +56,9 @@ def hc_split_sinkhorn_torch(weight, branch_alpha, branch_beta, cfg):
     h_pre, h_post, h_res = weight.split([ns, ns, ns * ns], dim=-1)
     h_res = h_res.unflatten(-1, (ns, ns))
 
-    h_pre = (
-        F.sigmoid(h_pre * branch_alpha[0] + branch_beta[:ns].unsqueeze(0).unsqueeze(0))
-        + cfg.eps
-    )
-    h_post = 2 * F.sigmoid(
-        h_post * branch_alpha[1] + branch_beta[ns : 2 * ns].unsqueeze(0).unsqueeze(0)
-    )
-    h_res = h_res * branch_alpha[2] + branch_beta[2 * ns :].view(ns, ns).unsqueeze(
-        0
-    ).unsqueeze(0)
+    h_pre = F.sigmoid(h_pre * branch_alpha[0] + branch_beta[:ns].unsqueeze(0).unsqueeze(0)) + cfg.eps
+    h_post = 2 * F.sigmoid(h_post * branch_alpha[1] + branch_beta[ns: 2 * ns].unsqueeze(0).unsqueeze(0))
+    h_res = h_res * branch_alpha[2] + branch_beta[2 * ns:].view(ns, ns).unsqueeze(0).unsqueeze(0)
 
     h_res = sinkhorn_knopps(h_res, cfg.sinkhorn_iters, cfg.eps)
     return h_pre, h_post, h_res
@@ -89,9 +82,7 @@ class MhcModule(torch.nn.Module):
         x_normed = x * rsqrt * norm_gamma if self.cfg.mhc_use_gamma else x * rsqrt
 
         weight = torch.matmul(x_normed, phi_weight)
-        h_pre, h_post, h_res = hc_split_sinkhorn_torch(
-            weight, branch_alpha, branch_beta, self.cfg
-        )
+        h_pre, h_post, h_res = hc_split_sinkhorn_torch(weight, branch_alpha, branch_beta, self.cfg)
         y = torch.sum(
             h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(self.cfg.num_stream, -1)),
             dim=2,
@@ -102,10 +93,7 @@ class MhcModule(torch.nn.Module):
         y = (
             h_post.unsqueeze(-1) * x.unsqueeze(-2)
             + torch.sum(
-                h_res.unsqueeze(-1)
-                * residual.unflatten(dim=-1, sizes=(self.cfg.num_stream, -1)).unsqueeze(
-                    -2
-                ),
+                h_res.unsqueeze(-1) * residual.unflatten(dim=-1, sizes=(self.cfg.num_stream, -1)).unsqueeze(-2),
                 dim=2,
             )
         ).flatten(2)
@@ -126,21 +114,14 @@ class MhcModule(torch.nn.Module):
             weight = torch.matmul(x * rsqrt * norm_gamma, phi_weight)
         else:
             weight = torch.matmul(x, phi_weight) * rsqrt
-        h_pre = (
-            F.sigmoid(weight * branch_alpha + branch_beta.unsqueeze(0).unsqueeze(0))
-            + cfg.eps
-        )
-        y = torch.sum(
-            h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(cfg.num_stream, -1)), dim=2
-        )
+        h_pre = F.sigmoid(weight * branch_alpha + branch_beta.unsqueeze(0).unsqueeze(0)) + cfg.eps
+        y = torch.sum(h_pre.unsqueeze(-1) * x.unflatten(dim=-1, sizes=(cfg.num_stream, -1)), dim=2)
         return y.to(dtype)
 
 
 def _assert_grads_close(pairs, rtol=_RTOL, atol=_ATOL):
     for torch_grad, triton_grad in pairs:
-        torch.testing.assert_close(
-            torch_grad, triton_grad, rtol=rtol, atol=atol, equal_nan=True
-        )
+        torch.testing.assert_close(torch_grad, triton_grad, rtol=rtol, atol=atol, equal_nan=True)
 
 
 def _backward_and_assert(out_torch, out_triton, grad_pairs):
@@ -157,17 +138,11 @@ def _clone_pair(tensor):
 
 def _make_pre_only_inputs(device, n, d):
     hidden = n * d
-    x = torch.rand(
-        1, 1024, hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
-    weight = torch.rand(
-        n, hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
+    x = torch.rand(1, 1024, hidden, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.rand(n, hidden, device=device, dtype=torch.float32, requires_grad=True)
     branch_alpha = torch.rand(1, device=device, dtype=torch.float32, requires_grad=True)
     branch_beta = torch.rand(n, device=device, dtype=torch.float32, requires_grad=True)
-    norm_gamma = torch.rand(
-        hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
+    norm_gamma = torch.rand(hidden, device=device, dtype=torch.float32, requires_grad=True)
     x_t, x_i = _clone_pair(x)
     w_t, w_i = _clone_pair(weight)
     a_t, a_i = _clone_pair(branch_alpha)
@@ -178,19 +153,11 @@ def _make_pre_only_inputs(device, n, d):
 
 def _make_pre_inputs(device, n, d):
     hidden = n * d
-    x = torch.rand(
-        1, 1024, hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
-    weight = torch.rand(
-        n * n + 2 * n, hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
+    x = torch.rand(1, 1024, hidden, device=device, dtype=torch.float32, requires_grad=True)
+    weight = torch.rand(n * n + 2 * n, hidden, device=device, dtype=torch.float32, requires_grad=True)
     branch_alpha = torch.rand(3, device=device, dtype=torch.float32, requires_grad=True)
-    branch_beta = torch.rand(
-        2 * n + n * n, device=device, dtype=torch.float32, requires_grad=True
-    )
-    norm_gamma = torch.rand(
-        hidden, device=device, dtype=torch.float32, requires_grad=True
-    )
+    branch_beta = torch.rand(2 * n + n * n, device=device, dtype=torch.float32, requires_grad=True)
+    norm_gamma = torch.rand(hidden, device=device, dtype=torch.float32, requires_grad=True)
     x_t, x_i = _clone_pair(x)
     w_t, w_i = _clone_pair(weight)
     a_t, a_i = _clone_pair(branch_alpha)
@@ -206,9 +173,7 @@ def test_add_triton(npu_device):
     out_triton = add_fwd(x, y)
     out_torch = x + y
 
-    torch.testing.assert_close(
-        out_triton, out_torch, rtol=1e-3, atol=1e-3, equal_nan=True
-    )
+    torch.testing.assert_close(out_triton, out_torch, rtol=1e-3, atol=1e-3, equal_nan=True)
     assert_tensor_finite(out_triton, "add_fwd output should be finite")
 
 
@@ -231,9 +196,7 @@ def test_mhc_pre_only_triton(npu_device):
         n,
     )
 
-    torch.testing.assert_close(
-        y_torch, y_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True
-    )
+    torch.testing.assert_close(y_torch, y_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True)
     assert_tensor_finite(y_triton, "MHCPreOnlyTriton output should be finite")
 
     _backward_and_assert(
@@ -256,31 +219,21 @@ def test_mhc_post_triton(npu_device):
     x = torch.rand(b, s, d, device=npu_device, dtype=torch.float32, requires_grad=True)
     x_torch = x.clone().detach().requires_grad_(True)
     x_triton = x.clone().detach().requires_grad_(True)
-    residual = torch.rand(
-        b, s, n * d, device=npu_device, dtype=torch.float32, requires_grad=True
-    )
+    residual = torch.rand(b, s, n * d, device=npu_device, dtype=torch.float32, requires_grad=True)
     residual_torch = residual.clone().detach().requires_grad_(True)
     residual_triton = residual.clone().detach().requires_grad_(True)
-    h_post = torch.rand(
-        b, s, n, device=npu_device, dtype=torch.float32, requires_grad=True
-    )
+    h_post = torch.rand(b, s, n, device=npu_device, dtype=torch.float32, requires_grad=True)
     h_post_torch = h_post.clone().detach().requires_grad_(True)
     h_post_triton = h_post.clone().detach().requires_grad_(True)
-    h_res = torch.rand(
-        b, s, n, n, device=npu_device, dtype=torch.float32, requires_grad=True
-    )
+    h_res = torch.rand(b, s, n, n, device=npu_device, dtype=torch.float32, requires_grad=True)
     h_res_torch = h_res.clone().detach().requires_grad_(True)
     h_res_triton = h_res.clone().detach().requires_grad_(True)
 
     mhc_torch = MhcModule()
     result_torch = mhc_torch.hc_post(x_torch, residual_torch, h_post_torch, h_res_torch)
-    result_triton = MHCPostTriton.apply(
-        x_triton, residual_triton, h_post_triton, h_res_triton
-    )
+    result_triton = MHCPostTriton.apply(x_triton, residual_triton, h_post_triton, h_res_triton)
 
-    torch.testing.assert_close(
-        result_torch, result_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True
-    )
+    torch.testing.assert_close(result_torch, result_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True)
     assert_tensor_finite(result_triton, "MHCPostTriton output should be finite")
 
     result_torch.sum().backward()
@@ -314,15 +267,9 @@ def test_mhc_pre_triton(npu_device):
         1e-6,
     )
 
-    torch.testing.assert_close(
-        y_torch, y_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True
-    )
-    torch.testing.assert_close(
-        h_post_torch, h_post_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True
-    )
-    torch.testing.assert_close(
-        h_res_torch, h_res_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True
-    )
+    torch.testing.assert_close(y_torch, y_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True)
+    torch.testing.assert_close(h_post_torch, h_post_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True)
+    torch.testing.assert_close(h_res_torch, h_res_triton, rtol=_RTOL, atol=_ATOL, equal_nan=True)
     assert_tensor_finite(y_triton, "MHCPreTriton output should be finite")
 
     _backward_and_assert(

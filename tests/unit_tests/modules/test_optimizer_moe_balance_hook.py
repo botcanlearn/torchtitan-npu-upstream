@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import torch
 from torch import nn
-
 from torchtitan.components import optimizer as optimizer_module
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
@@ -73,6 +72,4 @@ def test_moe_balance_hook_skips_moe_without_expert_bias_attribute():
 
     assert torch.allclose(model_part.layers["0"].moe.tokens_per_expert, torch.zeros(2))
     assert torch.allclose(model_part.layers["1"].moe.tokens_per_expert, torch.zeros(2))
-    assert torch.allclose(
-        model_part.layers["0"].moe.expert_bias, torch.tensor([0.001, -0.001])
-    )
+    assert torch.allclose(model_part.layers["0"].moe.expert_bias, torch.tensor([0.001, -0.001]))

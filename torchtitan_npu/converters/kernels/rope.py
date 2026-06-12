@@ -10,7 +10,6 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 import torch_npu
-
 from torchtitan.models.common.rope import (
     _maybe_wrap_positions,
     _reshape_for_broadcast_cos_sin,
@@ -23,9 +22,7 @@ from ..registry import register_model_converter
 logger = logging.getLogger(__name__)
 
 
-def _complex_to_interleaved_cos_sin(
-    freqs_cis: torch.Tensor, dtype: torch.dtype
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _complex_to_interleaved_cos_sin(freqs_cis: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     cos = freqs_cis.real.repeat_interleave(2, dim=-1)
     sin = freqs_cis.imag.repeat_interleave(2, dim=-1)
     cos = cos.unsqueeze(0).unsqueeze(2).to(dtype)
@@ -59,9 +56,7 @@ def _select_freqs_cis(
     return torch.view_as_complex(gathered.contiguous())
 
 
-def _wrap_dtensor_like(
-    out_local: torch.Tensor, original_tensor: torch.Tensor, is_dt: bool
-) -> torch.Tensor:
+def _wrap_dtensor_like(out_local: torch.Tensor, original_tensor: torch.Tensor, is_dt: bool) -> torch.Tensor:
     if is_dt:
         from torch.distributed.tensor import DTensor
 
@@ -86,9 +81,7 @@ def npu_apply_rotary_emb_cos_sin(
     xk_is_dt = isinstance(xk, DTensor)
     xq_local = xq.to_local() if xq_is_dt else xq
     xk_local = xk.to_local() if xk_is_dt else xk
-    rope_cache_local = (
-        rope_cache.to_local() if isinstance(rope_cache, DTensor) else rope_cache
-    )
+    rope_cache_local = rope_cache.to_local() if isinstance(rope_cache, DTensor) else rope_cache
 
     positions = _maybe_wrap_positions(positions, xq)
     if isinstance(positions, DTensor):
@@ -124,9 +117,7 @@ def npu_apply_rotary_emb_complex(
     xk_is_dt = isinstance(xk, DTensor)
     xq_local = xq.to_local() if xq_is_dt else xq
     xk_local = xk.to_local() if xk_is_dt else xk
-    freqs_cis_local = (
-        freqs_cis.to_local() if isinstance(freqs_cis, DTensor) else freqs_cis
-    )
+    freqs_cis_local = freqs_cis.to_local() if isinstance(freqs_cis, DTensor) else freqs_cis
 
     positions = _maybe_wrap_positions(positions, xq)
     if isinstance(positions, DTensor):
@@ -138,12 +129,10 @@ def npu_apply_rotary_emb_complex(
     xk_f = xk_local.float()
 
     cos, sin = _complex_to_interleaved_cos_sin(freqs_cis, xq_f.dtype)
-    xq_out = torch_npu.npu_rotary_mul(xq_f, cos, sin, rotary_mode="interleave").type_as(
-        xq_local
+    xq_out = torch_npu.npu_rotary_mul(xq_f, cos, sin, rotary_mode="interleave").type_as(xq_local)
+    xk_out = torch_npu.npu_rotary_mul(xk_f, cos.to(xk_f.dtype), sin.to(xk_f.dtype), rotary_mode="interleave").type_as(
+        xk_local
     )
-    xk_out = torch_npu.npu_rotary_mul(
-        xk_f, cos.to(xk_f.dtype), sin.to(xk_f.dtype), rotary_mode="interleave"
-    ).type_as(xk_local)
 
     xq_out = _wrap_dtensor_like(xq_out, xq, xq_is_dt)
     xk_out = _wrap_dtensor_like(xk_out, xk, xk_is_dt)
@@ -160,9 +149,7 @@ def npu_apply_rotary_emb_single_complex(
 
     is_dtensor = isinstance(x, DTensor)
     x_local = x.to_local() if is_dtensor else x
-    freqs_cis_local = (
-        freqs_cis.to_local() if isinstance(freqs_cis, DTensor) else freqs_cis
-    )
+    freqs_cis_local = freqs_cis.to_local() if isinstance(freqs_cis, DTensor) else freqs_cis
 
     positions = _maybe_wrap_positions(positions, x)
     if isinstance(positions, DTensor):
@@ -179,9 +166,7 @@ def npu_apply_rotary_emb_single_complex(
     if is_dtensor:
         from torch.distributed.tensor import DTensor as _DTensor
 
-        y = _DTensor.from_local(
-            y, device_mesh=x.device_mesh, placements=x.placements, run_check=False
-        )
+        y = _DTensor.from_local(y, device_mesh=x.device_mesh, placements=x.placements, run_check=False)
 
     return y
 
@@ -231,10 +216,7 @@ def apply_reshape_for_broadcast_complex_patch() -> None:
     if getattr(mod, target) is reshape_for_broadcast_complex:
         return
     setattr(mod, target, reshape_for_broadcast_complex)
-    logger.info(
-        f"RoPEKernel: replaced {_UPSTREAM_ROPE_MODULE}.{target} "
-        f"with {reshape_for_broadcast_complex.__name__}"
-    )
+    logger.info(f"RoPEKernel: replaced {_UPSTREAM_ROPE_MODULE}.{target} with {reshape_for_broadcast_complex.__name__}")
 
 
 class NpuRoPEConverter(ModelCustomConverter):
@@ -243,10 +225,7 @@ class NpuRoPEConverter(ModelCustomConverter):
         mod = sys.modules.get(_UPSTREAM_ROPE_MODULE)
         if mod is not None and hasattr(mod, func_name):
             setattr(mod, func_name, impl)
-            logger.info(
-                f"RoPEKernel: replaced {_UPSTREAM_ROPE_MODULE}.{func_name} "
-                f"with {impl.__name__}"
-            )
+            logger.info(f"RoPEKernel: replaced {_UPSTREAM_ROPE_MODULE}.{func_name} with {impl.__name__}")
 
         # from X import Y creates a local binding that setattr won't update;
         # replace_functions walks sys.modules to patch those local bindings.
@@ -254,9 +233,7 @@ class NpuRoPEConverter(ModelCustomConverter):
         # common/__init__.py), so we must search torchtitan.models.common in
         # addition to the model's own package.
         count = replace_functions(func_name, impl, model=model)
-        upstream_pkg = model.__class__.__module__.replace(
-            "torchtitan_npu", "torchtitan"
-        )
+        upstream_pkg = model.__class__.__module__.replace("torchtitan_npu", "torchtitan")
         if upstream_pkg != model.__class__.__module__:
             count += replace_functions(func_name, impl, package=upstream_pkg)
 
@@ -265,10 +242,7 @@ class NpuRoPEConverter(ModelCustomConverter):
             count += replace_functions(func_name, impl, package=common_pkg)
 
         if count == 0 and mod is None:
-            logger.warning(
-                f"RoPEKernel: function {func_name!r} not found, "
-                f"skipping replacement"
-            )
+            logger.warning(f"RoPEKernel: function {func_name!r} not found, skipping replacement")
         return count
 
     def convert(self, model: nn.Module):

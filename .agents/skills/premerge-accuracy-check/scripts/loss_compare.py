@@ -34,18 +34,14 @@ import numpy as np
 matplotlib.use("Agg")
 
 # Import the log parser from the training-log-visualization skill
-_VIZ_DIR = (
-    Path(__file__).resolve().parents[2] / "training-log-visualization" / "scripts"
-)
+_VIZ_DIR = Path(__file__).resolve().parents[2] / "training-log-visualization" / "scripts"
 sys.path.insert(0, str(_VIZ_DIR))
-from train_log_plot import read_training_metrics  # noqa: E402
+from train_log_plot import read_training_metrics
 
 METRIC_KEYS = ["loss", "grad_norm"]
 METRIC_LABELS = {"loss": "Loss", "grad_norm": "Grad Norm"}
 DEFAULT_TOLERANCE = 1e-5
-NONFINITE_METRIC_RE = re.compile(
-    r"\b(?:loss|grad_norm):\s*[-+]?(?:nan|inf)\b", re.IGNORECASE
-)
+NONFINITE_METRIC_RE = re.compile(r"\b(?:loss|grad_norm):\s*[-+]?(?:nan|inf)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -111,9 +107,7 @@ def compare_runs(baseline: RunMetrics, candidate: RunMetrics) -> CompareResult:
         ad = abs(bv - cv)
         abs_diffs.append(ad)
         denom = max(abs(bv), abs(cv))
-        rel_diffs.append(
-            ad / denom if denom > 0 else (0.0 if ad == 0 else float("inf"))
-        )
+        rel_diffs.append(ad / denom if denom > 0 else (0.0 if ad == 0 else float("inf")))
 
     return CompareResult(
         metric=baseline.metric,
@@ -143,12 +137,8 @@ def find_nonfinite_metric_lines(log_path: str) -> list[int]:
     return lines
 
 
-def first_exceedance(
-    result: CompareResult, tolerance: float
-) -> tuple[int | None, float | None, float | None]:
-    for step, abs_diff, rel_diff in zip(
-        result.common_steps, result.abs_diffs, result.rel_diffs
-    ):
+def first_exceedance(result: CompareResult, tolerance: float) -> tuple[int | None, float | None, float | None]:
+    for step, abs_diff, rel_diff in zip(result.common_steps, result.abs_diffs, result.rel_diffs):
         if abs_diff > tolerance:
             return step, abs_diff, rel_diff
     return None, None, None
@@ -163,15 +153,9 @@ def plot_overlay(
     tolerance: float,
 ) -> str:
     label = METRIC_LABELS.get(result.metric, result.metric)
-    fig, (ax_top, ax_bottom) = plt.subplots(
-        2, 1, figsize=(7, 4.5), gridspec_kw={"height_ratios": [3, 1]}, sharex=True
-    )
-    ax_top.plot(
-        baseline.steps, baseline.values, "b-", lw=1.0, alpha=0.8, label="Baseline"
-    )
-    ax_top.plot(
-        candidate.steps, candidate.values, "r--", lw=1.0, alpha=0.8, label="Candidate"
-    )
+    fig, (ax_top, ax_bottom) = plt.subplots(2, 1, figsize=(7, 4.5), gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+    ax_top.plot(baseline.steps, baseline.values, "b-", lw=1.0, alpha=0.8, label="Baseline")
+    ax_top.plot(candidate.steps, candidate.values, "r--", lw=1.0, alpha=0.8, label="Candidate")
     ax_top.set_ylabel(label)
     ax_top.legend(loc="upper right")
     ax_top.set_title(f"{label} — Baseline vs Candidate")
@@ -182,9 +166,7 @@ def plot_overlay(
     ax_bottom.set_xlabel("Step")
     ax_bottom.set_yscale("log")
     ax_bottom.grid(True, alpha=0.3)
-    ax_bottom.axhline(
-        y=tolerance, color="r", linestyle=":", alpha=0.5, label=f"{tolerance:.0e}"
-    )
+    ax_bottom.axhline(y=tolerance, color="r", linestyle=":", alpha=0.5, label=f"{tolerance:.0e}")
     ax_bottom.legend(loc="upper right")
 
     plt.tight_layout()
@@ -260,10 +242,7 @@ def generate_json(
 
 def check_pass(results: list[CompareResult], tolerance: float) -> bool:
     for r in results:
-        if (
-            r.nans_in_baseline != r.nans_in_candidate
-            or r.infs_in_baseline != r.infs_in_candidate
-        ):
+        if r.nans_in_baseline != r.nans_in_candidate or r.infs_in_baseline != r.infs_in_candidate:
             return False
         if r.max_abs_diff > tolerance:
             return False
@@ -272,9 +251,9 @@ def check_pass(results: list[CompareResult], tolerance: float) -> bool:
 
 def print_summary(results: list[CompareResult], tolerance: float, passed: bool) -> None:
     status = "PASS" if passed else "FAIL"
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Numerical Stability Report — {status}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Tolerance: {tolerance:.1e}\n")
     for r in results:
         print(f"  [{r.metric}]")
@@ -284,41 +263,26 @@ def print_summary(results: list[CompareResult], tolerance: float, passed: bool) 
         print(f"    Max relative diff:  {r.max_rel_diff:.6e}")
         print(f"    Mean relative diff: {r.mean_rel_diff:.6e}")
         if r.nans_in_baseline or r.nans_in_candidate:
-            print(
-                f"    NaN: baseline={r.nans_in_baseline}, candidate={r.nans_in_candidate}"
-            )
+            print(f"    NaN: baseline={r.nans_in_baseline}, candidate={r.nans_in_candidate}")
         if r.infs_in_baseline or r.infs_in_candidate:
-            print(
-                f"    Inf: baseline={r.infs_in_baseline}, candidate={r.infs_in_candidate}"
-            )
+            print(f"    Inf: baseline={r.infs_in_baseline}, candidate={r.infs_in_candidate}")
         print()
     if not passed:
         print("  FAILURE: Differences exceed tolerance.")
         for r in results:
             if r.max_abs_diff > tolerance:
                 idx = r.abs_diffs.index(r.max_abs_diff)
-                print(
-                    f"    [{r.metric}] max diff at step {r.common_steps[idx]}: "
-                    f"{r.max_abs_diff:.6e}"
-                )
+                print(f"    [{r.metric}] max diff at step {r.common_steps[idx]}: {r.max_abs_diff:.6e}")
     else:
         print("  SUCCESS: All metrics within tolerance.")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Compare loss/grad_norm between two training stdout logs"
-    )
-    parser.add_argument(
-        "--baseline", required=True, help="Baseline training log file (.log)"
-    )
-    parser.add_argument(
-        "--candidate", required=True, help="Candidate training log file (.log)"
-    )
-    parser.add_argument(
-        "--output", default=os.getcwd(), help="Output directory for reports"
-    )
+    parser = argparse.ArgumentParser(description="Compare loss/grad_norm between two training stdout logs")
+    parser.add_argument("--baseline", required=True, help="Baseline training log file (.log)")
+    parser.add_argument("--candidate", required=True, help="Candidate training log file (.log)")
+    parser.add_argument("--output", default=os.getcwd(), help="Output directory for reports")
     parser.add_argument(
         "--tolerance",
         type=float,
@@ -346,10 +310,7 @@ def main():
         if line_numbers:
             shown = ", ".join(str(n) for n in line_numbers[:10])
             suffix = " ..." if len(line_numbers) > 10 else ""
-            print(
-                f"ERROR: {label} log contains NaN/Inf metric values at lines: "
-                f"{shown}{suffix}"
-            )
+            print(f"ERROR: {label} log contains NaN/Inf metric values at lines: {shown}{suffix}")
             has_nonfinite_metrics = True
     if has_nonfinite_metrics:
         sys.exit(1)
@@ -388,9 +349,7 @@ def main():
 
     print(f"CSV:  {generate_csv(results, args.output)}")
     passed = check_pass(results, args.tolerance)
-    print(
-        f"JSON: {generate_json(results, args.baseline, args.candidate, args.output, passed, args.tolerance)}"
-    )
+    print(f"JSON: {generate_json(results, args.baseline, args.candidate, args.output, passed, args.tolerance)}")
     print_summary(results, args.tolerance, passed)
     sys.exit(0 if passed else 1)
 

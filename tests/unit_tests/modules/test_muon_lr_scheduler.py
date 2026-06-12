@@ -5,12 +5,11 @@
 
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
-
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 
 from torchtitan_npu.patches.optimizer.muon_optimizer import (
-    build_muon_hybrid_optimizers,
     MuonLRSchedulersContainer,
+    build_muon_hybrid_optimizers,
 )
 
 
@@ -39,9 +38,7 @@ def test_creates_two_independent_schedulers(muon_optimizer_config, lr_scheduler_
 def test_muon_and_adamw_have_different_base_lr(muon_optimizer_config):
     """Verify Muon and AdamW have different base_lr when muon_adjust_lr_fn='original'."""
     model = nn.Linear(8, 8)
-    opt_config = muon_optimizer_config(
-        lr=2.2e-4, muon_lr=1e-2, muon_adjust_lr_fn="original"
-    ).to_namespace()
+    opt_config = muon_optimizer_config(lr=2.2e-4, muon_lr=1e-2, muon_adjust_lr_fn="original").to_namespace()
     optimizers = build_muon_hybrid_optimizers([model], opt_config, None)
 
     muon_lr = optimizers.muon_optimizer.param_groups[0]["lr"]
@@ -68,9 +65,7 @@ def test_step_updates_both_schedulers(muon_optimizer_config):
     schedulers.step()
 
     for i, s in enumerate(schedulers.schedulers):
-        assert (
-            s.last_epoch == initial_epochs[i] + 1
-        ), f"Scheduler {i} should have incremented last_epoch"
+        assert s.last_epoch == initial_epochs[i] + 1, f"Scheduler {i} should have incremented last_epoch"
 
 
 def test_state_dict_saves_first_scheduler_only(muon_optimizer_config):
@@ -112,9 +107,7 @@ def test_load_state_dict_applies_to_both_schedulers(muon_optimizer_config):
     assert schedulers.schedulers[1].last_epoch == 10
 
 
-def test_checkpoint_preserves_independent_base_lr(
-    muon_optimizer_config, lr_scheduler_config
-):
+def test_checkpoint_preserves_independent_base_lr(muon_optimizer_config, lr_scheduler_config):
     """
     Verify checkpoint save/load preserves independent base_lr.
     """
@@ -169,29 +162,25 @@ def test_checkpoint_preserves_independent_base_lr(
     muon_scheduler2 = schedulers2.schedulers[0]
     adamw_scheduler2 = schedulers2.schedulers[1]
 
-    assert (
-        muon_scheduler2.base_lrs[0] == initial_muon_base_lr
-    ), f"Muon base_lr not preserved: {muon_scheduler2.base_lrs[0]} != {initial_muon_base_lr}"
-    assert (
-        adamw_scheduler2.base_lrs[0] == initial_adamw_base_lr
-    ), f"AdamW base_lr not preserved: {adamw_scheduler2.base_lrs[0]} != {initial_adamw_base_lr}"
+    assert muon_scheduler2.base_lrs[0] == initial_muon_base_lr, (
+        f"Muon base_lr not preserved: {muon_scheduler2.base_lrs[0]} != {initial_muon_base_lr}"
+    )
+    assert adamw_scheduler2.base_lrs[0] == initial_adamw_base_lr, (
+        f"AdamW base_lr not preserved: {adamw_scheduler2.base_lrs[0]} != {initial_adamw_base_lr}"
+    )
 
-    assert (
-        schedulers2.schedulers[0].last_epoch == 6
-    ), f"Muon scheduler last_epoch should be 6, got {schedulers2.schedulers[0].last_epoch}"
-    assert (
-        schedulers2.schedulers[1].last_epoch == 6
-    ), f"AdamW scheduler last_epoch should be 6, got {schedulers2.schedulers[1].last_epoch}"
+    assert schedulers2.schedulers[0].last_epoch == 6, (
+        f"Muon scheduler last_epoch should be 6, got {schedulers2.schedulers[0].last_epoch}"
+    )
+    assert schedulers2.schedulers[1].last_epoch == 6, (
+        f"AdamW scheduler last_epoch should be 6, got {schedulers2.schedulers[1].last_epoch}"
+    )
 
 
-def test_match_rms_adamw_uses_standard_scheduler(
-    muon_optimizer_config, lr_scheduler_config
-):
+def test_match_rms_adamw_uses_standard_scheduler(muon_optimizer_config, lr_scheduler_config):
     """Verify match_rms_adamw mode uses standard LRSchedulersContainer."""
     model = nn.Linear(8, 8)
-    opt_config = muon_optimizer_config(
-        muon_adjust_lr_fn="match_rms_adamw"
-    ).to_namespace()
+    opt_config = muon_optimizer_config(muon_adjust_lr_fn="match_rms_adamw").to_namespace()
     optimizers = build_muon_hybrid_optimizers([model], opt_config, None)
 
     lr_config = lr_scheduler_config()
@@ -204,6 +193,6 @@ def test_match_rms_adamw_uses_standard_scheduler(
         min_lr_factor=lr_config.min_lr_factor,
     ).build(optimizers=optimizers, training_steps=training_steps)
 
-    assert isinstance(
-        schedulers, LRSchedulersContainer
-    ), f"match_rms_adamw should use standard LRSchedulersContainer, got {type(schedulers)}"
+    assert isinstance(schedulers, LRSchedulersContainer), (
+        f"match_rms_adamw should use standard LRSchedulersContainer, got {type(schedulers)}"
+    )

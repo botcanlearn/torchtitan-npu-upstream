@@ -18,21 +18,17 @@ def convert_expert_format(state_dict: dict, target_format: str) -> dict:
     current_format = detect_expert_format(state_dict)
 
     if target_format == "gmm" and current_format == "standard":
-        logger.info(
-            f"Converting expert format for save: {current_format} -> {target_format}"
-        )
+        logger.info(f"Converting expert format for save: {current_format} -> {target_format}")
         return fuse_experts(state_dict)
     elif target_format == "standard" and current_format == "gmm":
-        logger.info(
-            f"Converting expert format for save: {current_format} -> {target_format}"
-        )
+        logger.info(f"Converting expert format for save: {current_format} -> {target_format}")
         return split_fused_experts(state_dict)
     return state_dict
 
 
 def detect_expert_format(state_dict: dict) -> str:
     """Detecting the expert format of state_dict"""
-    for key in state_dict.keys():
+    for key in state_dict:
         if ".experts." in key or "experts." in key:
             if ".gate_up_proj." in key or ".w13." in key or key.endswith(".w13"):
                 return "gmm"
@@ -59,7 +55,6 @@ def fuse_experts(state_dict: dict) -> dict:
 
     for key in sorted_keys:
         if ".moe.experts.w1" in key:
-
             layer_key = key.replace(".w1", "")
             pending[layer_key] = state_dict.pop(key)
 
@@ -69,10 +64,7 @@ def fuse_experts(state_dict: dict) -> dict:
                 w1 = pending.pop(layer_key)
                 w3 = state_dict.pop(key)
 
-                if isinstance(w1, DTensor):
-                    fused = _fuse_w1_w3_dtensor(w1, w3)
-                else:
-                    fused = _fuse_w1_w3_tensor(w1, w3)
+                fused = _fuse_w1_w3_dtensor(w1, w3) if isinstance(w1, DTensor) else _fuse_w1_w3_tensor(w1, w3)
 
                 state_dict[layer_key + ".w13"] = fused
 
@@ -83,7 +75,7 @@ def split_fused_experts(state_dict: dict) -> dict:
     """GMM -> Standard : w13 to w1, w3"""
     result = state_dict
 
-    w13_keys = [k for k in state_dict.keys() if ".moe.experts.w13" in k]
+    w13_keys = [k for k in state_dict if ".moe.experts.w13" in k]
 
     for key in w13_keys:
         value = state_dict[key]
@@ -108,15 +100,9 @@ def split_fused_experts(state_dict: dict) -> dict:
 def _fuse_w1_w3_dtensor(w1: DTensor, w3: DTensor) -> DTensor:
     """fuse DTensor via cpu"""
     if w1.device_mesh != w3.device_mesh:
-        raise ValueError(
-            f"w1 and w3 must have the same device_mesh. "
-            f"Got w1: {w1.device_mesh}, w3: {w3.device_mesh}"
-        )
+        raise ValueError(f"w1 and w3 must have the same device_mesh. Got w1: {w1.device_mesh}, w3: {w3.device_mesh}")
     if w1.placements != w3.placements:
-        raise ValueError(
-            f"w1 and w3 must have the same placements. "
-            f"Got w1: {w1.placements}, w3: {w3.placements}"
-        )
+        raise ValueError(f"w1 and w3 must have the same placements. Got w1: {w1.placements}, w3: {w3.placements}")
     device_mesh = w1.device_mesh
     placements = w1.placements
 
@@ -147,9 +133,7 @@ def _fuse_w1_w3_dtensor(w1: DTensor, w3: DTensor) -> DTensor:
     fused_local = fused_cpu.to(device=device, dtype=dtype)
     del fused_cpu
 
-    return DTensor.from_local(
-        fused_local, device_mesh=device_mesh, placements=placements
-    )
+    return DTensor.from_local(fused_local, device_mesh=device_mesh, placements=placements)
 
 
 def _fuse_w1_w3_tensor(w1: torch.Tensor, w3: torch.Tensor) -> torch.Tensor:
@@ -186,12 +170,8 @@ def _split_w13_dtensor(w13: DTensor) -> tuple[DTensor, DTensor]:
     local_w3 = chunks[1]
     del chunks, local_tensor
     return (
-        DTensor.from_local(
-            local_w1, device_mesh=w13.device_mesh, placements=w13.placements
-        ),
-        DTensor.from_local(
-            local_w3, device_mesh=w13.device_mesh, placements=w13.placements
-        ),
+        DTensor.from_local(local_w1, device_mesh=w13.device_mesh, placements=w13.placements),
+        DTensor.from_local(local_w3, device_mesh=w13.device_mesh, placements=w13.placements),
     )
 
 

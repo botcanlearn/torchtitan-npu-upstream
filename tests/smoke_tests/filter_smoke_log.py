@@ -14,7 +14,6 @@ import logging
 import re
 import sys
 
-
 _MODEL_CONFIG_START = re.compile(r"Building .* with \{$")
 _LOGGER = logging.getLogger("smoke_log_filter")
 
@@ -64,9 +63,7 @@ def main() -> None:
 
         if "Model definition after conversion:" in line:
             prefix = line.split("Model definition after conversion:", 1)[0]
-            _emit(
-                f"{prefix}Model definition after conversion suppressed for smoke test."
-            )
+            _emit(f"{prefix}Model definition after conversion suppressed for smoke test.")
             skipping_model_definition = True
             seen_model_definition_body = False
             continue

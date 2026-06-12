@@ -17,7 +17,6 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
-
 from torch import Tensor
 from torch.distributed.tensor import DTensor
 from torch.nn.utils.clip_grad import _no_grad, _tensor_or_tensors
@@ -37,10 +36,7 @@ def group_dtensors_by_layout(dtensors):
     """
     groups = defaultdict(list)
     for dt in dtensors:
-        if not isinstance(dt, DTensor):
-            key = ("non_dtensor", None)
-        else:
-            key = (dt.device_mesh, tuple(dt.placements))
+        key = ("non_dtensor", None) if not isinstance(dt, DTensor) else (dt.device_mesh, tuple(dt.placements))
         groups[key].append(dt)
     return groups
 
@@ -49,10 +45,7 @@ def reduce_across_mesh(local_sum, mesh, placements):
     if not placements:
         return
     for mesh_dim, placement in enumerate(placements):
-        needs_reduce = (
-            hasattr(placement, "reduce_op")
-            or type(placement).__name__ in _REDUCE_PLACEMENT_NAMES
-        )
+        needs_reduce = hasattr(placement, "reduce_op") or type(placement).__name__ in _REDUCE_PLACEMENT_NAMES
         if not needs_reduce:
             continue
         pg = mesh.get_group(mesh_dim=mesh_dim)
@@ -72,10 +65,7 @@ def custom_total_norm(norms, norm_type, first_device):
         group_local_sum = torch.tensor(0.0, device=first_device, dtype=torch.float32)
         for t in tensors:
             t = t.to_local() if isinstance(t, DTensor) else t
-            group_local_sum += (
-                torch.linalg.vector_norm(t, ord=norm_type, dtype=torch.float32)
-                ** norm_type
-            )
+            group_local_sum += torch.linalg.vector_norm(t, ord=norm_type, dtype=torch.float32) ** norm_type
         reduce_across_mesh(group_local_sum, mesh, placements)
         global_total_sum += group_local_sum
 
@@ -111,18 +101,15 @@ def _get_total_norm(
     Returns:
         Total norm of the tensors (viewed as a single vector).
     """
-    if isinstance(tensors, torch.Tensor):
-        tensors = [tensors]
-    else:
-        tensors = list(tensors)
+    tensors = [tensors] if isinstance(tensors, torch.Tensor) else list(tensors)
     norm_type = float(norm_type)
     if len(tensors) == 0:
         return torch.tensor(0.0)
     first_device = tensors[0].device
-    grouped_tensors: dict[
-        tuple[torch.device, torch.dtype], tuple[list[list[Tensor]], list[int]]
-    ] = _group_tensors_by_device_and_dtype(  # pyrefly: ignore [bad-assignment]
-        [tensors]  # type: ignore[list-item]
+    grouped_tensors: dict[tuple[torch.device, torch.dtype], tuple[list[list[Tensor]], list[int]]] = (
+        _group_tensors_by_device_and_dtype(  # pyrefly: ignore [bad-assignment]
+            [tensors]  # type: ignore[list-item]
+        )
     )  # type: ignore[assignment]
 
     norms: list[Tensor] = []
@@ -132,22 +119,16 @@ def _get_total_norm(
         ):
             norms.extend(torch._foreach_norm(device_tensors, norm_type))
         elif foreach:
-            raise RuntimeError(
-                f"foreach=True was passed, but can't use the foreach API on {device.type} tensors"
-            )
+            raise RuntimeError(f"foreach=True was passed, but can't use the foreach API on {device.type} tensors")
         else:
-            norms.extend(
-                [torch.linalg.vector_norm(g, norm_type) for g in device_tensors]
-            )
+            norms.extend([torch.linalg.vector_norm(g, norm_type) for g in device_tensors])
 
     # Fallback to native execution for infinity norm.
     # The custom distributed reduction logic below assumes finite p-norms.
     # 1. Avoid overflow: The logic below uses `** norm_type` which crashes on `inf`.
     # 2. Avoid logic error: The logic below uses `SUM` reduction, but `L_inf` requires `MAX`.
     if math.isinf(norm_type):
-        total_norm = torch.linalg.vector_norm(
-            torch.stack([norm.to(first_device) for norm in norms]), norm_type
-        )
+        total_norm = torch.linalg.vector_norm(torch.stack([norm.to(first_device) for norm in norms]), norm_type)
     else:
         total_norm = custom_total_norm(norms, norm_type, first_device)
 

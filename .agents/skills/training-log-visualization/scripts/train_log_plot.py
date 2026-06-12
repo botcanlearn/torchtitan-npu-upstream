@@ -132,9 +132,7 @@ def read_training_metrics(log_path: str | Path) -> tuple[list[dict], list[str]]:
 
             if step in records_by_step:
                 duplicate_steps += 1
-                warnings.append(
-                    f"duplicate step {step} at line {line_no}, keep latest record"
-                )
+                warnings.append(f"duplicate step {step} at line {line_no}, keep latest record")
 
             records_by_step[step] = record
 
@@ -147,9 +145,7 @@ def read_training_metrics(log_path: str | Path) -> tuple[list[dict], list[str]]:
     return records, warnings
 
 
-def extract_metric_series(
-    records: list[dict], metric_key: str
-) -> tuple[list[int], list[float]]:
+def extract_metric_series(records: list[dict], metric_key: str) -> tuple[list[int], list[float]]:
     steps: list[int] = []
     values: list[float] = []
     for record in records:
@@ -161,9 +157,7 @@ def extract_metric_series(
     return steps, values
 
 
-def align_by_common_steps(
-    records_a: list[dict], records_b: list[dict]
-) -> AlignedRecords:
+def align_by_common_steps(records_a: list[dict], records_b: list[dict]) -> AlignedRecords:
     map_a = {int(record["step"]): record for record in records_a}
     map_b = {int(record["step"]): record for record in records_b}
 

@@ -28,9 +28,7 @@ def _with_deepseek_v4_pp_input_ids(trainer, result):
             input_ids = extra_input_ids
     if input_ids is None:
         if not isinstance(inputs, torch.Tensor) or inputs.ndim != 2:
-            raise RuntimeError(
-                "DeepSeekV4 PP input_ids injection expects inputs with shape [B, S]."
-            )
+            raise RuntimeError("DeepSeekV4 PP input_ids injection expects inputs with shape [B, S].")
         input_ids = inputs
 
     extra_kwargs["input_ids"] = input_ids.detach().long()

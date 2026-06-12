@@ -13,12 +13,14 @@ in a non-invasive way by monkey-patching the prepare_context_parallel_input func
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torchtitan.distributed.context_parallel as titan_cp
-from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.tools.logging import init_logger, logger
+
+if TYPE_CHECKING:
+    from torch.distributed.device_mesh import DeviceMesh
 
 init_logger()
 
@@ -28,7 +30,7 @@ _orig_prepare_cp_input = titan_cp.prepare_context_parallel_input
 _cached_num_mtp_modules = None
 
 
-def prepare_context_parallel_input(  # noqa: G.FNM.03
+def prepare_context_parallel_input(
     inputs: torch.Tensor,
     labels: torch.Tensor,
     extra_kwargs: dict[str, Any],
@@ -40,10 +42,7 @@ def prepare_context_parallel_input(  # noqa: G.FNM.03
 
     if _cached_num_mtp_modules is None:
         job_config = _find_job_config_from_stack()
-        if job_config is not None:
-            _cached_num_mtp_modules = getattr(job_config.training, "num_mtp_modules", 0)
-        else:
-            _cached_num_mtp_modules = 0
+        _cached_num_mtp_modules = getattr(job_config.training, "num_mtp_modules", 0) if job_config is not None else 0
 
     if _cached_num_mtp_modules > 0:
         return _mtp_prepare_cp_input(
@@ -56,9 +55,7 @@ def prepare_context_parallel_input(  # noqa: G.FNM.03
             load_balancer_type,
         )
 
-    return _orig_prepare_cp_input(
-        inputs, labels, extra_kwargs, cp_mesh, device, load_balancer_type
-    )
+    return _orig_prepare_cp_input(inputs, labels, extra_kwargs, cp_mesh, device, load_balancer_type)
 
 
 def _find_job_config_from_stack():
@@ -84,10 +81,7 @@ def _extract_job_config_from_frame(frame_info: inspect.FrameInfo) -> Any | None:
     return jc if jc is not None else None
 
 
-def _mtp_prepare_cp_input(
-    inputs, labels, extra_kwargs, cp_mesh, device, num_mtp_modules, load_balancer_type
-):
-
+def _mtp_prepare_cp_input(inputs, labels, extra_kwargs, cp_mesh, device, num_mtp_modules, load_balancer_type):
     attention_masks = extra_kwargs.get("attention_masks", None)
 
     main_inputs = inputs[:, :-num_mtp_modules]
@@ -95,17 +89,18 @@ def _mtp_prepare_cp_input(
     mtp_inputs = inputs[:, num_mtp_modules:]
     mtp_labels = labels[:, num_mtp_modules:]
 
-    positions = torch.arange(
-        0, main_inputs.shape[1], dtype=torch.int32, device=device
-    ).expand(main_inputs.shape)
+    positions = torch.arange(0, main_inputs.shape[1], dtype=torch.int32, device=device).expand(main_inputs.shape)
 
     (
-        main_inputs,
-        mtp_inputs,
-        main_labels,
-        mtp_labels,
-        positions,
-    ), attention_masks = titan_cp.cp_shard(
+        (
+            main_inputs,
+            mtp_inputs,
+            main_labels,
+            mtp_labels,
+            positions,
+        ),
+        attention_masks,
+    ) = titan_cp.cp_shard(
         cp_mesh,
         (main_inputs, mtp_inputs, main_labels, mtp_labels, positions),
         attention_masks,

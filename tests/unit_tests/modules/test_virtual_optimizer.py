@@ -12,12 +12,12 @@ import torch.distributed as dist
 from torch.distributed._tensor import DeviceMesh, DTensor, Replicate, Shard
 
 from torchtitan_npu.patches.optimizer.virtual_optimizer import (
+    VirtualAllocator,
+    VirtualOptimizersContainer,
     is_swap_tensor,
     patched_state_dict,
     unwrap_dtensor,
     virtual_optimizer_step_impl,
-    VirtualAllocator,
-    VirtualOptimizersContainer,
     wrap_like_param,
 )
 
@@ -72,9 +72,7 @@ def test_virtual_allocator_memory_logic():
     alloc = VirtualAllocator(pp_rank=0, pp_stages=2, virtual_optimizer_size=10.0)
     assert alloc.get_swap_memory_sizes() == [10.0, 10.0]
 
-    alloc_list = VirtualAllocator(
-        pp_rank=1, pp_stages=2, virtual_optimizer_size=[5.0, 15.0]
-    )
+    alloc_list = VirtualAllocator(pp_rank=1, pp_stages=2, virtual_optimizer_size=[5.0, 15.0])
     assert alloc_list.get_swap_memory_sizes() == [5.0, 15.0]
 
     p = torch.randn(2, 2)
@@ -92,9 +90,7 @@ def test_virtual_allocator_npu_swap(mock_npu):
     p = torch.randn(2, 2)
     alloc = VirtualAllocator(pp_rank=0, pp_stages=1, virtual_optimizer_size=1.0)
 
-    with patch(
-        "torchtitan_npu.patches.optimizer.virtual_optimizer.hasattr", return_value=True
-    ):
+    with patch("torchtitan_npu.patches.optimizer.virtual_optimizer.hasattr", return_value=True):
         res = alloc._get_swap_memory(p)
         assert getattr(res, "swap_tensor", False) is True
 

@@ -15,7 +15,6 @@ def _(
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-
     """
     Register torch_npu.npu_grouped_matmul as the PrivateUse1 (NPU) implementation for `aten::_grouped_mm`.
     """

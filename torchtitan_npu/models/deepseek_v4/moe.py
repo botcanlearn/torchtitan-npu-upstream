@@ -63,11 +63,7 @@ def _build_hash_routing_table(
     tid2eid = torch.empty((vocab_size, top_k), dtype=torch.long, device=device)
     for start in range(0, vocab_size, chunk_size):
         end = min(start + chunk_size, vocab_size)
-        tid2eid[start:end] = (
-            torch.rand((end - start, num_experts), device=device)
-            .topk(top_k, dim=-1)
-            .indices
-        )
+        tid2eid[start:end] = torch.rand((end - start, num_experts), device=device).topk(top_k, dim=-1).indices
     return tid2eid
 
 
@@ -121,9 +117,7 @@ class TokenChoiceTopKRouter(common_moe.TokenChoiceTopKRouter):
         if self.hash:
             self.register_buffer(
                 "tid2eid",
-                _build_hash_routing_table(
-                    self.vocab_size, self.num_experts, self.top_k
-                ),
+                _build_hash_routing_table(self.vocab_size, self.num_experts, self.top_k),
                 persistent=True,
             )
 
@@ -315,7 +309,6 @@ class MoE(Module):
                 if isinstance(m, nn.Linear) and m.weight is not None:
                     nn.init.trunc_normal_(m.weight, mean=0.0, std=init_std)
 
-    # pyrefly: ignore [bad-override]
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for the DeepSeek MoE module.
@@ -354,24 +347,16 @@ class MoE(Module):
         routed_input = x_flat[token_indices_experts_sorted]
 
         if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
+            routed_input = (routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
 
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
         # Shared expert
-        shared_output = (
-            self.shared_experts(x_flat) if self.shared_experts is not None else None
-        )
+        shared_output = self.shared_experts(x_flat) if self.shared_experts is not None else None
 
         if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
+            routed_output = (routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)).to(x.dtype)
 
         # Scatter-add each token's top_k expert outputs back to its position.
         out_experts = torch.zeros_like(x_flat)

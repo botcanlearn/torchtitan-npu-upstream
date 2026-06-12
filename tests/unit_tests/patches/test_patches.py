@@ -15,9 +15,7 @@ from torchtitan_npu.patches.torch import clip_grad
 
 
 @pytest.mark.parametrize("async_mode", ["disabled", "async", "async_with_pinned_mem"])
-def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(
-    monkeypatch, tmp_path, async_mode
-):
+def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(monkeypatch, tmp_path, async_mode):
     from torch.distributed.checkpoint.filesystem import FileSystemWriter
     from torchtitan.components.checkpoint import AsyncMode
 
@@ -53,9 +51,7 @@ def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(
     monkeypatch.setattr(checkpoint.dcp, "save", fake_dcp_save)
     monkeypatch.setattr(checkpoint.dcp, "async_save", fake_dcp_async_save)
 
-    result = checkpoint._patched_checkpoint_manager_dcp_save(
-        manager, {}, str(tmp_path / "checkpoint"), mode
-    )
+    result = checkpoint._patched_checkpoint_manager_dcp_save(manager, {}, str(tmp_path / "checkpoint"), mode)
     writer = captured["writer"]
 
     assert isinstance(writer, FileSystemWriter)
@@ -87,10 +83,7 @@ def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(
         assert result is async_response
         assert writer.per_thread_copy_ahead == 0
         assert captured["async_stager"] is stager
-        assert (
-            captured["kwargs"]["async_checkpointer_type"]
-            is checkpoint.AsyncCheckpointerType.PROCESS
-        )
+        assert captured["kwargs"]["async_checkpointer_type"] is checkpoint.AsyncCheckpointerType.PROCESS
 
 
 def test_register_quantize_module_handler_registers_handler():

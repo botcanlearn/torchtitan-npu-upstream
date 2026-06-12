@@ -12,8 +12,8 @@ from torch.distributed.tensor.parallel import parallelize_module
 from torchtitan_npu.converters import (
     ModelCustomConfig,
     ParallelizePlanUpdater,
-    registry,
     StateDictUpdater,
+    registry,
 )
 from torchtitan_npu.converters.framework.model_custom_config_converter import (
     ModelCustomConfigConverter,
@@ -57,9 +57,9 @@ class TestApplyParallelizePlanUpdater:
         def parallelize_fn(module, device_mesh, parallelize_plan):
             parallelize_fn_called.append(True)
             parallelize_module(module, device_mesh, parallelize_plan)
-            assert (
-                parallelize_plan.get("modified_by_updater") is True
-            ), "updater should have been called before parallelize_fn"
+            assert parallelize_plan.get("modified_by_updater") is True, (
+                "updater should have been called before parallelize_fn"
+            )
             return module
 
         apply_parallelize_plan_update(CustomParallelizePlanUpdater)
@@ -75,9 +75,7 @@ class TestApplyParallelizePlanUpdater:
                 parallelize_plan={"test": Mock()},
             )
 
-            assert (
-                "updater_update" in call_order
-            ), "ParallelizePlanUpdater.update should be called"
+            assert "updater_update" in call_order, "ParallelizePlanUpdater.update should be called"
             assert mock_parallelize_module.called, "parallelize_module should be called"
 
 
@@ -117,9 +115,7 @@ class TestApplyStateDictUpdateIntegration:
 
         apply_state_dict_update(CustomStateDictUpdater, train_spec)
 
-        assert (
-            train_spec.state_dict_adapter is not MockOriginalAdapter
-        ), "state_dict_adapter should be wrapped"
+        assert train_spec.state_dict_adapter is not MockOriginalAdapter, "state_dict_adapter should be wrapped"
 
         state_dict = {}
         adapter = train_spec.state_dict_adapter()
@@ -129,9 +125,7 @@ class TestApplyStateDictUpdateIntegration:
         assert "original_to_hf" in call_order, "original adapter.to_hf should be called"
         updater_to_hf_idx = call_order.index("updater_to_hf")
         original_to_hf_idx = call_order.index("original_to_hf")
-        assert (
-            updater_to_hf_idx < original_to_hf_idx
-        ), "updater.to_hf should be called BEFORE original adapter.to_hf"
+        assert updater_to_hf_idx < original_to_hf_idx, "updater.to_hf should be called BEFORE original adapter.to_hf"
 
         assert result_to_hf.get("updater_to_hf_applied") is True
         assert result_to_hf.get("original_to_hf_applied") is True
@@ -141,14 +135,12 @@ class TestApplyStateDictUpdateIntegration:
         result_from_hf = adapter.from_hf(state_dict)
 
         assert "updater_from_hf" in call_order, "updater.from_hf should be called"
-        assert (
-            "original_from_hf" in call_order
-        ), "original adapter.from_hf should be called"
+        assert "original_from_hf" in call_order, "original adapter.from_hf should be called"
         updater_from_hf_idx = call_order.index("updater_from_hf")
         original_from_hf_idx = call_order.index("original_from_hf")
-        assert (
-            original_from_hf_idx < updater_from_hf_idx
-        ), "updater.from_hf should be called AFTER original adapter.from_hf"
+        assert original_from_hf_idx < updater_from_hf_idx, (
+            "updater.from_hf should be called AFTER original adapter.from_hf"
+        )
 
         assert result_from_hf.get("updater_from_hf_applied") is True
         assert result_from_hf.get("original_from_hf_applied") is True

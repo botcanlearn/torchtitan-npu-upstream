@@ -36,7 +36,6 @@ import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List  # noqa: PEA001
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +89,7 @@ def _build_cmd(
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
-    env_vars = " ".join(
-        ["NGPU=" + str(test_flavor.ngpu), "LOG_RANK=" + all_ranks]
-        + list(test_flavor.env_vars)
-    )
+    env_vars = " ".join(["NGPU=" + str(test_flavor.ngpu), "LOG_RANK=" + all_ranks] + list(test_flavor.env_vars))
     cmd = env_vars + " bash ./scripts/run_train.sh"
 
     # Append dump_folder
@@ -135,13 +131,11 @@ def run_single_test(
         result = _run_cmd(cmd)
         if result.returncode != 0:
             raise RuntimeError(
-                f"\nFailed test flavor: {test_flavor.test_descr}.\n"
-                f"Command: {cmd}\n"
-                f"stderr: {result.stderr}\n"
+                f"\nFailed test flavor: {test_flavor.test_descr}.\nCommand: {cmd}\nstderr: {result.stderr}\n"
             )
 
 
-def run_tests(args, test_list: List[OverrideDefinitions]):
+def run_tests(args, test_list: list[OverrideDefinitions]):
     """Run all integration tests."""
     ran_any_test = False
     failed_tests: list[tuple[str, str]] = []
@@ -171,12 +165,8 @@ def run_tests(args, test_list: List[OverrideDefinitions]):
             ran_any_test = True
 
     if failed_tests:
-        failure_summary = "\n".join(
-            f"  {name}: {error}" for name, error in failed_tests
-        )
-        raise RuntimeError(
-            f"{len(failed_tests)} integration test(s) failed:\n{failure_summary}"
-        )
+        failure_summary = "\n".join(f"  {name}: {error}" for name, error in failed_tests)
+        raise RuntimeError(f"{len(failed_tests)} integration test(s) failed:\n{failure_summary}")
 
     if not ran_any_test:
         available_tests = [t.test_name for t in test_list if not t.disabled]
@@ -192,7 +182,7 @@ def run_tests(args, test_list: List[OverrideDefinitions]):
 # ============================================================================
 
 
-def _base_tests() -> List[OverrideDefinitions]:
+def _base_tests() -> list[OverrideDefinitions]:
     """Base functionality tests: small-model training."""
     return [
         OverrideDefinitions(
@@ -231,7 +221,7 @@ def _base_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def _cp_tests() -> List[OverrideDefinitions]:
+def _cp_tests() -> list[OverrideDefinitions]:
     """Context Parallel test."""
     return [
         OverrideDefinitions(
@@ -249,7 +239,7 @@ def _cp_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def _tp_tests() -> List[OverrideDefinitions]:
+def _tp_tests() -> list[OverrideDefinitions]:
     """Tensor Parallel test."""
     return [
         OverrideDefinitions(
@@ -279,7 +269,7 @@ def _tp_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def _ep_tests() -> List[OverrideDefinitions]:
+def _ep_tests() -> list[OverrideDefinitions]:
     """Expert Parallel test."""
     return [
         OverrideDefinitions(
@@ -321,7 +311,7 @@ def _ep_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def _fake_backend_tests() -> List[OverrideDefinitions]:
+def _fake_backend_tests() -> list[OverrideDefinitions]:
     """Fake backend tests for single-process distributed dry runs."""
     fake_backend_env = ("COMM_MODE=fake_backend",)
     return [
@@ -367,7 +357,7 @@ def _fake_backend_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def _checkpoint_tests() -> List[OverrideDefinitions]:
+def _checkpoint_tests() -> list[OverrideDefinitions]:
     """Checkpoint integration tests."""
     return [
         OverrideDefinitions(
@@ -392,14 +382,8 @@ def _checkpoint_tests() -> List[OverrideDefinitions]:
     ]
 
 
-def generate_smoke_tests() -> List[OverrideDefinitions]:
-    return (
-        _fake_backend_tests()
-        + _base_tests()
-        + _tp_tests()
-        + _ep_tests()
-        + _checkpoint_tests()
-    )
+def generate_smoke_tests() -> list[OverrideDefinitions]:
+    return _fake_backend_tests() + _base_tests() + _tp_tests() + _ep_tests() + _checkpoint_tests()
 
 
 # ============================================================================
@@ -417,9 +401,7 @@ def main():
         default="all",
         help="Test name to run (for example, 'deepseek_v4_tp'). Use 'all' to run every test.",
     )
-    parser.add_argument(
-        "--ngpu", default=2, type=int, help="Maximum available GPU count"
-    )
+    parser.add_argument("--ngpu", default=2, type=int, help="Maximum available GPU count")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):

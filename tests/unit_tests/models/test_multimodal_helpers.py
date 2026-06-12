@@ -318,9 +318,7 @@ def test_scatter_visual_embeddings_rejects_non_bool_visual_mask():
     visual_embeddings = torch.ones(1, 1, 2)
     visual_token_mask = torch.ones(1, 1)
 
-    with pytest.raises(
-        ValueError, match="visual_token_mask must have dtype torch.bool"
-    ):
+    with pytest.raises(ValueError, match="visual_token_mask must have dtype torch.bool"):
         scatter_visual_embeddings(
             hidden_states,
             tokens,
@@ -398,9 +396,7 @@ def test_resize_positional_embeddings_skips_nonpositive_spatial_shapes():
     pos_embeddings = torch.randn(2, 2, 3)
     spatial_shapes = torch.tensor([[0, 5], [2, 2]])
 
-    resized = siglip2.resize_positional_embeddings_zero_padded(
-        pos_embeddings, spatial_shapes, max_length=5
-    )
+    resized = siglip2.resize_positional_embeddings_zero_padded(pos_embeddings, spatial_shapes, max_length=5)
 
     assert torch.equal(resized[0], torch.zeros_like(resized[0]))
     assert not torch.equal(resized[1, :4], torch.zeros_like(resized[1, :4]))
@@ -614,11 +610,7 @@ def test_vlm_compile_config_does_not_mutate_base_config(monkeypatch):
 def test_vlm_model_registry_returns_npu_model_config():
     vlm_module = _load_module(
         "torchtitan_npu.models.vlm",
-        Path(__file__).resolve().parents[3]
-        / "torchtitan_npu"
-        / "models"
-        / "vlm"
-        / "__init__.py",
+        Path(__file__).resolve().parents[3] / "torchtitan_npu" / "models" / "vlm" / "__init__.py",
     )
     vlm_model = importlib.import_module("torchtitan_npu.models.vlm.model")
 
@@ -629,30 +621,19 @@ def test_vlm_model_registry_returns_npu_model_config():
 
 def test_vlm_model_registry_does_not_mutate_upstream_symbols():
     upstream_model = importlib.import_module("torchtitan.experiments.vlm.model.model")
-    upstream_siglip2 = importlib.import_module(
-        "torchtitan.experiments.vlm.model.siglip2"
-    )
-    original_get_attention_masks = (
-        upstream_model.Llama3Siglip2Transformer.get_attention_masks
-    )
+    upstream_siglip2 = importlib.import_module("torchtitan.experiments.vlm.model.siglip2")
+    original_get_attention_masks = upstream_model.Llama3Siglip2Transformer.get_attention_masks
     original_scatter = _module_symbol(upstream_model, "_scatter_img_tokens")
     original_resize = upstream_siglip2.resize_positional_embeddings
     original_attention_forward = upstream_siglip2.Attention.forward
 
     vlm_module = _load_module(
         "torchtitan_npu.models.vlm",
-        Path(__file__).resolve().parents[3]
-        / "torchtitan_npu"
-        / "models"
-        / "vlm"
-        / "__init__.py",
+        Path(__file__).resolve().parents[3] / "torchtitan_npu" / "models" / "vlm" / "__init__.py",
     )
     vlm_module.model_registry("debugmodel")
 
-    assert (
-        upstream_model.Llama3Siglip2Transformer.get_attention_masks
-        is original_get_attention_masks
-    )
+    assert upstream_model.Llama3Siglip2Transformer.get_attention_masks is original_get_attention_masks
     assert _module_symbol(upstream_model, "_scatter_img_tokens") is original_scatter
     assert upstream_siglip2.resize_positional_embeddings is original_resize
     assert upstream_siglip2.Attention.forward is original_attention_forward
@@ -696,9 +677,7 @@ def test_npu_vlm_converter_rejects_non_dense_attention():
 
 def test_npu_vlm_attention_masks_include_pixel_masks():
     vlm_model = _load_vlm_model_module()
-    model = vlm_model.Llama3Siglip2TransformerNpu.__new__(
-        vlm_model.Llama3Siglip2TransformerNpu
-    )
+    model = vlm_model.Llama3Siglip2TransformerNpu.__new__(vlm_model.Llama3Siglip2TransformerNpu)
     grid_thw = torch.tensor([[[0, 0, 0], [0, 0, 1], [-1, -1, -1]]])
 
     masks = model.get_attention_masks(
@@ -715,9 +694,7 @@ def test_npu_vlm_attention_masks_include_pixel_masks():
 
 def test_npu_vlm_forward_reuses_pixel_masks_from_attention_masks(monkeypatch):
     vlm_model = _load_vlm_model_module()
-    model = vlm_model.Llama3Siglip2TransformerNpu.__new__(
-        vlm_model.Llama3Siglip2TransformerNpu
-    )
+    model = vlm_model.Llama3Siglip2TransformerNpu.__new__(vlm_model.Llama3Siglip2TransformerNpu)
     nn.Module.__init__(model)
 
     pixel_masks = torch.tensor([[True, False]])
@@ -737,15 +714,11 @@ def test_npu_vlm_forward_reuses_pixel_masks_from_attention_masks(monkeypatch):
     def fail_build_valid_patch_mask(grid_hw):
         raise AssertionError("forward should reuse pixel_masks from attention_masks")
 
-    def fake_scatter(
-        hidden_states, token_ids, visual_embeddings, masks, image_token_id
-    ):
+    def fake_scatter(hidden_states, token_ids, visual_embeddings, masks, image_token_id):
         assert masks is pixel_masks
         return hidden_states
 
-    monkeypatch.setattr(
-        vlm_model, "build_valid_patch_mask", fail_build_valid_patch_mask
-    )
+    monkeypatch.setattr(vlm_model, "build_valid_patch_mask", fail_build_valid_patch_mask)
     monkeypatch.setattr(vlm_model, "scatter_visual_embeddings", fake_scatter)
 
     model.tok_embeddings = None
@@ -809,9 +782,7 @@ def test_parallelize_vlm_npu_rejects_non_fsdp_parallelism():
         cp_enabled=True,
     )
 
-    with pytest.raises(
-        NotImplementedError, match="only supports FSDP/HSDP data parallelism"
-    ):
+    with pytest.raises(NotImplementedError, match="only supports FSDP/HSDP data parallelism"):
         _parallelize_vlm_npu_for_test(parallelize, parallel_dims)
 
 
