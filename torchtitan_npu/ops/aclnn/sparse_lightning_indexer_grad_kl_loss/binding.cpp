@@ -28,7 +28,7 @@ npu_sparse_lightning_indexer_grad_kl_loss(
     double scale_value,
     bool deterministic)
 {
-    char *layout_ptr = const_cast<char *>(layout.data());
+    const char *layout_ptr = layout.c_str();
 
     auto seq_q_tmp = actual_seq_lengths_query.value_or(std::vector<int64_t>{});
     auto seq_k_tmp = actual_seq_lengths_key.value_or(std::vector<int64_t>{});
