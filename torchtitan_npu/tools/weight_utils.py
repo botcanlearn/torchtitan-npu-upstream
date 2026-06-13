@@ -91,6 +91,7 @@ def split_fused_experts(state_dict: dict) -> dict:
 
         result[base_key + ".w1"] = w1
         result[base_key + ".w3"] = w3
+        del result[key]
         del value
         gc.collect()
 

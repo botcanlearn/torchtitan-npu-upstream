@@ -278,3 +278,36 @@ bash scripts/run_train.sh \
 ```
 
 生成的 `step-0` checkpoint 后续可作为 `checkpoint.initial_load_path` 使用。
+
+## 离线转换 DCP 为 Hugging Face 权重
+
+训练过程中保存的 DCP checkpoint 可以通过独立脚本
+`scripts/checkpoint_conversion/convert_to_hf.py` 离线转换为 Hugging Face
+safetensors 格式。适用于训练结束后需要将权重用于推理、评测或发布的场景，
+无需重新启动训练流程。
+
+与训练配置中 `--checkpoint.last_save_in_hf` 的区别在于，该脚本可以对
+**已有的任意 step 的 DCP checkpoint** 进行转换，而不依赖训练最后一步的自动导出。
+
+**基本用法**
+
+```bash
+python scripts/checkpoint_conversion/convert_to_hf.py \
+  ./outputs/dsv32_4layers/checkpoint/step-1000 \
+  ./outputs/dsv32_4layers/hf_output \
+  --model_name deepseek_v32 \
+  --model_flavor deepseek_v32_671b_4layers_debug \
+  --hf_assets_path ./assets/hf/DeepSeek-V3.2 \
+  --export_dtype bfloat16
+```
+
+转换完成后，输出目录结构如下：
+
+```text
+./outputs/dsv32_4layers/hf_output/
+├── model-00001-of-00001.safetensors
+└── model.safetensors.index.json
+```
+
+> 注意：`input_dir` 必须是完整的 DCP step 目录（包含 `.metadata` 文件）
+> `--export_dtype` 可选 `float16`、`bfloat16`、`float32`

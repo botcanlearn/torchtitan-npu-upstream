@@ -315,24 +315,21 @@ def apply_patch() -> bool:
 def patch_llama4_checkpoint_support():
     import torchtitan.models.llama4 as llama4_module
     from torchtitan.components.checkpoint import CheckpointManager
-    from torchtitan.protocols.train_spec import (  # pyrefly: ignore [missing-import]
-        TrainSpec,
-    )
 
-    from torchtitan_npu.models.llama4.state_dict_adapter import (  # pyrefly: ignore [missing-import]
+    from torchtitan_npu.models.llama4.model.state_dict_adapter import (  # pyrefly: ignore [missing-import]
         Llama4StateDictAdapterNpu,
         dcp_load,
     )
 
     CheckpointManager.dcp_load = dcp_load
 
-    original = llama4_module.get_train_spec  # pyrefly: ignore [missing-attribute]
+    original = llama4_module.model_registry  # pyrefly: ignore [missing-attribute]
 
-    def patch_llama4_spec() -> TrainSpec:
-        spec = original()
+    def patch_llama4_model_registry(flavor: str, **kwargs):
+        spec = original(flavor, **kwargs)
         spec.state_dict_adapter = Llama4StateDictAdapterNpu
         return spec
 
-    llama4_module.get_train_spec = (  # pyrefly: ignore [missing-attribute]
-        patch_llama4_spec
+    llama4_module.model_registry = (  # pyrefly: ignore [missing-attribute]
+        patch_llama4_model_registry
     )
