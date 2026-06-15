@@ -33,7 +33,15 @@ def _auto_search_conveter():
     for subdir in ["kernels", "features"]:
         subdir_path = package_dir / subdir
         if subdir_path.exists():
-            for _, name, _ in pkgutil.iter_modules([str(subdir_path)]):
+            # Import the RoPE kernel first: its module-level patch installs the
+            # NPU-safe `_reshape_for_broadcast_complex` onto common.rope. Other
+            # kernels (e.g. npu_smla) transitively import deepseek_v32.model, which
+            # snapshots that symbol via from-import, so the patch must land first.
+            modules = sorted(
+                pkgutil.iter_modules([str(subdir_path)]),
+                key=lambda m: (m.name != "rope", m.name),
+            )
+            for _, name, _ in modules:
                 importlib.import_module(f".{subdir}.{name}", package=__package__)
 
 
