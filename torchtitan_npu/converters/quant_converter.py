@@ -9,8 +9,14 @@ from typing import ClassVar
 import torch.nn as nn
 import torch_npu
 from torchtitan.components.quantization import QuantizationConverter
+from torchtitan.components.quantization.module_utils import (
+    capture_module_attrs,
+    inject_module_protocol,
+    verify_module_protocol,
+)
 from torchtitan.components.quantization.mx import MXFP8Converter
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 
 from ..patches.quantization.quant_config import (
@@ -25,9 +31,14 @@ from ..patches.quantization.quantize import grouped_quantize_, linear_quantize_
 @dataclass(kw_only=True, slots=True)
 class NPUMXFP8Config(QuantizationConverter.Config):
     _quantization_type: ClassVar[str] = "mxfp8"
+    _owner = None
     recipe_name: str = "mxfp8"
     fqns: list[str] = field(default_factory=list)
     filter_fqns: list[str] = field(default_factory=list)
+
+    @classmethod
+    def set_owner(cls, owner_cls):
+        cls._owner = owner_cls
 
 
 def is_a5():
@@ -69,12 +80,18 @@ def npu_quant_mxfp8_converter(self, model: nn.Module):
     if not self.enabled:
         return
 
+    verify_module_protocol(model, nn.Linear, Linear)
+    saved_attrs = capture_module_attrs(model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear)
+
     linear_quantize_(
         model,
         config=self.linear_config,
         filter_fn=lambda mod, fqn: module_filter_fn(mod, fqn, self.filter_fqns),
     )
     logger.info("Swapped to MXLinear_NPU layers")
+
+    inject_module_protocol(model, Linear, saved_attrs)
+    verify_module_protocol(model, nn.Linear, Linear)
 
     def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
         return any(target_fqn in cur_fqn for target_fqn in self.moe_fqns)
@@ -90,5 +107,6 @@ def npu_quant_mxfp8_converter(self, model: nn.Module):
 
 
 MXFP8Converter.Config = NPUMXFP8Config  # pyrefly: ignore [read-only, bad-assignment]
+NPUMXFP8Config.set_owner(MXFP8Converter)  # pyrefly: ignore [bad-assignment]
 MXFP8Converter.__init__ = npu_quant_mxfp8_converter_init  # pyrefly: ignore [bad-assignment]
 MXFP8Converter.convert = npu_quant_mxfp8_converter

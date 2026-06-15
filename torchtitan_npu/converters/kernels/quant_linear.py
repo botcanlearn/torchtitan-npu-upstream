@@ -24,6 +24,8 @@ class MXfp8MM(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def forward(ctx, x, weight):
+        if x.dtype == torch.float32:
+            x = x.to(torch.bfloat16)
         x_mxfp8, x_scale = torch_npu.npu_dynamic_mx_quant(
             view_as_n_dim(x), axis=-1, dst_type=torch.float8_e4m3fn, scale_alg=1
         )

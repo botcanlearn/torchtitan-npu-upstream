@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import torch.nn as nn
 from torchtitan_npu.converters import quant_converter
 
 
@@ -102,7 +103,7 @@ def test_npu_quant_mxfp8_converter_calls_linear_and_grouped_quantize(monkeypatch
         model_compile_enabled=False,
     )
 
-    model = object()
+    model = nn.Module()
     quant_converter.npu_quant_mxfp8_converter(converter, model)
 
     assert linear_spy.model is model
