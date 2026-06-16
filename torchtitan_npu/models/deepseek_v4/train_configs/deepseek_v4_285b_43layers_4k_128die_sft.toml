@@ -92,3 +92,6 @@ filter_fqns = ["output", "router.gate"]
 
 [quantize.grouped_mm.float8]
 fqns = ["experts"]
+
+[comm]
+trace_buf_size = 0 # 0 means disable flight recorder , >0 means enable it
