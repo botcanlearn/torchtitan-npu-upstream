@@ -379,12 +379,12 @@ class LiLoss(Module):
         valid_topk_mask = compress_topk_idxs != -1
         gather_idxs = compress_topk_idxs.clamp_min(0)
         selected_kv = torch.gather(
-            kv_compress.detach().unsqueeze(1).expand(-1, q.size(1), -1, -1),
+            kv_compress.unsqueeze(1).expand(-1, q.size(1), -1, -1),
             dim=2,
             index=gather_idxs.unsqueeze(-1).expand(-1, -1, -1, kv_compress.size(-1)),
         )
         selected_main_attn_dist = self.get_attn_scores.forward_sparse(
-            q.detach(),
+            q,
             selected_kv,
             valid_topk_mask,
             self.softmax_scale,
@@ -736,8 +736,8 @@ class InnerAttention(Module):
 
         if has_li:
             loss = self.li_loss(
-                q,
-                kv_compress,
+                q.detach(),
+                kv_compress.detach() if kv_compress is not None else None,
                 q_indexer,
                 k_indexer,
                 weights,

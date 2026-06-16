@@ -69,7 +69,6 @@ def _apply_patches():
     from .patches.torch import (  # noqa: F401
         checkpoint,
         clip_grad,
-        distributed_tensor_api,
         pipelining,
     )
 

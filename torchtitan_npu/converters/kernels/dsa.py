@@ -256,8 +256,8 @@ def dsa_forward(
     # If tp is enabled, inner_attention.compute_dsa_indexer_loss is patched in deepseek_v32_parallelize.py
     # Otherwise, inner_attention.compute_dsa_indexer_loss is patched in this file
     loss = self.compute_dsa_indexer_loss(
-        q_nope,
-        k_nope,
+        q_nope.detach(),
+        k_nope.detach(),
         q_indexer,
         k_indexer,
         weights,
@@ -265,8 +265,8 @@ def dsa_forward(
         softmax_max,
         softmax_sum,
         scale_value=scale,
-        query_rope=q_pe,
-        key_rope=k_pe,
+        query_rope=q_pe.detach(),
+        key_rope=k_pe.detach(),
         actual_seq_qlen=None,
         actual_seq_klen=None,
         layout="BSND",
