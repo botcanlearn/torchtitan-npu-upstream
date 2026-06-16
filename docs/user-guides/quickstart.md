@@ -110,7 +110,7 @@ bash scripts/run_train_multinodes.sh
 ### 排查启动报错：查看更多 rank 日志
 
 > [!TIP]
-> 默认启动脚本只在控制台打印 `LOG_RANK=0`(即 rank 0)的日志。若任务异常退出、但控制台没有具体的Python报错,真正报错可能记录在其他rank。此时可临时通过 `LOG_RANK` 指定需要打印日志的rank(用逗号分隔)后重新运行,以定位报错。例如同时查看本机 8 个 rank:
+> 默认启动脚本只在控制台打印 `LOG_RANK=0`(即 rank 0)的日志。若任务异常退出、但控制台没有具体的 Python 报错，真正报错可能记录在其他 rank。此时可临时通过 `LOG_RANK` 指定需要打印日志的 rank (用逗号分隔)后重新运行，以定位报错。例如同时查看本机 8 个 rank:
 >
 > ```bash
 > LOG_RANK=0,1,2,3,4,5,6,7 bash scripts/run_train.sh
