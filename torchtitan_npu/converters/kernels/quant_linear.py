@@ -44,8 +44,7 @@ class MXfp8MM(torch.autograd.Function):
         )
         if len(x.shape) != 2:
             output = output.reshape(*x.shape[:-1], *output.shape[1:])
-        if weight.requires_grad:
-            output.requires_grad = True
+        # no need to set output.requires_grad，autograd.Function will auto set.
         ctx.save_for_backward(x, weight)
         return output
 
