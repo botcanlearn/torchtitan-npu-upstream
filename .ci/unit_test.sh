@@ -63,11 +63,14 @@ EOF
     export PYTHONPATH="${TITAN_DIR}:${PROJECT_ROOT}:${PYTHONPATH}"
 
     pytest_args="-v --tb=short --import-mode=importlib"
-    # Ignore tests incompatible with NPU environment (ut runs off-device)
+
+    # Skip tests incompatible with NPU environment (ut runs off-device)
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_tokenizer.py"
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_activation_checkpoint.py"
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_download_hf_assets.py"
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_fsdp_moe_sharding.py"
+    # Skip tests conflicting with the multiturn-chat patch
+    pytest_args="$pytest_args --deselect=tests/unit_tests/test_chat_dataset.py::TestChatDatasetMessageValidation::test_three_messages"
 
     # Test target: torchtitan upstream unit tests
     local test_target="tests/unit_tests/"

@@ -81,6 +81,13 @@ def _apply_patches():
     # patching torch_npu
     from .patches.torch_npu import determinism  # noqa: F401
 
+    # Enable multi-turn chat (system + user + assistant + ...) in ChatDataset.
+    # Patch Qwen3StateDictAdapter.to_hf to sync fqn_to_index_mapping
+    from .patches.torchtitan import (
+        multiturn_chat,  # noqa: F401
+        qwen3_hf_export,  # noqa: F401
+    )
+
     # patching tools
     from .tools import flight_recorder, profiling  # noqa: F401
 

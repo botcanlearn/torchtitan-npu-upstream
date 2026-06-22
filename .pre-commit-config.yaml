@@ -24,6 +24,7 @@ repos:
       - id: check-yaml
         args: ["--allow-multiple-documents"]
       - id: check-added-large-files
+        exclude: ^tests/assets/tokenizer/
       - id: check-merge-conflict
       - id: detect-private-key
       - id: check-json
@@ -63,7 +64,7 @@ repos:
             "-L",
             "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog",
             "--skip",
-            "*.py,*.cpp,*.hpp,*.c,*.h",
+            "*.py,*.cpp,*.hpp,*.c,*.h,tests/assets/tokenizer/qwen3-tokenizer/merges.txt",
           ]
 
   # OAT compliance check (Open Source Audit Tool)
