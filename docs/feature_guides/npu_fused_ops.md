@@ -15,7 +15,7 @@ model_converters = ModelConvertersContainer.Config(
     converters=[
         get_model_converter_config("npu_dsa"),
         get_model_converter_config("npu_rms_norm"),
-        get_model_converter_config("npu_permute"),
+        get_model_converter_config("npu_moe_dispatch"),
         get_model_converter_config("npu_gmm"),
     ],
 )
@@ -29,7 +29,7 @@ model_converters = ModelConvertersContainer.Config(
   - [MHCPre](#mhcpre)
   - [MHCPost](#mhcpost)
   - [GMM（Grouped MatMul）](#gmmgrouped-matmul)
-  - [Permute](#permute)
+  - [NPU MoE Dispatch](#npu-moe-dispatch)
   - [RMSNorm](#rmsnorm)
   - [RoPE](#rope)
 
@@ -124,9 +124,9 @@ get_model_converter_config("npu_mhc_post")
 
 在 MoE 模块中，每个专家执行前馈网络（FFN）运算：如 Swiglu FFN：输入先经过升维变换 `w1`，再通过激活函数，最后经过降维变换 `w2` 得到输出。
 
-由于各专家执行结构相同的矩阵乘法，为了将同类矩阵运算合并为一次算子调用，提升计算效率，本ModelConverter 引入分组矩阵乘法（GMM）算子 `npu_grouped_matmul`。该算子接收 [Permute](#permute) 模块输出的重排后 token 及对应的专家索引，在一次调用中并行计算所有专家的同一线性层，如所有专家的 `w1`。
+由于各专家执行结构相同的矩阵乘法，为了将同类矩阵运算合并为一次算子调用，提升计算效率，本ModelConverter 引入分组矩阵乘法（GMM）算子 `npu_grouped_matmul`。该算子接收 [NPU MoE Dispatch](#npu-moe-dispatch) 模块输出的重排后 token 及对应的专家索引，在一次调用中并行计算所有专家的同一线性层，如所有专家的 `w1`。
 
-> 注：使用npu_gmm的同时请开启npu_permute配合使用。
+> 注：`npu_gmm` 依赖 MoE token 重排能力。DSV3 / DSV32 / DSV4 / Qwen3 MoE 标准 `ExpertParallel` 场景统一使用 `npu_moe_dispatch`。
 
 **配置示例**：
 ```python
@@ -137,18 +137,20 @@ get_model_converter_config("npu_gmm")
 
 -----------
 
-## Permute
-MoE 前向计算中，为了利用 [GMM](#gmmgrouped-matmul) 提升计算效率，token 需要根据 MoE Router 为每个 token 分配的专家，以特定顺序重排，输出重排列后的 token 及其对应的专家索引；计算完成后，再将结果恢复至原始 token 顺序。
 
-本 ModelConverter 将“重排”和“恢复”操作替换为基于 `npu_moe_token_permute` 和 `npu_moe_token_unpermute` 算子的实现。
+## NPU MoE Dispatch
 
-**配置示例**：
+`npu_moe_dispatch` 面向 DS 系列和 Qwen3 MoE 的标准 `ExpertParallel` 路径。该 ModelConverter 负责接入 NPU MoE dispatch 流程：router 后仍使用 `npu_moe_token_permute` 做第一组 token/expert 聚合，expert 计算后仍使用 unpermute 还原；同时通过并行策略更新器将标准 `ExpertParallel` 替换为 `NpuExpertParallel`。
+
+在 EP all-to-all 之后，标准 dispatch 流程需要把 rank-major token layout 重新整理为 local expert-major layout。这里的 `torch_npu.npu_moe_re_routing` 只优化这一段 local reroute：它替换旧路径中的 `repeat_interleave + npu_moe_token_permute`，减少局部重排热点上的冗余算子。
+
+需要注意，`npu_moe_re_routing` 不替换 MoE router 后的 `npu_moe_token_permute`。router 后的第一组 token permute 负责根据 `selected_experts_indices [T, K]` 生成 top-k expert slots；EP all-to-all 后的本卡重排负责根据 `counts [ep_degree, num_local_experts]` 调整本卡收到的 local buffer，两者输入语义和布局目标不同。模型配置应直接使用 `npu_moe_dispatch`。
+
 ```python
-get_model_converter_config("npu_permute")
+get_model_converter_config("npu_moe_dispatch")
 ```
-**ModelConverter 源码路径：** `torchtitan_npu/converters/kernels/permute.py`
 
------------
+**ModelConverter 源码路径：** `torchtitan_npu/converters/kernels/moe_dispatch.py`、`torchtitan_npu/converters/kernels/permutation.py`
 
 ## RMSNorm
 RMSNorm 通过计算输入张量每个样本的平方均值的平方根来稳定深层网络的训练。

@@ -27,7 +27,7 @@ def _default_converters() -> list:
     return [
         get_model_converter_config("npu_rms_norm"),
         get_model_converter_config("npu_rope"),
-        get_model_converter_config("npu_permute"),
+        get_model_converter_config("npu_moe_dispatch"),
         get_model_converter_config("npu_gmm"),
     ]
 

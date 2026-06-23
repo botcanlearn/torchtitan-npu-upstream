@@ -123,7 +123,7 @@ description: "用于 torchtitan-npu 仓库的关键风险代码审查：本地 d
    - 建议：显式校验 mesh 维度与 placement；多并行组合补 DTensor 一致性说明；改并行策略必须附 loss / grad_norm 对齐验证。
 
 2. **NPU 算子选择、正确性与硬件亲和**
-   - 判据：能用 NPU 原生 / 融合算子（`npu_permute`、`grouped_mm`、fused attention、smla/li/mhc）却用低效 eager 拼接；新增对非 aclnn 封装或 torch_npu 原生的外部算子库的依赖；关键张量维度未对齐昇腾 cube（16×16，常见对齐到 256）导致算力浪费；引入无谓的 host-device 同步或 NPU copy。
+   - 判据：能用 NPU 原生 / 融合能力（如 MoE dispatch、`grouped_mm`、fused attention、smla/li/mhc）却用低效 eager 拼接；新增对非 aclnn 封装或 torch_npu 原生的外部算子库的依赖；关键张量维度未对齐昇腾 cube（16×16，常见对齐到 256）导致算力浪费；引入无谓的 host-device 同步或 NPU copy。
    - **算子反向正确性**：自定义 `autograd.Function` / `torch.library` 算子改 forward 时，**backward 必须同步实现、且返回的梯度数量与 forward 输入一一对齐**。
    - **维度要兼容多模型规格**：算子 / kernel 的分块、padding、维度上限不要为单一模型写死，用条件表达式按规格适配，避免为一个规格优化却劣化另一个。
 
