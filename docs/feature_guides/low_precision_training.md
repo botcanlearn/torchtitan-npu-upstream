@@ -105,7 +105,7 @@ model_converters = ModelConvertersContainer.Config(
 
 1. **确认 converter 生效**：启动日志中应出现以下关键字（MXFP8 和 HiFloat8 均适用）：
    - 线性层：`MX training active with recipe <recipe_name>`（其中 `<recipe_name>` 为 `mxfp8` 或 `hif8`）和 `Swapped to MXLinear_NPU layers`
-   - MoE 专家层：`<recipe_name> MoE training enabled` 和 `[MXFP8/HiF8 GMM] Replaced <N> NPU GMM methods/functions`
+   - MoE 专家层：`Converted all MoE grouped MM layers to use dynamic <recipe_name> quantization with scaled grouped GEMMs` 和 `[MXFP8/HiF8 GMM] Replaced <N> NPU GMM methods/functions`
 2. **确认模块替换数量**：日志中 `Replaced <N> NPU GMM methods/functions` 的数量应与预期的 MoE 专家模块数一致；线性层可通过 `model.named_modules()` 检查 `MXLinear` 类型的模块数量。
 3. **常见未生效场景排查**：
    - `converters` 顺序错误：`"npu_gmm"` 未放在 `"quantize.grouped_mm.mx"` 之前，导致 MoE 专家层替换失败
