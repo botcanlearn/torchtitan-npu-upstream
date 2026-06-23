@@ -1208,10 +1208,6 @@ class DeepSeekV4Model(BaseModel):
         index_head_dim: int = 128
         index_topk: int = 512
         enable_indexer_loss: bool = True
-        save_format: str = "dcp"
-        save_expert_format: str | None = None
-        hf_save_dir: str | None = None
-        save_patch_enabled: bool = False
         dim: int = 4096
         moe_args: MoEArgs = field(default_factory=MoEArgs)
         rope_head_dim: int = 64

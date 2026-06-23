@@ -101,9 +101,6 @@ def _smoketest_model() -> DeepSeekV4Model.Config:
         index_n_heads=4,
         index_head_dim=16,
         index_topk=16,
-        save_format="hf",
-        save_expert_format=None,
-        hf_save_dir=None,
     )
 
 
@@ -142,9 +139,6 @@ def _v4_flash_debug_16_experts_43_layers() -> DeepSeekV4Model.Config:
         index_n_heads=64,
         index_head_dim=128,
         index_topk=512,
-        save_format="hf",
-        save_expert_format="gmm",
-        hf_save_dir=None,
     )
 
 
@@ -183,9 +177,6 @@ def _v4_flash_debug_256_experts_43_layers() -> DeepSeekV4Model.Config:
         index_n_heads=64,
         index_head_dim=128,
         index_topk=512,
-        save_format="hf",
-        save_expert_format="gmm",
-        hf_save_dir=None,
     )
 
 
@@ -219,9 +210,6 @@ def _v4_pro_debug_16_layers() -> DeepSeekV4Model.Config:
         index_n_heads=64,
         index_head_dim=128,
         index_topk=1024,
-        save_format="hf",
-        save_expert_format="gmm",
-        hf_save_dir=None,
     )
 
 
@@ -255,9 +243,6 @@ def _v4_pro_debug_61_layers() -> DeepSeekV4Model.Config:
         index_n_heads=64,
         index_head_dim=128,
         index_topk=1024,
-        save_format="hf",
-        save_expert_format="gmm",
-        hf_save_dir=None,
     )
 
 

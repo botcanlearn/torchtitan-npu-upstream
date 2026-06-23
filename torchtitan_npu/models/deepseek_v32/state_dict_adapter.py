@@ -3,14 +3,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
-
 from torch.distributed.checkpoint.hf_storage import HuggingFaceStorageReader
 from torchtitan.models.deepseek_v3 import DeepSeekV3StateDictAdapter
 
 from torchtitan_npu.tools.weight_utils import detect_input_format_by_path
-
-logger = logging.getLogger(__name__)
 
 
 def _first_moe_layer(model_config):
@@ -52,9 +48,6 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
         self._input_format = "hf"
         self._input_expert_format = "standard"
 
-        # apply checkpoint patch
-        self._setup_checkpoint_patch(model_config)
-
     # pyrefly: ignore [bad-override]
     def get_hf_storage_reader(self, path: str, from_quantized: bool = False):
         self._input_format = detect_input_format_by_path(path)
@@ -65,21 +58,6 @@ class DeepSeekV32StateDictAdapter(DeepSeekV3StateDictAdapter):
             from torch.distributed.checkpoint import FileSystemReader
 
             return FileSystemReader(path)
-
-    def _setup_checkpoint_patch(self, model_config):
-        """setup checkpoint save patch"""
-        try:
-            from ...tools import checkpoint_patch
-
-            checkpoint_patch.configure_from_model_args(model_config, adapter=self)
-
-            if checkpoint_patch.is_enabled():
-                success = checkpoint_patch.apply_patch()
-                if success:
-                    logger.info("Checkpoint save patch initialized from StateDict Adaptor")
-
-        except Exception as e:
-            logger.error(f"Failed to setup checkpoint patch, training will continue with original saving configs: {e}")
 
     def _setup_v32_mappings(self, model_config):
         """

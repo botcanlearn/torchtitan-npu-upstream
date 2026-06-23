@@ -12,7 +12,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import logging
 import re
 from typing import Any
 
@@ -26,8 +25,6 @@ from torchtitan_npu.tools.weight_utils import (
     _split_w13_for_mapping,
     detect_input_format_by_path,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
@@ -162,9 +159,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "compressor",
             "indexer",
         )
-
-        # apply checkpoint patch
-        self._setup_checkpoint_patch(model_args)
 
     @staticmethod
     def _get_abstract_key(key: str, count: int) -> str:
@@ -364,21 +358,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                 state_dict[new_key] = value
 
         return state_dict
-
-    def _setup_checkpoint_patch(self, model_args):
-        """setup checkpoint save patch"""
-        try:
-            from torchtitan_npu.tools import checkpoint_patch
-
-            checkpoint_patch.configure_from_model_args(model_args, adapter=self)
-
-            if checkpoint_patch.is_enabled():
-                success = checkpoint_patch.apply_patch()
-                if success:
-                    logger.info("Checkpoint save patch initialized from StateDict Adaptor")
-
-        except Exception as e:
-            logger.error(f"Failed to setup checkpoint patch, training will continue with original saving configs: {e}")
 
     def _split_w13_for_mapping(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Split w13 into w1 and w3 for HF mapping"""

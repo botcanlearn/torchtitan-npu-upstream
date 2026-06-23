@@ -48,10 +48,6 @@ class DeepSeekV32ModelNpu(DeepSeekV3ModelNpu):
         # module. ``enable_indexer_loss`` stays here because it gates trainer
         # -side logging (see ``torchtitan_npu.train``), not per-layer compute.
         enable_indexer_loss: bool = True
-        save_format: str = "dcp"
-        save_expert_format: str | None = None
-        hf_save_dir: str | None = None
-        save_patch_enabled: bool = False
         moe_impl: str = "standard"
         num_mtp_modules: int = 0
 

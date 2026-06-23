@@ -251,12 +251,6 @@ bash scripts/run_train.sh \
 该目录用于模型权重导出，不适合作为完整训练断点恢复。保存 HF 权重时需要经过
 state_dict 转换和 safetensors 合并，耗时通常高于 DCP 保存。
 
-DeepSeek-V3.2 和 DeepSeek-V4 的 state dict adapter 还包含模型侧保存 patch，
-可用于专家权重格式转换等高级场景。日常保存和加载优先使用
-`CheckpointManager.Config` 的 DCP/HF 配置；只有模型配置明确需要时，再在
-`model.Config` 中设置 `save_patch_enabled`、`save_format`、`hf_save_dir` 和
-`save_expert_format`。
-
 ## 创建 seed checkpoint
 
 seed checkpoint 用于先在单卡 CPU 初始化模型，再让多卡任务通过 DCP 重分片加载。

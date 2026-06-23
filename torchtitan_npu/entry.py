@@ -137,13 +137,6 @@ def main() -> None:
         _patch_train_step_for_dsa_indexer_loss()
         _patch_init_for_dsa_set_loss_scale()
 
-    if model_name == "llama4":
-        from torchtitan_npu.tools.checkpoint_patch import (
-            patch_llama4_checkpoint_support,
-        )
-
-        patch_llama4_checkpoint_support()
-
     if model_name == "deepseek_v3":
         logger.warning("deepseek_v3 checkpoint patch is temporarily disabled due to config system migration.")
 
