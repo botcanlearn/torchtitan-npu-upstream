@@ -12,4 +12,6 @@ _setup_torchtitan /tmp/torchtitan
 pip install -r /tmp/torchtitan/requirements.txt
 pip install -e /tmp/torchtitan
 
+export PIP_EXTRA_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
 python3 -m pre_commit run --all-files
