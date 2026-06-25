@@ -27,7 +27,7 @@
 
 ## 确认话术示例
 
-> 根据 Step 0 diff，变更涉及 `converters/npu_rms_norm.py`（算子替换）和 `model.py`（RMSNorm 调用）。
+> 根据 Step 0 diff，变更涉及 `converters/kernels/rms_norm.py`（算子替换）和 `model.py`（RMSNorm 调用）。
 > 建议验证：
 > - `deepseek_v32_671b_4layers_debug`（TP=1，覆盖基本路径）
 > - `deepseek_v32_671b_61layers_4k_128die`（TP=4，覆盖 TP>1 路径）
