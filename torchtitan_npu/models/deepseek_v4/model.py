@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
@@ -40,38 +41,26 @@ def apply_rotary_emb(
     inverse: bool = False,
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """
-    Applies rotary positional embeddings to the input tensor.
+    """Apply rotary positional embeddings, delegating to the upstream kernel.
 
     Args:
-        x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
-        positions (torch.Tensor | None): Optional absolute position indices for selecting
-            the correct rows from ``freqs_cis``.  When ``None``, ``freqs_cis[0:seqlen]``
-            is used (standard non-CP case).
+        x: rope features, ``(B, S, H, D)`` or ``(B, S, D)``.
+        freqs_cis: complex rope cache ``(max_seqlen, D // 2)``.
+        inverse: if True, rotate by the conjugate (inverse rotation).
+        positions: absolute position indices for CP; ``None`` uses ``[0:S]``.
 
     Returns:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
-    original_dtype = x.dtype
-    x_complex = torch.view_as_complex(x.float().unflatten(-1, (-1, 2)))
-    seqlen = x_complex.size(1)
-    if positions is not None:
-        # CP: index into the full freqs_cis table by absolute positions.
-        # Use the real view to avoid complex64 indexing issues on NPU.
-        freqs_cis_real = torch.view_as_real(freqs_cis)
-        freqs_cis_real = freqs_cis_real[positions.squeeze(0) if positions.size(0) == 1 else positions]
-        freqs_cis = torch.view_as_complex(freqs_cis_real)
-    else:
-        freqs_cis = freqs_cis[:seqlen]
+    squeezed = x.ndim == 3
+    if squeezed:
+        x = x.unsqueeze(2)  # (B, S, D) -> (B, S, 1, D); upstream assumes a 4D layout
     if inverse:
         freqs_cis = freqs_cis.conj()
-    if x_complex.ndim == 3:
-        freqs_cis = freqs_cis.view(1, seqlen, x_complex.size(-1))
-    else:
-        freqs_cis = freqs_cis.view(1, seqlen, 1, x_complex.size(-1))
-    x_rotated = torch.view_as_real(x_complex * freqs_cis).flatten(-2)
-    return x_rotated.to(original_dtype)
+    y = apply_rotary_emb_single_complex(x, freqs_cis, positions)
+    if squeezed:
+        y = y.squeeze(2)
+    return y
 
 
 def hadamard_transform_ref(x, hadamard_mat, scale=1.0):

@@ -15,9 +15,7 @@ from scipy.linalg import hadamard
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torchtitan.models.common.attention import AttentionMasksType
-from torchtitan.models.common.rope import (
-    _reshape_for_broadcast_complex as reshape_for_broadcast_complex,
-)
+from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.deepseek_v3.model import (
     Attention as DeepSeekV3Attention,
 )
@@ -176,26 +174,23 @@ def apply_rotary_emb(
     positions: torch.Tensor | None = None,
     interleaved: bool = True,
 ) -> torch.Tensor:
-    """
-    Applies rotary positional embeddings to the input tensor.
+    """Apply rotary positional embeddings, delegating to the upstream kernel.
+
     Args:
-        x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
-        interleaved: If False, use non-interleaved layout (Indexer path).
-        positions: Global position ids when sequence is sharded (e.g. CP); optional.
-    Returns:
-        torch.Tensor: Tensor with rotary embeddings applied.
+        x: rope features, 4D ``(bsz, seqlen, n_heads, head_dim)``.
+        freqs_cis: complex rope cache.
+        positions: absolute position indices for CP; ``None`` uses ``[0:S]``.
+        interleaved: if False, use the non-interleaved layout (Indexer path).
     """
-    dtype = x.dtype
-    shape = x.shape
     if not interleaved:
-        x = x.view(*shape[:-1], 2, -1).transpose(-1, -2).contiguous()
-    x = torch.view_as_complex(x.float().view(*shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast_complex(freqs_cis, x, positions)
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
+        s = x.shape
+        # blocked -> interleaved, flattened back to 4D (B, S, H, D); upstream re-views
+        # by the *current* shape, so the (.., n, 2) split must be folded away here.
+        x = x.view(*s[:-1], 2, -1).transpose(-1, -2).reshape(*s)
+    y = apply_rotary_emb_single_complex(x, freqs_cis, positions)
     if not interleaved:
-        y = torch.cat([y[..., 0::2], y[..., 1::2]], dim=-1)
-    return y.to(dtype)
+        y = torch.cat([y[..., 0::2], y[..., 1::2]], dim=-1)  # interleaved -> blocked
+    return y
 
 
 def hadamard_transform_ref(x, scale=1.0):
