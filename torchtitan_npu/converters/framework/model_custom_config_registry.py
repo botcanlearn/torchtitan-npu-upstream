@@ -49,6 +49,9 @@ class _ConverterRegistry:
     ):
         from .model_custom_config_converter import ModelCustomConfigConverter
 
+        def to_dict(self) -> dict[str, str]:
+            return {"name": self.name}
+
         converter_cls = type(
             f"{name}ModelCustomConfigConverter",
             (ModelCustomConfigConverter,),
@@ -63,6 +66,7 @@ class _ConverterRegistry:
             (Configurable.Config,),
             {
                 "name": name,
+                "to_dict": to_dict,
                 "__annotations__": {},
             },
         )
