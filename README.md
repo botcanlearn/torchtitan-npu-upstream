@@ -164,7 +164,7 @@ torchtitan-npu/
 
 ```
 上下游软件栈架构图如下:
-![Architecture](docs/assets/Architecture.png)
+![Architecture](https://gitcode.com/cann/torchtitan-npu/blob/master/docs/assets/Architecture.png)
 # 性能基准
 
 ---
