@@ -177,7 +177,7 @@ class HcHeadParallelStyle(ParallelStyle):
         self.io_plan = PrepareModuleInputOutput(
             input_layouts=(Shard(1),),
             desired_input_layouts=(Replicate(),),
-            use_local_input=False,
+            use_local_input=True,
             output_layouts=(Replicate()),
             desired_output_layouts=(Shard(1)),
             use_local_output=False,

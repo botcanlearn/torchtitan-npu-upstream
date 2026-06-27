@@ -14,6 +14,7 @@ import scipy
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
@@ -1094,11 +1095,23 @@ class HcHead(Module):
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
     def forward(self, x: torch.Tensor):
+        # Localize the (Replicate) params so the forward runs on plain tensors:
+        # torch.compile cannot trace the DTensor ops here because the dynamic seq
+        # dim makes the DTensorSpec unhashable.
+        hc_head_fn = self.hc_head_fn
+        hc_head_base = self.hc_head_base
+        hc_head_scale = self.hc_head_scale
+        if isinstance(hc_head_fn, DTensor):
+            hc_head_fn = hc_head_fn.to_local()
+        if isinstance(hc_head_base, DTensor):
+            hc_head_base = hc_head_base.to_local()
+        if isinstance(hc_head_scale, DTensor):
+            hc_head_scale = hc_head_scale.to_local()
         shape, dtype = x.size(), x.dtype
         x = x.flatten(2).float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_head_fn) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_head_scale + self.hc_head_base) + self.hc_eps
+        mixes = F.linear(x, hc_head_fn) * rsqrt
+        pre = torch.sigmoid(mixes * hc_head_scale + hc_head_base) + self.hc_eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=2)
         return y.to(dtype)
 
