@@ -281,63 +281,13 @@ class Indexer(Module):
         self.compressor.init_weights(init_std)
 
 
-class GetAttnScores(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-
-    def forward(
-        self,
-        query,
-        key,
-        attention_mask,
-        num_attn_head_per_group,
-        attn_scale,
-    ):
-        """aggregate the main attention scores"""
-        if num_attn_head_per_group > 1:
-            key = key.repeat_interleave(num_attn_head_per_group, dim=1)
-
-        num_head_q = query.shape[1]
-        num_head_k = key.shape[1]
-        if num_head_q != num_head_k and num_head_k != 1:
-            raise NotImplementedError(
-                f"Only support num_head_q == num_head_k or num_head_k == 1. Current {num_head_q=}, {num_head_k=}."
-            )
-
-        attn = (query @ key.transpose(-1, -2)) * attn_scale
-
-        if attention_mask is not None:
-            attn.masked_fill_(attention_mask, float("-inf"))
-
-        attn = F.softmax(attn, dim=-1, dtype=torch.float32)
-        attn = attn.sum(dim=1)
-        return attn
-
-    def forward_sparse(
-        self,
-        query,
-        selected_key,
-        selected_mask,
-        attn_scale,
-    ):
-        attn = torch.einsum("bshd,bskd->bshk", query, selected_key) * attn_scale
-        attn.masked_fill_(~selected_mask.unsqueeze(2), torch.finfo(attn.dtype).min)
-        attn = F.softmax(attn, dim=-1, dtype=torch.float32)
-        attn.masked_fill_(~selected_mask.unsqueeze(2), 0.0)
-        attn = attn.sum(dim=2)
-        return attn
-
-
 class LiLoss(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
         softmax_scale: float
         compress_ratio: int
+        window_size: int
         layer_id: int
         n_layers: int
 
@@ -346,7 +296,8 @@ class LiLoss(Module):
         self.n_heads = config.n_heads
         self.softmax_scale = config.softmax_scale
         self.compress_ratio = config.compress_ratio
-        self.get_attn_scores = GetAttnScores.Config().build()
+        self.window_size = config.window_size
+        self.get_window_topk_idxs = GetWindowTopkIdxs.Config().build()
         self.compute_dsa_indexer_loss = DSAIndexerLoss.Config(eps=1e-10).build()
         self.layer_id = config.layer_id
         self.n_layers = config.n_layers
@@ -357,27 +308,24 @@ class LiLoss(Module):
     def forward(
         self,
         q,
+        kv,
         kv_compress,
+        attn_sink,
         q_indexer,
         k_indexer,
         weights,
         compress_topk_idxs,
         index_score,
+        attention_masks,
         offset,
     ):
         compress_topk_idxs = torch.where(compress_topk_idxs == -1, compress_topk_idxs, compress_topk_idxs - offset)
-        valid_topk_mask = compress_topk_idxs != -1
-        gather_idxs = compress_topk_idxs.clamp_min(0)
-        selected_kv = torch.gather(
-            kv_compress.unsqueeze(1).expand(-1, q.size(1), -1, -1),
-            dim=2,
-            index=gather_idxs.unsqueeze(-1).expand(-1, -1, -1, kv_compress.size(-1)),
-        )
-        selected_main_attn_dist = self.get_attn_scores.forward_sparse(
+        selected_main_attn_dist = self._current_selected_attn_dist(
             q,
-            selected_kv,
-            valid_topk_mask,
-            self.softmax_scale,
+            kv,
+            kv_compress,
+            attn_sink,
+            compress_topk_idxs,
         )
         loss = self.compute_dsa_indexer_loss(
             selected_main_attn_dist,
@@ -387,6 +335,43 @@ class LiLoss(Module):
         )
         self.save_loss(loss)
         return loss
+
+    def _current_selected_attn_dist(
+        self,
+        q,
+        kv,
+        kv_compress,
+        attn_sink,
+        compress_topk_idxs,
+    ):
+        bsz, seqlen, _, _ = q.size()
+        kv_len = kv.size(1)
+        query = q.transpose(1, 2).detach()
+        kv_states = torch.cat([kv.detach(), kv_compress.detach()], dim=1)
+        attn_logits = torch.einsum("bhsd,bkhd->bhsk", query, kv_states) * self.softmax_scale
+
+        window_topk_idxs = self.get_window_topk_idxs(self.window_size, bsz, seqlen).to(q.device)
+        cmp_topk_idxs = torch.where(compress_topk_idxs == -1, compress_topk_idxs, compress_topk_idxs + kv_len)
+        topk_idxs = torch.cat([window_topk_idxs, cmp_topk_idxs.to(q.device)], dim=-1).to(torch.long)
+        topk_idxs.masked_fill_(topk_idxs < 0, kv_states.size(1))
+        index_mask = torch.full(
+            (bsz, 1, seqlen, kv_states.size(1) + 1),
+            fill_value=torch.finfo(attn_logits.dtype).min,
+            dtype=attn_logits.dtype,
+            device=attn_logits.device,
+        ).scatter_(-1, topk_idxs.unsqueeze(1), 0)
+
+        attn_logits = attn_logits + index_mask[..., :-1]
+        sinks = attn_sink.detach().reshape(1, -1, 1, 1).expand(bsz, -1, seqlen, -1)
+        combined_logits = torch.cat([attn_logits, sinks], dim=-1)
+        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+        probs = F.softmax(combined_logits, dim=-1, dtype=torch.float32)
+        cmp_attn_dist = probs[..., kv_len:-1].sum(dim=1) / self.n_heads
+
+        sentinel_idx = compress_topk_idxs.clamp(min=0)
+        selected_main_attn_dist = torch.gather(cmp_attn_dist, dim=-1, index=sentinel_idx)
+        selected_main_attn_dist = selected_main_attn_dist.masked_fill(compress_topk_idxs < 0, 0.0)
+        return selected_main_attn_dist
 
 
 class GetWindowTopkIdxs(Module):
@@ -700,6 +685,7 @@ class InnerAttention(Module):
                 n_heads=args.n_heads,
                 softmax_scale=args.head_dim**-0.5,
                 compress_ratio=self.compress_ratio,
+                window_size=args.window_size,
                 layer_id=layer_id,
                 n_layers=args.n_layers,
             ).build()
@@ -727,12 +713,15 @@ class InnerAttention(Module):
         if has_li:
             loss = self.li_loss(
                 q.detach(),
+                kv.detach(),
                 kv_compress.detach() if kv_compress is not None else None,
+                self.attn_sink,
                 q_indexer,
                 k_indexer,
                 weights,
                 compress_topk_idxs,
                 index_score,
+                attention_masks,
                 offset,
             )
             o = DSAIndexerLossAutoScaler.apply(o, loss)

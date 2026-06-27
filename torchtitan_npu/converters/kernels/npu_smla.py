@@ -11,7 +11,6 @@ from typing import Any, NamedTuple, cast
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch_npu
 from torchtitan.models.common import VarlenAttention
 
@@ -595,9 +594,16 @@ def _compute_li_loss(
     loss_scale: float,
 ) -> torch.Tensor:
     student = softmax_out.float().clamp_min(1e-10)
-    teacher = F.normalize(cmp_softmax_l1.float().clamp_min(0), p=1, dim=-1)
-    teacher = teacher.clamp_min(1e-10)
-    return F.kl_div(student.log(), teacher, reduction="none").sum(dim=-1).mean() * loss_scale
+    target = cmp_softmax_l1.float().clamp_min(0)
+    target_sum = target.sum(dim=-1, keepdim=True)
+    valid_target = target_sum > 1e-10
+    # Fully masked rows have no teacher mass; keep logits finite and let target_sum zero them out.
+    student = torch.where(valid_target, student, torch.ones_like(student))
+    teacher = target / target_sum.clamp_min(1e-10)
+    log_teacher = teacher.clamp_min(1e-10).log()
+    loss = (teacher * (log_teacher - student.log())).sum(dim=-1)
+    loss = (target_sum.squeeze(-1) * loss).mean()
+    return loss * loss_scale
 
 
 class LightningIndexerConfig(NamedTuple):
@@ -1539,12 +1545,15 @@ class NpuLiLoss(LiLoss):
     def forward(
         self,
         q,
-        k,
+        kv,
+        kv_compress,
+        attn_sink,
         q_indexer,
         k_indexer,
         weights,
         sparse_indices,
         indexer_score,
+        attention_masks,
         offset,
     ):
         if sparse_indices.dtype != torch.int32:
@@ -1552,7 +1561,7 @@ class NpuLiLoss(LiLoss):
 
         return npu_sparse_lightning_indexer_grad_kl_loss(
             q,
-            k.unsqueeze(2),
+            kv_compress.unsqueeze(2),
             q_indexer,
             k_indexer.unsqueeze(2),
             weights,

@@ -142,18 +142,19 @@ class DSAIndexerLoss(Module):
         topk_indices,
         loss_scale,
     ):
-        index_score = F.softmax(index_score, dim=-1, dtype=torch.float32)
-
         # considering only the selected token
-        selected_main_attn_dist = F.normalize(selected_main_attn_dist, p=1, dim=-1)
-        loss = (
-            F.kl_div(
-                (index_score + self.eps).log(),
-                selected_main_attn_dist + self.eps,
-                reduction="none",
-            )
-            .sum(dim=-1)
-            .mean()
-        )
+        selected_main_attn_dist = selected_main_attn_dist.float().clamp_min(0)
+        target_sum = selected_main_attn_dist.sum(dim=-1, keepdim=True)
+        valid_target = target_sum > self.eps
+        # Fully masked rows have no teacher mass; keep logits finite and let target_sum zero them out.
+        index_score = torch.where(valid_target, index_score, torch.zeros_like(index_score))
+        index_score = F.log_softmax(index_score, dim=-1, dtype=torch.float32)
+
+        selected_main_attn_dist = selected_main_attn_dist / target_sum.clamp_min(self.eps)
+        positive_target = selected_main_attn_dist > 0
+        index_score = torch.where(positive_target, index_score, torch.zeros_like(index_score))
+        log_selected_main_attn_dist = selected_main_attn_dist.clamp_min(self.eps).log()
+        loss = (selected_main_attn_dist * (log_selected_main_attn_dist - index_score)).sum(dim=-1)
+        loss = (target_sum.squeeze(-1) * loss).mean()
         loss *= loss_scale
         return loss
