@@ -44,6 +44,7 @@ def _apply_patches():
 
     # patching torchtitan
     from torchtitan_npu.patches.torchtitan import (  # noqa: F401
+        chat_dataset,
         expert_parallel,
         hf_datasets,
         loss,
@@ -82,10 +83,9 @@ def _apply_patches():
     # patching torch_npu
     from .patches.torch_npu import determinism  # noqa: F401
 
-    # Enable multi-turn chat (system + user + assistant + ...) in ChatDataset.
-    # Patch Qwen3StateDictAdapter.to_hf to sync fqn_to_index_mapping
+    # Patch Qwen3StateDictAdapter.to_hf to sync fqn_to_index_mapping.
+    # Multi-turn chat is handled by the unified chat_dataset patch above.
     from .patches.torchtitan import (
-        multiturn_chat,  # noqa: F401
         qwen3_hf_export,  # noqa: F401
     )
 

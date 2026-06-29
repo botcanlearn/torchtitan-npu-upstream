@@ -9,17 +9,16 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import ActivationCheckpointConfig, TrainingConfig
-from torchtitan.hf_datasets.text_datasets import ChatDataLoader
 from torchtitan.models.qwen3.config_registry import qwen3_0_6b as _upstream_qwen3_0_6b
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.trainer import Trainer
 
-from torchtitan_npu.config.configs import CheckpointConfig, ParallelismConfig
+from torchtitan_npu.config.configs import ChatDataLoaderConfig, CheckpointConfig, ParallelismConfig
 from torchtitan_npu.converters import get_model_converter_config
 from torchtitan_npu.models.qwen3 import model_registry
 
 
-def sft_qwen3_30ba3b_math() -> Trainer.Config:
+def sft_qwen3_30ba3b_gsm8k() -> Trainer.Config:
     def process_sample(sample):
         answer = sample["answer"]
         reasoning, final_answer = answer.rsplit("####", 1)
@@ -65,7 +64,7 @@ def sft_qwen3_30ba3b_math() -> Trainer.Config:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=4,
         ),
-        dataloader=ChatDataLoader.Config(
+        dataloader=ChatDataLoaderConfig(
             dataset_path="openai/gsm8k",
             load_dataset_kwargs={"name": "main", "split": "train"},
             sample_processor=process_sample,
@@ -168,7 +167,7 @@ def sft_qwen3_1_7b_wordle() -> Trainer.Config:
             expert_tensor_parallel_degree=1,
             context_parallel_degree=1,
         ),
-        dataloader=ChatDataLoader.Config(
+        dataloader=ChatDataLoaderConfig(
             dataset_path="willcb/V3-wordle",
             load_dataset_kwargs={"split": "train"},
             sample_processor=_process_wordle_sample,

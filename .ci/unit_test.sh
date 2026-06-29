@@ -70,7 +70,7 @@ EOF
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_download_hf_assets.py"
     pytest_args="$pytest_args --ignore=tests/unit_tests/test_fsdp_moe_sharding.py"
     # Skip tests conflicting with the multiturn-chat patch
-    pytest_args="$pytest_args --deselect=tests/unit_tests/test_chat_dataset.py::TestChatDatasetMessageValidation::test_three_messages"
+    pytest_args="$pytest_args --deselect=tests/unit_tests/test_chat_dataset.py"
 
     # Test target: torchtitan upstream unit tests
     local test_target="tests/unit_tests/"

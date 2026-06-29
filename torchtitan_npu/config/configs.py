@@ -40,8 +40,12 @@ from torchtitan.config import (
 from torchtitan.config import (
     TrainingConfig as _BaseTrainingConfig,
 )
+from torchtitan.hf_datasets.text_datasets import ChatDataLoader as _ChatDataLoader
 from torchtitan.tools.profiling import ProfilingConfig as _BaseProfilingConfig
 from torchtitan.trainer import Trainer
+
+from torchtitan_npu.patches.encoders.base import ChatEncoderConfig
+from torchtitan_npu.patches.encoders.dsv4 import DSV4EncoderConfig
 
 
 @dataclass(kw_only=True, slots=True)
@@ -209,6 +213,19 @@ class CheckpointConfig(CheckpointManager.Config):
     """
     Whether to clear the NPU caching allocator after checkpoint save returns.
     This helps release temporary checkpoint buffers before training resumes.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class ChatDataLoaderConfig(_ChatDataLoader.Config):
+    """ChatDataLoader config with NPU-specific chat_encoder field."""
+
+    chat_encoder: DSV4EncoderConfig | ChatEncoderConfig | None = None
+    """
+    Configurable non-Jinja chat encoder (e.g. DSV4ChatEncoder).
+    When set, overrides the tokenizer's apply_chat_template for encoding
+    conversations that cannot be expressed as Jinja2 templates (e.g. DS-V4
+    DSML tool calling, thinking/chat mode switching).
     """
 
 

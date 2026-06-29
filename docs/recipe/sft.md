@@ -1,79 +1,222 @@
 # SFT 指令微调
 
-torchtitan-npu 支持基于对话数据的指令微调（Supervised Fine-Tuning, SFT）。当前已提供 Qwen3-30B-A3B 模型在 NPU 上的开箱即用 SFT 配置，支持 Ulysses Context Parallel 长序列训练。
+torchtitan-npu 支持基于对话数据的指令微调（Supervised Fine-Tuning, SFT）。当前已提供 Qwen3 和 DeepSeek-V4 两个模型系列在 NPU 上的 SFT 配置，支持单轮/多轮对话、tool call、自定义编码器、Ulysses Context Parallel 长序列训练。
 
-## 快速开始：Qwen3-30B-A3B SFT
+## 支持矩阵
 
-### 前置条件
+| 模型 | 任务 / 数据集 | 编码方式 | 单轮 | 多轮 | Tool Call | 配置名 |
+|------|-------------|---------|------|------|-----------|--------|
+| Qwen3-30B-A3B | GSM8K | Jinja chat template | ✅ | — | — | `sft_qwen3_30ba3b_gsm8k` |
+| Qwen3-1.7B | Wordle | Jinja chat template | — | ✅ | — | `sft_qwen3_1_7b_wordle` |
+| DeepSeek-V4 | tau-bench | 自定义编码器 (encoding_dsv4.py) | — | ✅ | ✅ | `sft_deepseek_v4_flash_debug_256_experts_43_layers_tau` |
+| DeepSeek-V4 | GSM8K | 自定义编码器 (encoding_dsv4.py) | ✅ | — | — | `sft_deepseek_v4_flash_debug_256_experts_43_layers_gsm8k` |
 
-- 准备 Qwen3-30B-A3B 的 HuggingFace 预训练权重（如 `./assets/hf/Qwen3-30B-A3B`）
-- 准备训练数据集（详见[数据预处理](#数据预处理)）
+## 架构概述
 
-### 一键启动
+torchtitan-npu 的 SFT 能力由两层正交配置驱动：
+
+- **chat_encoder**（模型级）：决定消息如何渲染为文本。支持 Jinja chat template（默认）和自定义编码器（通过 `BaseChatEncoder` 子类）。
+- **sample_processor**（数据集级）：决定原始数据样本如何转为 OpenAI 格式消息列表。不同数据集写不同的 `process_sample` 函数。
+
+```text
+原始样本 → sample_processor → 消息列表 → chat template / chat_encoder → token ids
+                                                                      ↓
+                                                           label masking
+```
+
+### 单轮 vs 多轮
+
+框架统一支持单轮和多轮消息，无需手动指定：
+
+- Qwen3 / ChatML 模板：通过 `<|im_start|>assistant\n` 和 `<|im_end|>` 定位每轮 assistant 回复
+- DeepSeek-V4：通过 `DSV4ChatEncoder.encode_messages_with_assistant_ranges()` 返回的分段区间定位 assistant 回复
+- 其它无法定位 assistant 区间的模板或编码器会直接报错
+
+---
+
+## 快速开始
+
+### Qwen3-30B-A3B SFT（GSM8K 单轮）
 
 ```bash
-MODULE=torchtitan_npu.models.qwen3 CONFIG=sft_qwen3_30ba3b_math bash scripts/run_train.sh
+MODULE=torchtitan_npu.models.qwen3 CONFIG=sft_qwen3_30ba3b_gsm8k bash scripts/run_train.sh
 ```
+
+### Qwen3-1.7B SFT（Wordle 多轮）
+
+```bash
+NGPU=1 MODULE=torchtitan_npu.models.qwen3 CONFIG=sft_qwen3_1_7b_wordle bash scripts/run_train.sh --checkpoint.last_save_in_hf
+```
+
+详细数据准备、训练和评测流程见文末 [Wordle SFT 样例](#附录-awordle-sft-样例)。
+
+### DeepSeek-V4 SFT（tau-bench 多轮 + Tool Call）
+
+```bash
+MODULE=torchtitan_npu.models.deepseek_v4 CONFIG=sft_deepseek_v4_flash_debug_256_experts_43_layers_tau bash scripts/run_train.sh
+```
+
+### DeepSeek-V4 SFT（GSM8K 单轮）
+
+```bash
+MODULE=torchtitan_npu.models.deepseek_v4 CONFIG=sft_deepseek_v4_flash_debug_256_experts_43_layers_gsm8k bash scripts/run_train.sh
+```
+
+---
+
+## 自定义编码器（ChatEncoder）
+
+当 tokenizer 的 `apply_chat_template()` 不足以表达模型格式或定位监督区间时（如 DeepSeek-V4 的 DSML tool calling、thinking/chat 模式切换、tool 消息合并），需要通过自定义编码器替代 tokenizer 模板路径。
+
+自定义编码器继承 `BaseChatEncoder`。用于训练时，如果模型的分段边界不能由
+ChatML header 扫描得到，编码器需要实现 `encode_messages_with_assistant_ranges()`，
+一次性返回完整文本、token 序列，以及需要计算 loss 的 assistant token 区间。
+
+不设 `chat_encoder` 时，回退到 tokenizer 的 Jinja2 chat template。当前只支持
+ChatML 模板（通过 `<|im_start|>assistant\n` 定位 assistant 区间）；无法定位到
+ChatML assistant header 的模板会直接报错，避免静默监督到错误 token。
+
+### DSV4ChatEncoder
+
+DeepSeek-V4 的编码器，薄封装 `encoding_dsv4.py`，并在渲染时按 message 片段
+计算 assistant token 区间。这样可以复用 DeepSeek 官方模板逻辑，同时避免把
+`<｜Assistant｜>`、`<think>` 等 prompt marker 误纳入监督。
+
+- `thinking_mode`：`"thinking"`（默认，含思考过程）或 `"chat"`（纯对话）
+- `drop_thinking`：是否在训练时丢弃思考内容（默认 `True`，节省 token）
+- `reasoning_effort`：推理力度，`"max"` / `"high"` / `None`
+
+配置示例：
+
+```python
+from torchtitan_npu.patches.encoders import DSV4EncoderConfig
+
+dataloader=ChatDataLoaderConfig(
+    ...,
+    chat_encoder=DSV4EncoderConfig(
+        encoding_module_path="/path/to/encoding_dsv4.py",
+        thinking_mode="thinking",    # "chat" | "thinking"
+        drop_thinking=True,
+        reasoning_effort=None,       # "max" | "high" | None
+    ),
+)
+```
+
+### 为新模型添加编码器
+
+1. 在 `torchtitan_npu/patches/encoders/` 下新建模块（如 `my_model.py`）
+2. 继承 `BaseChatEncoder`，实现 `encode_messages_with_assistant_ranges()`
+3. 继承 `ChatEncoderConfig`，实现 `build()`
+4. 在 `encoders/__init__.py` 中导出
+5. 在 `config_registry.py` 的 SFT 配置中通过 `chat_encoder=MyEncoderConfig(...)` 引用
+
+示例：
+
+```python
+from torchtitan_npu.patches.encoders import BaseChatEncoder, ChatEncoderConfig
+
+class MyChatEncoder(BaseChatEncoder):
+    def encode_messages_with_assistant_ranges(self, messages, tokenizer, eos_id):
+        full_text = render_messages(messages)
+        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != eos_id:
+            full_tokens.append(eos_id)
+
+        # 返回需要计算 loss 的 assistant token 区间，范围基于 full_tokens。
+        assistant_ranges = locate_assistant_token_ranges(messages, tokenizer)
+        return full_text, full_tokens, assistant_ranges
+
+@dataclass(kw_only=True, slots=True)
+class MyEncoderConfig(ChatEncoderConfig):
+    my_param: str = "default"
+
+    def build(self) -> MyChatEncoder:
+        return MyChatEncoder(my_param=self.my_param)
+```
+
+---
 
 ## 数据预处理
 
-SFT 的数据预处理在 `torchtitan_npu/models/qwen3/config_registry.py` 的配置函数中完成。以 `sft_qwen3_30ba3b_math` 为例，它使用 GSM8K 数据集，`process_sample` 将原始样本转为 `[user, assistant]` 消息列表：
+### sample_processor
+
+SFT 的数据预处理在 `config_registry.py` 的配置函数中完成。`process_sample` 接收 HuggingFace 数据集的原始样本，返回 OpenAI 格式消息列表。
+
+#### 单轮示例（Qwen3 + GSM8K）
 
 ```python
-def sft_qwen3_30ba3b_math() -> Trainer.Config:
-
-    def process_sample(sample):
-        answer = sample["answer"]
-        reasoning, final_answer = answer.rsplit("####", 1)
-        return [
-            {"role": "user", "content": sample["question"]},
-            {
-                "role": "assistant",
-                "reasoning_content": reasoning.strip(),
-                "content": final_answer.strip(),
-            },
-        ]
-
-    # ... 其余配置 ...
-    dataloader=ChatDataLoader.Config(
-        dataset_path="openai/gsm8k",
-        load_dataset_kwargs={"name": "main", "split": "train"},
-        sample_processor=process_sample,
-    )
+def process_sample(sample):
+    answer = sample["answer"]
+    reasoning, final_answer = answer.rsplit("####", 1)
+    return [
+        {"role": "user", "content": sample["question"]},
+        {
+            "role": "assistant",
+            "reasoning_content": reasoning.strip(),
+            "content": final_answer.strip(),
+        },
+    ]
 ```
 
-框架拿到 `process_sample` 返回的消息列表后，自动完成以下处理：
+#### 多轮 + Tool Call 示例（DeepSeek-V4 + tau-bench）
 
-1. 调用 tokenizer 的 chat template 将消息渲染为完整文本
-2. 通过增量前缀重 tokenize 定位 prompt/response 边界，对 prompt 部分做 label mask（仅对 assistant 回复计算 loss）
-3. 对多个样本做 greedy packing（将短样本打包到同一 seq_len 窗口，EOS 分隔，per-document position 重置）
-4. 超过 seq_len 的样本自动丢弃（而非截断）
+```python
+def process_tau_sample(sample):
+    import json
+
+    raw_messages = sample["messages"]
+    messages = json.loads(raw_messages) if isinstance(raw_messages, str) else raw_messages
+    messages = [dict(m) for m in messages]
+
+    raw_tools = sample.get("tools", [])
+    tools = json.loads(raw_tools) if isinstance(raw_tools, str) else raw_tools
+
+    # 将 tools 注入 system 消息（DSV4 编码器要求）
+    if tools:
+        if messages and messages[0].get("role") == "system":
+            messages[0] = dict(messages[0])
+            messages[0]["tools"] = tools
+        else:
+            messages.insert(0, {"role": "system", "content": "", "tools": tools})
+
+    return messages
+```
 
 ### 消息格式
 
-`process_sample` 需返回如下格式的消息列表：
+`process_sample` 返回 OpenAI 格式消息列表：
 
 ```python
+# 单轮
+[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+
+# 带 thinking
+[{"role": "user", "content": "..."}, {"role": "assistant", "reasoning_content": "...", "content": "..."}]
+
+# 多轮 + tool call
 [
-    {"role": "user", "content": "用户输入"},
-    {"role": "assistant", "content": "助手回复"},
+    {"role": "system", "content": "...", "tools": [...]},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "...", "tool_calls": [...]},
+    {"role": "tool", "content": "...", "tool_call_id": "..."},
+    {"role": "assistant", "content": "..."},
 ]
 ```
 
-Qwen3 支持 thinking mode，可在 assistant 消息中添加 `reasoning_content` 字段：
+### 框架自动处理
 
-```python
-[
-    {"role": "user", "content": "用户输入"},
-    {"role": "assistant", "reasoning_content": "思考过程", "content": "最终回答"},
-]
-```
+框架拿到消息列表后自动完成：
 
-> **限制**：当前仅支持单轮对话（一条 user + 一条 assistant），暂不支持多轮。
+1. **编码**：通过 Jinja2 chat template 或 `chat_encoder` 渲染为完整 token 序列
+2. **Label masking**：通过 ChatML header 扫描或编码器返回的 assistant 区间，仅对 assistant 回复计算 loss
+3. **Packing**：对多个样本做 greedy packing（短样本打包到同一 seq_len 窗口，EOS 分隔，per-document position 重置）
+4. **截断/丢弃**：超过 seq_len 的样本自动丢弃（而非截断）
 
-## Ulysses Context Parallel
+---
 
-torchtitan-npu 为 Qwen3 提供了 Ulysses 风格的 CP 实现。在配置中设置 `context_parallel_degree > 1` 即可启用：
+## Context Parallel
+
+torchtitan-npu 为 Qwen3 和 DeepSeek-V4 提供了自定义 CP 实现。在配置中设置 `context_parallel_degree > 1` 即可启用：
 
 ```bash
 bash scripts/run_train.sh --parallelism.context_parallel_degree 4
@@ -89,7 +232,7 @@ SFT 配置默认从 HuggingFace 格式加载预训练权重：
 
 ```bash
 --checkpoint.initial_load_in_hf \
---checkpoint.initial_load_path /path/to/Qwen3-30B-A3B
+--checkpoint.initial_load_path /path/to/model
 ```
 
 > **注意**：`checkpoint.folder` 不能与 `checkpoint.initial_load_path` 相同，否则框架会跳过 HuggingFace 权重加载。
@@ -216,7 +359,7 @@ pprint.pprint(next(iter(ds)), width=100, depth=3)
 
 同时，还需要对对话的 assistant 部分进行 mask，效果等价于 prime-rl 的 `role_to_mask: msg["role"] != "assistant"`——仅对 assistant 消息计算 loss，user（环境反馈）不参与训练。
 
-本 recipe 通过 `torchtitan_npu/patches/torchtitan/multiturn_chat.py` 解决以上问题（`torchtitan_npu/__init__.py` 自动加载，无需手动配置）。
+本 recipe 通过统一的 `torchtitan_npu/patches/torchtitan/chat_dataset.py` 解决以上问题（`torchtitan_npu/__init__.py` 自动加载，无需手动配置）。该 patch 同时服务 Qwen3 多轮 SFT 和 DeepSeek-V4 tool-call SFT，模型格式差异由 Jinja chat template 或 `chat_encoder` 处理。
 
 ### 运行训练任务
 

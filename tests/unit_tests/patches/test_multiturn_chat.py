@@ -3,7 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for the multiturn_chat patch (_patched_validate + _patched_tokenize)."""
+"""Unit tests for the unified chat_dataset multi-turn patch."""
 
 from unittest.mock import MagicMock
 
@@ -11,25 +11,33 @@ import pytest
 import torch
 
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan_npu.patches.torchtitan.multiturn_chat import (
-    _patched_tokenize,
-    _patched_validate,
+from torchtitan_npu.patches.torchtitan.chat_dataset import (
+    _patched_tokenize_sample,
+    _patched_validate_messages,
 )
 
 
 # ---------------------------------------------------------------------------
-# _patched_validate
+# _patched_validate_messages
 # ---------------------------------------------------------------------------
 
 
 class TestPatchedValidate:
     def test_valid_single_turn(self):
-        _patched_validate(
+        _patched_validate_messages(
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        )
+
+    def test_valid_single_turn_bound_method_call(self):
+        class DatasetLike:
+            _validate_messages = staticmethod(_patched_validate_messages)
+
+        DatasetLike()._validate_messages(
             [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
         )
 
     def test_valid_multi_turn(self):
-        _patched_validate([
+        _patched_validate_messages([
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
@@ -38,7 +46,7 @@ class TestPatchedValidate:
         ])
 
     def test_valid_with_tool_role(self):
-        _patched_validate([
+        _patched_validate_messages([
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello", "tool_calls": []},
             {"role": "tool", "content": "result"},
@@ -47,36 +55,36 @@ class TestPatchedValidate:
 
     def test_rejects_unknown_role(self):
         with pytest.raises(ValueError, match="Unknown role"):
-            _patched_validate(
+            _patched_validate_messages(
                 [{"role": "user", "content": "hi"}, {"role": "bot", "content": "hello"}]
             )
 
     def test_rejects_single_message(self):
         with pytest.raises(ValueError, match="at least 2"):
-            _patched_validate([{"role": "user", "content": "hi"}])
+            _patched_validate_messages([{"role": "user", "content": "hi"}])
 
     def test_rejects_empty(self):
         with pytest.raises(ValueError, match="at least 2"):
-            _patched_validate([])
+            _patched_validate_messages([])
 
     # --- 2-message strict mode ---
 
     def test_2msg_rejects_system_first(self):
         with pytest.raises(ValueError, match="First message must be 'user'"):
-            _patched_validate(
+            _patched_validate_messages(
                 [{"role": "system", "content": "sys"}, {"role": "assistant", "content": "ok"}]
             )
 
     def test_2msg_rejects_user_user(self):
         with pytest.raises(ValueError, match="Second message must be 'assistant'"):
-            _patched_validate(
+            _patched_validate_messages(
                 [{"role": "user", "content": "hi"}, {"role": "user", "content": "again"}]
             )
 
     # --- multi-turn relaxed mode ---
 
     def test_multiturn_allows_system_first(self):
-        _patched_validate([
+        _patched_validate_messages([
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": "hello"},
@@ -84,7 +92,7 @@ class TestPatchedValidate:
 
     def test_multiturn_rejects_assistant_first(self):
         with pytest.raises(ValueError, match="must be 'user' or 'system'"):
-            _patched_validate([
+            _patched_validate_messages([
                 {"role": "assistant", "content": "hello"},
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "ok"},
@@ -120,7 +128,7 @@ class TestPatchedValidate:
 
 
 class TestHardcodedExactMatch:
-    """Each test compares _patched_tokenize output against a hardcoded reference."""
+    """Each test compares _patched_tokenize_sample output against a hardcoded reference."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
@@ -141,7 +149,8 @@ class TestHardcodedExactMatch:
         mock._sample_processor = MagicMock(return_value=messages)
         mock._tokenizer = self._tok
         mock._sample_idx = 0
-        return _patched_tokenize(mock, {"sample": 1})
+        mock._chat_encoder = None
+        return _patched_tokenize_sample(mock, {"sample": 1})
 
     def test_system_user_assistant(self):
         input_ids, label_ids = self._run([
@@ -277,15 +286,388 @@ class TestTwoMessageDelegation:
         # Mock tokenizer: apply_chat_template returns a string (upstream expects this)
         mock._tokenizer = MagicMock()
         mock._tokenizer.apply_chat_template = MagicMock(
-            return_value="<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nhello<|im_end|>"
+            side_effect=[
+                "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nhello<|im_end|>",
+                "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n",
+            ]
         )
-        mock._tokenizer.encode = MagicMock(return_value=[100, 1, 2, 3, 151645])
+        mock._tokenizer.encode = MagicMock(
+            side_effect=[
+                [100, 1, 2, 3, 151645],
+                [100, 1],
+            ]
+        )
         mock._validate_messages = MagicMock()
         mock._logged_first_sample = True
         mock._sample_idx = 0
+        mock._chat_encoder = None
 
-        result = _patched_tokenize(mock, {"sample": 1})
+        result = _patched_tokenize_sample(mock, {"sample": 1})
         assert result is not None
         input_ids, label_ids = result
         assert len(input_ids) == len(label_ids)
         assert len(input_ids) > 0
+
+
+class _RewriteThinkingTokenizer:
+    eos_id = 3
+
+    @staticmethod
+    def _strip_think(content):
+        start = content.find("<think>")
+        end = content.find("</think>")
+        if start == -1 or end == -1:
+            return content
+        return content[:start] + content[end + len("</think>"):]
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+        parts = []
+        for idx, msg in enumerate(messages):
+            content = msg["content"]
+            if msg["role"] == "assistant" and idx != len(messages) - 1:
+                content = self._strip_think(content)
+            parts.append(f"<{msg['role']}>{content}</{msg['role']}>")
+        if add_generation_prompt:
+            parts.append("<assistant>")
+        return "".join(parts)
+
+    def encode(self, text, add_bos=True, add_eos=False):
+        ids = [ord(ch) + 10 for ch in text]
+        if add_bos:
+            ids.insert(0, 2)
+        if add_eos:
+            ids.append(self.eos_id)
+        return ids
+
+    def decode(self, ids):
+        chars = []
+        for token_id in ids:
+            if token_id in (2, self.eos_id):
+                continue
+            chars.append(chr(token_id - 10))
+        return "".join(chars)
+
+
+class TestAssistantRangeMasking:
+    @staticmethod
+    def test_prefix_match_does_not_train_assistant_header():
+        class HeaderTokenizer:
+            eos_id = 3
+
+            @staticmethod
+            def apply_chat_template(messages, tokenize=False, add_generation_prompt=False):
+                text = "".join(
+                    f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>\n"
+                    for msg in messages
+                ).rstrip("\n")
+                if add_generation_prompt:
+                    text += "<|im_start|>assistant\n"
+                return text
+
+            @staticmethod
+            def encode(text, add_bos=True, add_eos=False):
+                ids = [ord(ch) + 10 for ch in text]
+                if add_bos:
+                    ids.insert(0, 2)
+                if add_eos:
+                    ids.append(HeaderTokenizer.eos_id)
+                return ids
+
+            @staticmethod
+            def decode(ids):
+                return "".join(chr(token_id - 10) for token_id in ids if token_id not in (2, HeaderTokenizer.eos_id))
+
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        tokenizer = HeaderTokenizer()
+        mock = MagicMock()
+        mock.seq_len = 4096
+        mock._eos_id = tokenizer.eos_id
+        mock._sample_processor = MagicMock(return_value=messages)
+        mock._tokenizer = tokenizer
+        mock._sample_idx = 0
+        mock._logged_first_sample = True
+        mock._chat_encoder = None
+
+        _input_ids, label_ids = _patched_tokenize_sample(mock, {"sample": 1})
+        kept = [token_id for token_id in label_ids if token_id != IGNORE_INDEX]
+        kept_text = tokenizer.decode(kept)
+
+        assert "answer" in kept_text
+        assert "<|im_start|>assistant" not in kept_text
+        assert "question" not in kept_text
+
+    @staticmethod
+    def test_unknown_non_chatml_template_raises():
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": "<think>hidden crane reasoning</think><guess>[crane]</guess>",
+            },
+            {"role": "user", "content": "feedback should be masked"},
+            {
+                "role": "assistant",
+                "content": "<think>hidden plane reasoning</think><guess>[plane]</guess>",
+            },
+            {"role": "user", "content": "game end should be masked"},
+        ]
+        tokenizer = _RewriteThinkingTokenizer()
+        mock = MagicMock()
+        mock.seq_len = 4096
+        mock._eos_id = tokenizer.eos_id
+        mock._sample_processor = MagicMock(return_value=messages)
+        mock._tokenizer = tokenizer
+        mock._sample_idx = 0
+        mock._logged_first_sample = True
+        mock._chat_encoder = None
+
+        with pytest.raises(ValueError, match="Unable to locate ChatML assistant ranges"):
+            _patched_tokenize_sample(mock, {"sample": 1})
+
+    @staticmethod
+    def test_real_dsv4_encoder_masks_prompt_marker_but_keeps_assistant_and_eos(tmp_path):
+        from torchtitan_npu.patches.encoders.dsv4 import DSV4ChatEncoder
+
+        class StubTokenizer:
+            eos_id = 3
+
+            _special_tokens = [
+                "<｜begin▁of▁sentence｜>",
+                "<｜end▁of▁sentence｜>",
+                "<｜User｜>",
+                "<｜Assistant｜>",
+                "<think>",
+                "</think>",
+                "<tool_result>",
+                "</tool_result>",
+                "<tool_call>",
+                "</tool_call>",
+            ]
+
+            _special_ids = {token: 10_000 + idx for idx, token in enumerate(_special_tokens)}
+
+            @classmethod
+            def encode(cls, text, add_bos=True, add_eos=False):
+                ids = []
+                pos = 0
+                while pos < len(text):
+                    match = None
+                    for token in sorted(cls._special_tokens, key=len, reverse=True):
+                        if text.startswith(token, pos):
+                            match = token
+                            break
+                    if match is not None:
+                        ids.append(cls._special_ids[match])
+                        pos += len(match)
+                    else:
+                        ids.append(ord(text[pos]) + 100)
+                        pos += 1
+                if add_bos:
+                    ids.insert(0, 2)
+                if add_eos:
+                    ids.append(cls.eos_id)
+                return ids
+
+            @classmethod
+            def decode(cls, ids):
+                reverse = {v: k for k, v in cls._special_ids.items()}
+                chars = []
+                for token_id in ids:
+                    if token_id in (2, cls.eos_id):
+                        continue
+                    if token_id in reverse:
+                        chars.append(reverse[token_id])
+                    else:
+                        chars.append(chr(token_id - 100))
+                return "".join(chars)
+
+        encoding_module = tmp_path / "encoding_dsv4.py"
+        encoding_module.write_text(
+            """
+def merge_tool_messages(messages):
+    return messages
+
+
+def sort_tool_results_by_call_order(messages):
+    return messages
+
+
+def _drop_thinking_messages(messages):
+    raise AssertionError("_drop_thinking_messages should not run when tools are present")
+
+
+def render_message(index, messages, thinking_mode, drop_thinking=True, reasoning_effort=None):
+    msg = messages[index]
+    role = msg["role"]
+    content = msg.get("content", "")
+    if role == "system":
+        return "<｜begin▁of▁sentence｜>" + content
+    if role == "user":
+        prompt = "<｜User｜>" + content + "<｜Assistant｜>"
+        if thinking_mode == "thinking":
+            prompt += "<think>"
+        return prompt
+    if role == "tool":
+        return "<tool_result>" + content + "</tool_result>"
+    if role == "assistant":
+        reasoning = msg.get("reasoning_content", "")
+        if reasoning and drop_thinking:
+            reasoning = ""
+        if reasoning:
+            return "<think>" + reasoning + "</think>" + content + "<｜end▁of▁sentence｜>"
+        return content + "<｜end▁of▁sentence｜>"
+    raise NotImplementedError(role)
+""",
+            encoding="utf-8",
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": "system",
+                "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
+            },
+            {"role": "user", "content": "question"},
+            {
+                "role": "assistant",
+                "reasoning_content": "plan tool use",
+                "content": "",
+                "tool_calls": [{"type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+            },
+            {"role": "tool", "content": "tool result"},
+            {"role": "assistant", "reasoning_content": "final reasoning", "content": "final answer"},
+        ]
+
+        tokenizer = StubTokenizer()
+        encoder = DSV4ChatEncoder(
+            encoding_module_path=str(encoding_module),
+            thinking_mode="thinking",
+            drop_thinking=True,
+            reasoning_effort=None,
+        )
+
+        mock = MagicMock()
+        mock.seq_len = 4096
+        mock._eos_id = tokenizer.eos_id
+        mock._sample_processor = MagicMock(return_value=messages)
+        mock._tokenizer = tokenizer
+        mock._sample_idx = 9
+        mock._logged_first_sample = True
+        mock._chat_encoder = encoder
+
+        _input_ids, label_ids = _patched_tokenize_sample(mock, {"sample": 1})
+        kept = [token_id for token_id in label_ids if token_id != IGNORE_INDEX]
+        kept_text = tokenizer.decode(kept)
+        full_text = tokenizer.decode(_input_ids + [tokenizer.eos_id])
+
+        assert "<｜Assistant｜>" in full_text
+        assert "<｜Assistant｜>" not in kept_text
+        assert "plan tool use" in kept_text
+        assert "final answer" in kept_text
+        assert "<｜end▁of▁sentence｜>" in kept_text
+        assert "question" not in kept_text
+
+    @staticmethod
+    def test_dsv4_encoder_rejects_boundary_retokenization():
+        from torchtitan_npu.patches.encoders.dsv4 import DSV4ChatEncoder
+
+        class ContextSensitiveTokenizer:
+            eos_id = 3
+
+            @staticmethod
+            def encode(text, add_bos=True, add_eos=False):
+                if text == "<A>":
+                    ids = [11, 12]
+                elif text == "<A>B":
+                    ids = [99]
+                else:
+                    ids = [ord(ch) + 10 for ch in text]
+                if add_bos:
+                    ids.insert(0, 2)
+                if add_eos:
+                    ids.append(ContextSensitiveTokenizer.eos_id)
+                return ids
+
+        class BrokenEncImpl:
+            @staticmethod
+            def merge_tool_messages(messages):
+                return messages
+
+            @staticmethod
+            def sort_tool_results_by_call_order(messages):
+                return messages
+
+            @staticmethod
+            def _drop_thinking_messages(messages):
+                return messages
+
+            @staticmethod
+            def render_message(index, messages, thinking_mode, drop_thinking=True, reasoning_effort=None):
+                del messages, thinking_mode, drop_thinking, reasoning_effort
+                return "<A>" if index == 0 else "B"
+
+        messages = [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a"},
+        ]
+        encoder = DSV4ChatEncoder.__new__(DSV4ChatEncoder)
+        encoder._enc = BrokenEncImpl()
+        encoder.thinking_mode = "thinking"
+        encoder.drop_thinking = True
+        encoder.reasoning_effort = None
+        tokenizer = ContextSensitiveTokenizer()
+
+        with pytest.raises(ValueError, match="assistant span prefix alignment failed"):
+            DSV4ChatEncoder.encode_messages_with_assistant_ranges(encoder, messages, tokenizer, tokenizer.eos_id)
+
+    @staticmethod
+    def test_all_masked_sample_is_dropped(caplog):
+        class CharTokenizer:
+            eos_id = 3
+
+            @staticmethod
+            def encode(text, add_bos=True, add_eos=False):
+                ids = [ord(ch) + 10 for ch in text]
+                if add_bos:
+                    ids.insert(0, 2)
+                if add_eos:
+                    ids.append(CharTokenizer.eos_id)
+                return ids
+
+            @staticmethod
+            def decode(ids):
+                return "".join(chr(token_id - 10) for token_id in ids if token_id not in (2, CharTokenizer.eos_id))
+
+        class EmptySpanEncoder:
+            @staticmethod
+            def encode_messages_with_assistant_ranges(messages, tokenizer, eos_id):
+                del messages, eos_id
+                full_text = "<|im_start|>user\nquestion<|im_end|>\n"
+                full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+                if full_tokens[-1] != tokenizer.eos_id:
+                    full_tokens.append(tokenizer.eos_id)
+                return full_text, full_tokens, []
+
+        messages = [
+            {"role": "user", "content": "question"},
+        ]
+        tokenizer = CharTokenizer()
+        mock = MagicMock()
+        mock.seq_len = 4096
+        mock._eos_id = tokenizer.eos_id
+        mock._sample_processor = MagicMock(return_value=messages)
+        mock._tokenizer = tokenizer
+        mock._sample_idx = 7
+        mock._logged_first_sample = True
+        mock._chat_encoder = EmptySpanEncoder()
+
+        with caplog.at_level("WARNING"):
+            result = _patched_tokenize_sample(mock, {"sample": 1})
+
+        assert result is None
+        assert "Dropping sample 7: all labels are masked" in caplog.text
