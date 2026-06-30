@@ -10,3 +10,4 @@ ninja
 triton-ascend==3.2.1
 scipy
 safetensors==0.7.0
+torchao==0.17.0

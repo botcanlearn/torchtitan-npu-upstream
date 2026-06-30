@@ -37,13 +37,6 @@ group_size_params = {
 }
 
 
-def npu_grouped_mm(x, weight, group_list):
-    # This function is replaced at runtime by quantization converters
-    # (e.g. HiF8 / MXFP8) that patch the reference to quantize inputs
-    # before the grouped MM (see patches/quantization/quantize.py).
-    return torch._grouped_mm(x, weight, group_list)
-
-
 def _run_experts_grouped_mm(
     w13: torch.Tensor | None,
     w2: torch.Tensor,
@@ -56,7 +49,7 @@ def _run_experts_grouped_mm(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int64)
     if w13 is None:
         raise ValueError("w13 cannot be None for grouped_mm experts")
-    h = npu_grouped_mm(x.bfloat16(), w13.bfloat16().transpose(-2, -1), offsets)
+    h = torch._grouped_mm(x.bfloat16(), w13.bfloat16().transpose(-2, -1), offs=offsets)
     # DSv4 injects ``swiglu_limit`` on its GroupedExperts to bound gate/up before
     # the swiglu activation. Without this clamp the bf16 grouped_mm output can
     # overflow during the first optimizer step under sqrtsoftplus routing and
@@ -69,7 +62,7 @@ def _run_experts_grouped_mm(
     h = torch_npu.npu_swiglu(h, dim=-1)
     if routed_scores is not None:
         h = h * routed_scores.to(h.dtype)
-    out = npu_grouped_mm(h, w2.bfloat16().transpose(-2, -1), offsets).type_as(x)
+    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 
     return out
 

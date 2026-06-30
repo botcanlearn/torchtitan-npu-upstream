@@ -121,8 +121,20 @@ def deepseek_v4_flash_single_server_16_experts_43_layers_mxfp8() -> TrainerConfi
             converters=[
                 *_enable_all_converters(),
                 MXFP8Converter.Config(
-                    recipe_name="mxfp8",  # pyrefly: ignore [bad-argument-type]
-                    filter_fqns=["output", "router.gate", "compressor"],  # pyrefly: ignore [unexpected-keyword]
+                    recipe_name="mxfp8_rceil",
+                    fqns=[
+                        "pre_attention.wq_a",
+                        "pre_attention.wq_b",
+                        "pre_attention.wkv",
+                        "pre_attention.indexer.wq_b",
+                        "pre_attention.indexer.weights_proj",
+                        "post_attention.wo_a",
+                        "post_attention.wo_b",
+                        "moe.experts",
+                        "moe.shared_experts",
+                        "e_proj",
+                        "h_proj",
+                    ],
                 ),
             ]
         ),

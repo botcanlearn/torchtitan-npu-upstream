@@ -5,12 +5,10 @@
 import pickle
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import torch
 
-from torchtitan_npu.patches.quantization import quantize
 from torchtitan_npu.patches.torch import clip_grad
 
 
@@ -86,20 +84,6 @@ def test_checkpoint_manager_dcp_save_builds_writer_for_all_async_modes(monkeypat
         assert captured["kwargs"]["async_checkpointer_type"] is checkpoint.AsyncCheckpointerType.PROCESS
 
 
-def test_register_quantize_module_handler_registers_handler():
-    class DummyConfig:
-        pass
-
-    def handler(module, config):
-        return module
-
-    handler_registry = {}
-    with patch.object(quantize, "_QUANTIZE_CONFIG_HANDLER", handler_registry):
-        decorated = quantize.register_quantize_module_handler(DummyConfig)(handler)
-        assert decorated is handler
-        assert handler_registry.get(DummyConfig) is handler
-
-
 def test_group_dtensors_by_layout_groups_non_dtensors_together():
     tensor_a = torch.randn(2, 2)
     tensor_b = torch.randn(2, 2)
@@ -115,19 +99,3 @@ def test_group_dtensors_by_layout_handles_empty_input():
     grouped = clip_grad.group_dtensors_by_layout([])
 
     assert grouped == {}
-
-
-def test_register_quantize_module_handler_overrides_existing_handler():
-    class DummyConfig:
-        pass
-
-    def old_handler(module, config):
-        return module
-
-    def new_handler(module, config):
-        return module
-
-    handler_registry = {DummyConfig: old_handler}
-    with patch.object(quantize, "_QUANTIZE_CONFIG_HANDLER", handler_registry):
-        quantize.register_quantize_module_handler(DummyConfig)(new_handler)
-        assert handler_registry[DummyConfig] is new_handler

@@ -55,9 +55,6 @@ def _apply_patches():
     # patching model_converter and ops
     from . import converters, ops  # noqa: F401
 
-    # patching mxfp8/hif8
-    from .converters import quant_converter  # noqa: F401
-
     # module injection: register NPU-only model variants
     from .models import deepseek_v4, deepseek_v32, vlm
     from .patches.distributed import cp_shard_mask, utils  # noqa: F401
@@ -82,6 +79,13 @@ def _apply_patches():
 
     # patching torch_npu
     from .patches.torch_npu import determinism  # noqa: F401
+
+    # patching torchao for NPU MXFP8 training support
+    from .patches.torchao_npu import (  # noqa: F401
+        mx_capability_check,
+        mx_linear,
+        mxfp8_grouped_mm,
+    )
 
     # Patch Qwen3StateDictAdapter.to_hf to sync fqn_to_index_mapping.
     # Multi-turn chat is handled by the unified chat_dataset patch above.

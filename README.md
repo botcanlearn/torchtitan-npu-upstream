@@ -102,14 +102,9 @@ pip install -e .
     </tr>
     <!-- 训练精度 -->
     <tr>
-      <td rowspan="2">训练精度</td>
-      <td>MxFP8 量化</td>
+      <td>训练精度</td>
+      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/low_precision_training.md">MxFP8 量化</a></td>
       <td>✅</td>
-      <td>✅ (Ascend 950)</td>
-    </tr>
-    <tr>
-      <td><a href="https://gitcode.com/cann/torchtitan-npu/blob/master/docs/feature_guides/low_precision_training.md">HiF8 量化</a></td>
-      <td>❌</td>
       <td>✅ (Ascend 950)</td>
     </tr>
     <!-- 训练调试与监控 -->
