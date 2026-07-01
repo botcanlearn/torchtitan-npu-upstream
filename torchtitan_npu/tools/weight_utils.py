@@ -54,11 +54,11 @@ def fuse_experts(state_dict: dict) -> dict:
     sorted_keys = sorted(state_dict.keys())
 
     for key in sorted_keys:
-        if ".moe.experts.w1" in key:
+        if key.endswith(".w1"):
             layer_key = key.replace(".w1", "")
             pending[layer_key] = state_dict.pop(key)
 
-        elif ".moe.experts.w3" in key:
+        elif key.endswith(".w3"):
             layer_key = key.replace(".w3", "")
             if layer_key in pending:
                 w1 = pending.pop(layer_key)
