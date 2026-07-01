@@ -84,15 +84,20 @@ def maybe_enable_profiling(
         yield None
         return
 
-    logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
     os.makedirs(trace_dir, exist_ok=True)
     enable_online_parse = profiling_config.enable_online_parse
     if enable_online_parse:
         on_trace_ready_handler = torch_npu.profiler.tensorboard_trace_handler(trace_dir)
+        logger.info(f"Profiling active (online parse). Traces will be saved at {trace_dir}")
     else:
         os.environ["ASCEND_WORK_PATH"] = trace_dir
         on_trace_ready_handler = None
-        logger.info(f"Online parsing disabled. ASCEND_WORK_PATH set to {trace_dir}")
+        logger.info(
+            f"Profiling active (offline mode). Raw data will be saved at "
+            f"{trace_dir}/profiling_data/*_ascend_pt. "
+            f"After training, run offline parsing: "
+            f"python3 scripts/parse_profiling_data.py {trace_dir}"
+        )
     experimental_config = torch_npu.profiler._ExperimentalConfig(
         profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
         aic_metrics=torch_npu.profiler.AiCMetrics.ArithmeticUtilization,

@@ -144,7 +144,27 @@ profiling = ProfilingConfig(
 | `profile_record_shapes` | bool | true | 是否在性能分析期间记录张量形状。 |
 | `profile_with_memory` | bool | false | 是否在性能分析期间记录内存使用情况。 |
 | `profile_with_stack` | bool | false | 是否在性能分析期间记录调用栈信息。 |
-| `enable_online_parse` | bool | true | 是否启用性能分析数据的在线解析。 |
+| `enable_online_parse` | bool | true | 是否启用性能分析数据的在线解析。设置为 `false` 时仅落盘原始数据，需在训练结束后离线解析（见[离线解析](#离线解析)）。 |
+
+#### 离线解析
+
+当 `enable_online_parse=False` 时，性能分析仅将原始数据转储到 `save_traces_folder` 指定的目录，不进行在线解析。
+训练结束后，在 `save_traces_folder/profiling_data/` 目录下会生成以 `{hostname}_{pid}_{timestamp}_ascend_pt` 命名的子目录，包含原始 profiling 数据。多 rank 场景（`profile_ranks` 含多个 rank 或为 `[-1]`）下，每个 rank 会生成独立的 `*_ascend_pt` 子目录。使用 `scripts/parse_profiling_data.py` 对其进行离线解析：
+
+```bash
+# 解析单个 *_ascend_pt 目录
+python3 scripts/parse_profiling_data.py path/to/xxx_ascend_pt
+
+# 解析父目录下所有 *_ascend_pt（支持多 rank 场景）
+python3 scripts/parse_profiling_data.py path/to/save_traces_folder
+```
+
+脚本接受单个 `*_ascend_pt` 目录或其父目录（自动扫描 `profiling_data/*_ascend_pt` 和 `*_ascend_pt` 两种布局）。解析完成后，会在每个 `*_ascend_pt/ASCEND_PROFILER_OUTPUT/` 子目录下生成以下文件：
+
+- `kernel_details.csv`：NPU kernel 级别的耗时统计
+- `api_statistic.csv`：PyTorch API 调用统计
+- `ascend_pytorch_profiler_0.db`：可用 MindStudio Insight 或 Chrome Tracing 打开的 SQLite 格式 trace
+- `trace_view.json`：完整的 trace 视图数据
 
 ### 配置示例
 
@@ -178,6 +198,6 @@ profiling = ProfilingConfig(
     profile_record_shapes=True,
     profile_with_memory=False,
     profile_with_stack=False,
-    enable_online_parse=True,
+    enable_online_parse=True,  # 设为 False 启用离线模式，训练后用 parse_profiling_data.py 解析
 )
 ```
