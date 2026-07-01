@@ -1,60 +1,198 @@
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-name: Sync Upstream
+name: Sync GitCode TorchTitan-NPU Upstream
 
 on:
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Dry run (print commands without pushing)"
-        type: boolean
-        default: false
   schedule:
-    - cron: "0 14 * * *"
+    - cron: "*/30 * * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: sync-gitcode-torchtitan-npu-upstream
+  cancel-in-progress: false
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      SOURCE_REPOS: |
+        https://gitcode.com/cann/torchtitan-npu.git
+      CONTROL_BRANCH: github-sync
+      SOURCE_DEFAULT_BRANCH: master
+      TARGET_DEFAULT_BRANCH: master
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
+      - name: Checkout sync control branch
+        uses: actions/checkout@v6
 
-      - name: Configure git identity
+      - name: Mirror upstream branches and tags
+        env:
+          TARGET_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://gitcode.com/cann/torchtitan-npu.git
-          git fetch upstream --tags
-          git fetch upstream '+refs/heads/*:refs/remotes/upstream/*'
+          push_token="${UPSTREAM_SYNC_TOKEN:-$GITHUB_TOKEN}"
+          if [ -z "${UPSTREAM_SYNC_TOKEN:-}" ]; then
+            echo "::warning::UPSTREAM_SYNC_TOKEN is not set; branches that update workflow files may be rejected"
+          fi
+          dst="https://x-access-token:${push_token}@github.com/${TARGET_REPO}.git"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
 
-      - name: List upstream branches
-        run: |
-          echo "=== Upstream branches ==="
-          git branch -r --list 'upstream/*' --format='%(refname:lstrip=3)' | grep -v HEAD
+          git_opts=(-c http.version=HTTP/1.1 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=120)
 
-      - name: Sync all branches
-        run: |
-          for branch in $(git branch -r --list 'upstream/*' --format='%(refname:lstrip=3)' | grep -v HEAD); do
-            echo "Syncing $branch..."
-            if [[ "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run }}" == "true" ]]; then
-              echo "  [DRY RUN] git push origin refs/remotes/upstream/$branch:refs/heads/$branch --force-with-lease"
-            else
-              git push origin "refs/remotes/upstream/$branch:refs/heads/$branch" --force-with-lease
+          clone_with_retry() {
+            local src="$1"
+            local attempt
+            for attempt in 1 2 3 4 5 6 7 8; do
+              rm -rf "$tmp/src.git"
+              if timeout 1200 git "${git_opts[@]}" clone --mirror "$src" "$tmp/src.git"; then
+                printf '%s\n' "$src" > "$tmp/selected-source"
+                return 0
+              fi
+              echo "::warning::clone failed for $src on attempt $attempt"
+              sleep $((attempt * attempt * 5))
+            done
+            return 1
+          }
+
+          selected=0
+          while IFS= read -r src; do
+            [ -z "$src" ] && continue
+            if clone_with_retry "$src"; then
+              selected=1
+              break
             fi
+          done <<< "$SOURCE_REPOS"
+
+          if [ "$selected" != 1 ]; then
+            echo "::warning::all source repositories failed; leaving existing mirror unchanged"
+            exit 0
+          fi
+
+          echo "selected_source=$(cat "$tmp/selected-source")"
+          cd "$tmp/src.git"
+          git remote add github "$dst"
+
+          push_with_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if git "${git_opts[@]}" push github "$@"; then
+                return 0
+              fi
+              echo "::warning::push failed on attempt $attempt"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+
+          : > "$tmp/head-refspecs"
+          git for-each-ref --format='%(refname)' refs/heads | while IFS= read -r ref; do
+            branch="${ref#refs/heads/}"
+            [ "$branch" = "$CONTROL_BRANCH" ] && continue
+            [ "$branch" = "$TARGET_DEFAULT_BRANCH" ] && continue
+            printf '+%s:%s\n' "$ref" "$ref" >> "$tmp/head-refspecs"
           done
 
-      - name: Push tags
-        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
-        run: git push origin --tags
+          if [ -s "$tmp/head-refspecs" ]; then
+            mapfile -t head_refspecs < "$tmp/head-refspecs"
+            for ((i = 0; i < ${#head_refspecs[@]}; i += 40)); do
+              push_with_retry "${head_refspecs[@]:i:40}"
+            done
+          fi
+
+          source_default_sha="$(git rev-parse "refs/heads/${SOURCE_DEFAULT_BRANCH}")"
+          target_default_sha="$(git ls-remote --heads github "$TARGET_DEFAULT_BRANCH" | awk '{print $1}')"
+          current_workflow_blob="$(git hash-object "$GITHUB_WORKSPACE/.github/workflows/sync-upstream.yml")"
+          need_default_push=1
+          if [ -n "$target_default_sha" ]; then
+            git fetch github "$TARGET_DEFAULT_BRANCH" --depth=2 || true
+            if git cat-file -e FETCH_HEAD^{commit} 2>/dev/null; then
+              target_parent="$(git rev-parse FETCH_HEAD^ 2>/dev/null || true)"
+              target_workflow_blob="$(git rev-parse FETCH_HEAD:.github/workflows/sync-upstream.yml 2>/dev/null || true)"
+              if [ "$target_parent" = "$source_default_sha" ] && [ "$target_workflow_blob" = "$current_workflow_blob" ]; then
+                need_default_push=0
+              fi
+            fi
+          fi
+
+          if [ "$need_default_push" = 1 ]; then
+            git clone "$tmp/src.git" "$tmp/default-work"
+            cd "$tmp/default-work"
+            git checkout -B "$TARGET_DEFAULT_BRANCH" "$source_default_sha"
+            mkdir -p .github/workflows
+            cp "$GITHUB_WORKSPACE/.github/workflows/sync-upstream.yml" .github/workflows/sync-upstream.yml
+            git config user.name "botcanlearn-sync"
+            git config user.email "botcanlearn-sync@users.noreply.github.com"
+            git add .github/workflows/sync-upstream.yml
+            git commit -m "chore: keep half-hour upstream sync workflow" || true
+            git remote add github "$dst"
+            push_with_retry -f HEAD:refs/heads/"$TARGET_DEFAULT_BRANCH"
+            cd "$tmp/src.git"
+          fi
+
+          : > "$tmp/tag-refspecs"
+          git for-each-ref --format='+%(refname):%(refname)' refs/tags > "$tmp/tag-refspecs"
+          if [ -s "$tmp/tag-refspecs" ]; then
+            mapfile -t tag_refspecs < "$tmp/tag-refspecs"
+            for ((i = 0; i < ${#tag_refspecs[@]}; i += 40)); do
+              push_with_retry "${tag_refspecs[@]:i:40}"
+            done
+          fi
+
+          git for-each-ref --format='%(refname:strip=2)' refs/heads > "$tmp/source-heads"
+          git ls-remote --heads github | awk '{print $2}' | sed 's#refs/heads/##' > "$tmp/target-heads"
+          while IFS= read -r branch; do
+            [ -z "$branch" ] && continue
+            [ "$branch" = "$CONTROL_BRANCH" ] && continue
+            [ "$branch" = "$TARGET_DEFAULT_BRANCH" ] && continue
+            if ! grep -Fxq -- "$branch" "$tmp/source-heads"; then
+              push_with_retry ":refs/heads/$branch"
+            fi
+          done < "$tmp/target-heads"
+
+          git for-each-ref --format='%(refname:strip=2)' refs/tags > "$tmp/source-tags"
+          git ls-remote --tags github | awk '$2 !~ /\^\{\}$/ {print $2}' | sed 's#refs/tags/##' > "$tmp/target-tags"
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            if ! grep -Fxq -- "$tag" "$tmp/source-tags"; then
+              push_with_retry ":refs/tags/$tag"
+            fi
+          done < "$tmp/target-tags"
+
+          git for-each-ref --format='%(refname:strip=2)' refs/heads | sort > "$tmp/source-heads-final"
+          git ls-remote --heads github | awk '{print $2}' | sed 's#refs/heads/##' | sort > "$tmp/target-heads-final"
+          missing_heads="$(comm -23 "$tmp/source-heads-final" "$tmp/target-heads-final" || true)"
+          extra_heads="$(comm -13 "$tmp/source-heads-final" "$tmp/target-heads-final" | grep -vx "$CONTROL_BRANCH" || true)"
+          if [ -n "$missing_heads" ]; then
+            echo "::error::missing mirrored branches:"
+            printf '%s\n' "$missing_heads"
+            exit 1
+          fi
+          if [ -n "$extra_heads" ]; then
+            echo "::error::extra mirrored branches:"
+            printf '%s\n' "$extra_heads"
+            exit 1
+          fi
+          echo "branch_sync_verified source=$(wc -l < "$tmp/source-heads-final") target=$(wc -l < "$tmp/target-heads-final")"
+
+      - name: Disable mirrored upstream workflows
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          TARGET_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::UPSTREAM_SYNC_TOKEN is not set; cannot disable mirrored workflows"
+            exit 0
+          fi
+          gh api "repos/${TARGET_REPO}/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.path != ".github/workflows/sync-upstream.yml") | .id' |
+          while IFS= read -r workflow_id; do
+            [ -z "$workflow_id" ] && continue
+            gh api -X PUT "repos/${TARGET_REPO}/actions/workflows/${workflow_id}/disable" || true
+          done
