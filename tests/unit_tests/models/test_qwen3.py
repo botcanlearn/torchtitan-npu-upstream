@@ -56,16 +56,22 @@ def test_parallelize_raises_on_indivisible_n_heads():
     mock_parallel_dims.tp_enabled = False
 
     with pytest.raises(ValueError, match="n_heads=7 must be divisible"):
-        parallelize_qwen3(
-            mock_model,
-            parallel_dims=mock_parallel_dims,
-            training=MagicMock(),
-            model_converters=MagicMock(),
-            parallelism=MagicMock(),
-            compile_config=MagicMock(),
-            ac_config=MagicMock(),
-            dump_folder="/tmp/test",
-        )
+        _call_parallelize_qwen3(parallelize_qwen3, mock_model, mock_parallel_dims)
+
+
+_MOCK_KWARGS = dict(
+    training=MagicMock(),
+    model_converters=MagicMock(),
+    parallelism=MagicMock(),
+    compile_config=MagicMock(),
+    ac_config=MagicMock(),
+    dump_folder="/tmp/test",
+)
+
+
+def _call_parallelize_qwen3(parallelize_qwen3, mock_model, mock_parallel_dims):
+    """Call parallelize_qwen3 with standard mock kwargs."""
+    return parallelize_qwen3(mock_model, parallel_dims=mock_parallel_dims, **_MOCK_KWARGS)
 
 
 def _call_parallelize_qwen3_with_mock_upstream(
@@ -81,16 +87,7 @@ def _call_parallelize_qwen3_with_mock_upstream(
         "parallelize_qwen3",
         return_value=upstream_return,
     ) as mock_upstream:
-        result = parallelize_qwen3(
-            mock_model,
-            parallel_dims=mock_parallel_dims,
-            training=MagicMock(),
-            model_converters=MagicMock(),
-            parallelism=MagicMock(),
-            compile_config=MagicMock(),
-            ac_config=MagicMock(),
-            dump_folder="/tmp/test",
-        )
+        result = _call_parallelize_qwen3(parallelize_qwen3, mock_model, mock_parallel_dims)
     return result, mock_upstream
 
 
@@ -124,3 +121,47 @@ def test_parallelize_without_cp_calls_upstream_directly():
         ac_config=mock_upstream.call_args[1]["ac_config"],
         dump_folder="/tmp/test",
     )
+
+
+# ---------------------------------------------------------------------------
+# parallelize — CP strategy injection for TND
+# ---------------------------------------------------------------------------
+
+
+def test_parallelize_with_cp_injects_npu_cp_strategy():
+    """Verify CP strategy is injected when cp_enabled=True."""
+    import torchtitan.models.qwen3.parallelize as titan_qwen3_parallelize
+
+    from torchtitan_npu.distributed.context_parallel.registry import (
+        apply_cp_to_attention_module as npu_apply_cp,
+    )
+    from torchtitan_npu.models.qwen3.parallelize import parallelize_qwen3
+
+    mock_model = MagicMock()
+    mock_model.layers = {0: SimpleNamespace(attention=SimpleNamespace(n_heads=8, n_kv_heads=4))}
+
+    mock_parallel_dims = MagicMock()
+    mock_parallel_dims.cp_enabled = True
+    mock_parallel_dims.cp = 4
+    mock_parallel_dims.tp_enabled = False
+
+    upstream_return = MagicMock()
+    with patch.object(
+        titan_qwen3_parallelize,
+        "parallelize_qwen3",
+        return_value=upstream_return,
+    ):
+        _call_parallelize_qwen3(parallelize_qwen3, mock_model, mock_parallel_dims)
+
+    assert titan_qwen3_parallelize.apply_cp_to_attention_module is npu_apply_cp
+
+
+def test_npu_cp_strategy_detects_npu_varlen():
+    """Verify NPUVarlenAttention is detected by the CP strategy registry."""
+    from torchtitan_npu.distributed.context_parallel.registry import _cp_strategies
+    from torchtitan_npu.models.common.npu_varlen_attention import NPUVarlenAttention
+
+    with patch("torchtitan.tools.utils.has_cuda_capability", return_value=False):
+        attn = NPUVarlenAttention(NPUVarlenAttention.Config())
+    found = any(detector(attn) for detector, _ in _cp_strategies)
+    assert found

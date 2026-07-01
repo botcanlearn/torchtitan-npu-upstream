@@ -8,3 +8,4 @@ from .dsa_indexer_loss import (  # noqa: F401
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
 )
+from .npu_varlen_attention import NPUVarlenAttention  # noqa: F401

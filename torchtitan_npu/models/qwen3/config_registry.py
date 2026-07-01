@@ -85,6 +85,15 @@ def sft_qwen3_30ba3b_gsm8k() -> Trainer.Config:
     )
 
 
+def sft_qwen3_30ba3b_gsm8k_tnd() -> Trainer.Config:
+    """GSM8K + TND: same as math config but with NPUVarlenAttention."""
+    from torchtitan_npu.models.qwen3.tnd_config import _enable_npu_varlen_attention
+
+    config = sft_qwen3_30ba3b_gsm8k()
+    config.model_spec = _enable_npu_varlen_attention(config.model_spec)
+    return config
+
+
 def qwen3_06b_test() -> Trainer.Config:
     config = _upstream_qwen3_0_6b()
     config.model_spec = model_registry("0.6B")

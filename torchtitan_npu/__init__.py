@@ -37,6 +37,7 @@ def _apply_patches():
 
     # patching torchtitan
     from torchtitan_npu.patches.torchtitan import (  # noqa: F401
+        attention_varlen_cpu,
         chat_dataset,
         expert_parallel,
         hf_datasets,

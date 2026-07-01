@@ -46,6 +46,11 @@ def parallelize_qwen3(
             raise ValueError(
                 f"[Ulysses CP] n_heads={n_heads} must be divisible by context_parallel_degree={cp_degree}."
             )
+        n_kv_heads = first_layer.attention.n_kv_heads  # pyrefly: ignore [missing-attribute]
+        if n_kv_heads % cp_degree != 0:
+            raise ValueError(
+                f"[Ulysses CP] n_kv_heads={n_kv_heads} must be divisible by context_parallel_degree={cp_degree}."
+            )
 
         logger.info(f"[Ulysses CP] Qwen3 Ulysses CP enabled: cp_degree={cp_degree}, n_heads={n_heads}")
 
