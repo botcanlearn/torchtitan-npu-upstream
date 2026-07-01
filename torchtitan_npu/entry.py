@@ -11,29 +11,12 @@ from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
 
 import torchtitan_npu  # noqa: F401
-from torchtitan_npu.converters.registry import has_npu_converter
 from torchtitan_npu.train import (
     _patch_for_garbage_collection_run,
     _patch_for_parallel_dims_build_mesh,
 )
 
 _SKIP_FLEX_TO_SDPA_REWRITE_MODELS = {"vlm"}
-_INDUCTOR_NPU_EXT_MODELS = {"deepseek_v3", "deepseek_v4", "deepseek_v32", "vlm"}
-_BYPASS_TRITON_CODEGEN = "npu_bypass_triton_codegen"
-
-
-def _has_model_converter(model_converters, name: str) -> bool:
-    if model_converters is None or not hasattr(model_converters, "converters"):
-        return False
-    return has_npu_converter(model_converters.converters, name)
-
-
-def _uses_inductor_npu_ext(model_name: str) -> bool:
-    return model_name in _INDUCTOR_NPU_EXT_MODELS
-
-
-def _compile_requires_bypass_triton_codegen(model_name: str) -> bool:
-    return not _uses_inductor_npu_ext(model_name)
 
 
 def main() -> None:
@@ -84,49 +67,32 @@ def main() -> None:
         logger.warning("There might be performance issues with activation checkpointing and torch.compile enabled!")
 
     if config.compile.enable:  # pyrefly: ignore [missing-attribute]
-        has_bypass_triton_codegen = _has_model_converter(
-            config.model_converters,  # pyrefly: ignore [missing-attribute]
-            _BYPASS_TRITON_CODEGEN,
-        )
-
-        if _uses_inductor_npu_ext(model_name):
-            if model_name == "deepseek_v3":
-                # MLA performs shape inference according to the value tensor;
-                # patch the meta registration so dynamo traces the right shapes.
-                try:
-                    from torch_npu.op_plugin.meta._meta_registrations import (
-                        npu_fusion_attention_forward as original_meta_func,
-                    )
-                except ImportError:
-                    logger.info("torch_npu meta registrations not available, skipping compile patch")
-                else:
-                    from torchtitan_npu.patches.torch_npu._meta_registrations import (
-                        npu_fusion_attention_forward,
-                    )
-
-                    original_meta_func.__code__ = npu_fusion_attention_forward.__code__
-
+        if model_name == "deepseek_v3":
+            # MLA performs shape inference according to the value tensor;
+            # patch the meta registration so dynamo traces the right shapes.
             try:
                 # pyrefly: ignore [missing-import]
-                import inductor_npu_ext  # noqa: F401
-            except Exception as e:
-                raise RuntimeError(
-                    f"compile.enable is True for {model_name} model but inductor_npu_ext is not available. "
-                    "Please install inductor_npu_ext before enabling compile. "
-                    "See docs/torch_compile.md for installation instructions."
-                ) from e
+                from torch_npu.op_plugin.meta._meta_registrations import (
+                    npu_fusion_attention_forward as original_meta_func,
+                )
+            except ImportError:
+                logger.info("torch_npu meta registrations not available, skipping compile patch")
+            else:
+                from torchtitan_npu.patches.torch_npu._meta_registrations import (
+                    npu_fusion_attention_forward,
+                )
 
-            if has_bypass_triton_codegen:
-                raise RuntimeError(
-                    f"{model_name} model with compile.enable=True should not use npu_bypass_triton_codegen. "
-                    "Please remove 'npu_bypass_triton_codegen' from model.converters in your config."
-                )
-        else:
-            if not has_bypass_triton_codegen:
-                raise RuntimeError(
-                    f"{model_name} model with compile.enable=True requires npu_bypass_triton_codegen. "
-                    "Please add 'npu_bypass_triton_codegen' to model.converters in your config."
-                )
+                original_meta_func.__code__ = npu_fusion_attention_forward.__code__
+
+        try:
+            # pyrefly: ignore [missing-import]
+            import inductor_npu_ext  # noqa: F401
+        except Exception as e:
+            raise RuntimeError(
+                f"compile.enable is True for {model_name} model but inductor_npu_ext is not available. "
+                "Please install inductor_npu_ext before enabling compile. "
+                "See docs/torch_compile.md for installation instructions."
+            ) from e
 
     if model_name in ("deepseek_v32", "deepseek_v4"):
         from torchtitan_npu.train import (

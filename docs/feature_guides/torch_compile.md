@@ -14,21 +14,6 @@ torch.compile 是 PyTorch 2.0 的核心特性。通过 JIT （即时编译），
 ## 支持范围
 torchtitan-npu 当前支持 `DeepSeek-V3、DeepSeek-V3.2、DeepSeek-V4` 模型的全流程编译。
 
-其他模型的 Codegen 仍处于待调试状态。启用 `torch.compile` 时，需要在模型配置中启用
-`npu_bypass_triton_codegen`，跳过 Inductor Codegen 流程，仅保留 Dynamo / AOTAutograd
-/ Inductor 图优化等前置流程。请在模型 `config_registry.py` 中确保 `ModelConvertersContainer.Config` 的
-`converters` 列表中包含该 converter：
-
-```python
-model_converters = ModelConvertersContainer.Config(
-    converters=[
-        get_model_converter_config("npu_rms_norm"),
-        # ... 其他 converter ...
-        get_model_converter_config("npu_bypass_triton_codegen"),
-    ],
-)
-```
-
 ## torch.compile 示例
 
 ### 1. 安装 inductor_npu_ext

@@ -12,8 +12,8 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConverter
 
 from torchtitan_npu.converters.model_custom_interface import ModelCustomConfig
-from torchtitan_npu.patches.torchtitan.trainer_init_distributed import (
-    get_using_model_spec,
+from torchtitan_npu.patches.torchtitan._trainer_config_stash import (
+    get_trainer_config,
 )
 
 from .parallelize_plan_update_wrapper import apply_parallelize_plan_update
@@ -38,7 +38,8 @@ class ModelCustomConfigConverter(Configurable, ModelConverter):
     ):
         self.parallel_dims = parallel_dims
         self.model_compile_enabled = model_compile_enabled
-        self.model_spec = get_using_model_spec()
+        # pyrefly: ignore [missing-attribute]
+        self.model_spec = get_trainer_config().model_spec
         self.model_name = self.model_spec.name
 
     def convert(self, model: nn.Module):

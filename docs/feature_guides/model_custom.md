@@ -245,7 +245,7 @@ model_converters = ModelConvertersContainer.Config(
 | `ParallelizePlanUpdateWrapper` | `converters/framework/parallelize_plan_update_wrapper.py` | 使用`ParallelizePlanUpdateWrapper`封装的方法替换`parallelize_module`并在执行时修改并行策略 |
 | `StateDictUpdateWrapper` | `converters/framework/state_dict_update_wrapper.py` | 运行时动态包装 `state_dict_adapter`，注入 `StateDictUpdater` 链 |
 | `_ConverterRegistry` | `converters/framework/model_custom_config_registry.py` | **全局注册单例**，管理 ModelCustomConfig 和动态生成的 Converter 类 |
-| `init_distributed_wrapper` / `get_using_model_spec()` | `patches/torchtitan/trainer_init_distributed.py` | **拦截 Trainer.init_distributed** 捕获 Trainer.Config，供 converter 读取 ModelSpec；由 `_apply_patches()` 显式调用 `apply()` 安装 |
+| `get_trainer_config()` | `patches/torchtitan/_trainer_config_stash.py` | **拦截 Trainer.__init__** 捕获 Trainer.Config，供 converter 读取 ModelSpec；由 `_apply_patches()` 的模块级 import 自动安装 |
 
 ### 3.2 类关系图
 
@@ -372,24 +372,19 @@ sequenceDiagram
     Note over reg: 动态生成的 converter_cls 会被 torchtitan 通过 Configurable.Config 发现
 ```
 
-### 4.2 模型入口阶段（Trainer.init_distributed 拦截）
-
-该拦截通过 `patches/torchtitan/trainer_init_distributed.py` 实现，
-由 `_apply_patches()` 在最早期调用 `apply()` 安装，确保在其它 patch 之前
-捕获原始的 `Trainer.init_distributed`。
+### 4.2 模型入口阶段（Trainer.__init__ 拦截）
+该拦截通过 `patches/torchtitan/_trainer_config_stash.py` 实现，在 `Trainer.__init__` 执行时自动捕获 `Trainer.Config` 并存储，供 converter 和训练循环中的其它 patch 读取。
 
 ```mermaid
 sequenceDiagram
-    participant trainer as Trainer
-    participant wrapper as init_distributed_wrapper
-    participant patch as trainer_init_distributed
+ 	participant trainer as Trainer
+    participant stash as _trainer_config_stash
 
-    trainer->>wrapper: init_distributed()
-    wrapper->>wrapper: G_USING_TRAIN_CONFIG = self.config
-    wrapper->>trainer: _original_init_distributed(self, *args, **kwargs)
-    trainer-->>trainer: 返回 ParallelDims
+ 	trainer->>stash: Trainer.__init__(config)
+ 	stash->>stash: _trainer_config = config
+ 	stash->>trainer: 继续原始 __init__
 
-    Note over trainer,patch: G_USING_TRAIN_CONFIG 存储 Trainer.Config，包含 model_spec
+ 	 Note over trainer,stash: _trainer_config 存储 Trainer.Config，包含 model_spec
 ```
 
 ### 4.3 转换执行阶段（torchtitan 调用 convert 时）
@@ -408,8 +403,8 @@ sequenceDiagram
 
     tt->>mcc: convert(model)
 
-    mcc->>patch: get_using_model_spec()
-    reg-->>mcc: model_spec
+     mcc->>stash: get_trainer_config().model_spec
+ 	 stash-->>mcc: model_spec
 
     mcc->>config: model_converter
     alt model_converter 存在

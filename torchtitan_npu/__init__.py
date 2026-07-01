@@ -22,21 +22,14 @@ def _apply_patches():
 
     # async_tp must be patched before importing NPU model modules because
     # their parallelize files import maybe_enable_async_tp by value.
+    # ruff: noqa: I001
     from .patches.torch import micro_pipeline_tp  # noqa: F401 # isort: off
 
-    # Must capture Trainer.init_distributed before any other patch
-    # modifies it, so apply this first.
-    from .patches.torchtitan.trainer_init_distributed import (
-        apply as _apply_init_distributed_patch,
-    )
-
-    _apply_init_distributed_patch()
-
     # patching optimizer before importing torchtitan.models
-
     from .patches.optimizer.optimizer_selector import (
         patch_npu_optimizer_framework,
     )  # usort:skip
+    # ruff: noqa: I001
 
     patch_npu_optimizer_framework()
 
