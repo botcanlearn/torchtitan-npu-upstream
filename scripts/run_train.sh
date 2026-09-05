@@ -30,6 +30,9 @@ elif [ -f /home/developer/Ascend/ascend-toolkit/set_env.sh ]; then
     source /home/developer/Ascend/ascend-toolkit/set_env.sh
 fi
 
+# Set the Inductor backend to AscendC.
+export TORCHINDUCTOR_NPU_BACKEND="${TORCHINDUCTOR_NPU_BACKEND:-ascendc}"
+
 NGPU=${NGPU:-1}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"torchtitan.models.deepseek_v3"}
