@@ -73,7 +73,7 @@ bash scripts/run_train.sh \
     torchtitan_npu.override.deepseek_v4.sparse_attn.asc_metadata \
     torchtitan_npu.override.deepseek_v4.sparse_attn.asc \
     torchtitan_npu.override.deepseek_v4.mhc.asc_hc_post \
-    torchtitan_npu.override.common.token_dispatcher.npu_all_to_all_token_dispatcher
+    torchtitan_npu.override.common.token_dispatcher.asc
 ```
 
 `--optimizer.name` 默认为 `native`，保持常规 recipe 原有的 AdamW 行为；设为
