@@ -82,6 +82,13 @@ def _fake_cann_ops():
     ct.ops = types.ModuleType("cann_ops_transformer.ops")
     for fn_name in _OPS_SUBMODULE_FUNCTIONS:
         setattr(ct.ops, fn_name, _make(fn_name))
+
+    ct.inplace_partial_rotary_mul_module = types.ModuleType("cann_ops_transformer.ops.inplace_partial_rotary_mul")
+    ct.inplace_partial_rotary_mul_module.__path__ = []
+    ct.inplace_partial_rotary_mul_impl_module = types.ModuleType(
+        "cann_ops_transformer.ops.inplace_partial_rotary_mul.inplace_partial_rotary_mul"
+    )
+    ct.inplace_partial_rotary_mul_impl_module.InplacePartialRotaryMulFn = torch.autograd.Function
     return ct
 
 
@@ -105,6 +112,10 @@ def install():
     recorder = _fake_cann_ops()
     sys.modules["cann_ops_transformer"] = recorder
     sys.modules["cann_ops_transformer.ops"] = recorder.ops
+    sys.modules["cann_ops_transformer.ops.inplace_partial_rotary_mul"] = recorder.inplace_partial_rotary_mul_module
+    sys.modules["cann_ops_transformer.ops.inplace_partial_rotary_mul.inplace_partial_rotary_mul"] = (
+        recorder.inplace_partial_rotary_mul_impl_module
+    )
     ns = torch.ops.cann_ops_transformer
     for fn_name in _TORCH_OPS_FUNCTIONS:
         if not hasattr(ns, fn_name):

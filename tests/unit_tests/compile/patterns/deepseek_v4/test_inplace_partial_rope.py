@@ -47,9 +47,7 @@ def _reference_partial_rope(x, cos, sin, inverse):
     cache = torch.complex(cos[..., ::2], sin[..., ::2])
     if inverse:
         cache = cache.conj()
-    rotary_complex = torch.view_as_complex(
-        rotary.float().reshape(*rotary.shape[:-1], -1, 2)
-    )
+    rotary_complex = torch.view_as_complex(rotary.float().reshape(*rotary.shape[:-1], -1, 2))
     rotated = torch.view_as_real(rotary_complex * cache).flatten(-2).type_as(rotary)
     return torch.cat([prefix, rotated], dim=-1)
 
@@ -105,8 +103,6 @@ def _assert_pattern_matches(pattern, fn):
         ignore_literals=pattern.ignore_literals,
     )
     assert len(matches) == 1
-
-
 
 
 @pytest.mark.parametrize(
@@ -237,26 +233,3 @@ def test_replacement_does_not_repeat_rope_cache():
     graph_module = torch.fx.symbolic_trace(pattern.replacement_fn)
 
     assert "repeat_interleave" not in str(graph_module.graph)
-
-
-def test_isolate_gradient_preserves_shared_tangent():
-    class MutatingBackward(torch.autograd.Function):
-        @staticmethod
-        def forward(_ctx, x):
-            return x.clone()
-
-        @staticmethod
-        def backward(_ctx, grad_output):
-            grad_output.mul_(2)
-            return grad_output
-
-    def fn(x):
-        rotated = inplace_partial_rope._isolate_gradient(MutatingBackward.apply(x))
-        return (rotated + x).sum()
-
-    compiled = torch.compile(fn, backend="aot_eager", fullgraph=True)
-    x = torch.randn(2, 3, 2, 8, requires_grad=True)
-
-    compiled(x).backward()
-
-    torch.testing.assert_close(x.grad, torch.full_like(x, 3))

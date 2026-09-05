@@ -9,37 +9,20 @@ from __future__ import annotations
 
 import torch
 import torch_npu
-from cann_ops_transformer.ops import (  # pyrefly: ignore [missing-import]
-    inplace_partial_rotary_mul,
-)
 
 from torchtitan_npu.compile.pattern_replacement import (
     PatternReplacement,
     register_pre_aot_patterns,
+)
+from torchtitan_npu.ops.ascendc.inplace_partial_rotary_mul import (
+    inplace_partial_rotary_mul,
 )
 
 if torch_npu.npu.is_available():
     import torch_npu._inductor
 
 
-class _IsolateGradient(torch.autograd.Function):
-    """Prevent Inductor from sharing a tangent mutated by an in-place backward."""
-
-    @staticmethod
-    def forward(ctx, x):  # pyrefly: ignore [bad-override]
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_output):  # pyrefly: ignore [bad-override]
-        return grad_output.clone()
-
-
-def _isolate_gradient(x):
-    return _IsolateGradient.apply(x)
-
-
 torch.fx.wrap("inplace_partial_rotary_mul")
-torch.fx.wrap("_isolate_gradient")
 
 
 def _rotate_interleaved(x):
@@ -90,7 +73,7 @@ def _make_partial_rope_pattern(
         )
         for dim in squeeze_dims:
             output = output.squeeze(dim)
-        return _isolate_gradient(output)
+        return output
 
     return PatternReplacement(
         search_fn=search_fn,
@@ -143,7 +126,7 @@ def _make_compressor_rope_pattern() -> PatternReplacement:
             partial_slice=[0, cos.shape[-1]],
         )
         output = output.squeeze(0).squeeze(1)
-        return _isolate_gradient(torch.cat([prefix, output], dim=-1))
+        return torch.cat([prefix, output], dim=-1)
 
     return PatternReplacement(
         search_fn=search_fn,
