@@ -50,6 +50,13 @@ CI 通过以下脚本启动测试：
 
 或直接运行 Python 入口：
 
+
 ```bash
-python -m tests.integration_tests.run_tests
+python -m tests.integration_tests.run_tests \
+  ./test_reports/integration \
+  --test_suite models \
+  --ngpu 4
 ```
+其中`./test_reports/integration` 是必填的测试输出目录，运行前需要确保该目录为空。
+
+直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
