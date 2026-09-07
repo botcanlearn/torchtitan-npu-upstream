@@ -31,15 +31,6 @@ python -m torchtitan_npu.train \
   'torchtitan_npu.override.deepseek_v4.sparse_attn.asc={"indexer_loss_coeff": 2.0}'
 ```
 
-NPU DeepEP dispatcher 与上游 `moe_comm_backend="deepep"` 配置绑定。模型配置选择
-`deepep` 后，显式启用以下 override 即可；`hidden_dim` 和
-`num_max_tokens_per_rank` 会由 `update_from_config()` 根据模型及训练形状填充。
-
-```bash
---override.imports \
-  torchtitan_npu.override.common.token_dispatcher.asc_deepep
-```
-
 也可以直接设置配置：
 
 ```python
@@ -47,6 +38,15 @@ cfg.override.imports = [
     "torchtitan_npu.override.common.rope.workaround",
     "torchtitan_npu.override.deepseek_v4.sparse_attn.golden",
 ]
+```
+
+NPU DeepEP dispatcher 与上游 `moe_comm_backend="deepep"` 配置绑定。模型配置选择
+`deepep` 后，显式启用以下 override 即可；`hidden_dim` 和
+`num_max_tokens_per_rank` 会由 `update_from_config()` 根据模型及训练形状填充。
+
+```bash
+--override.imports \
+  torchtitan_npu.override.common.token_dispatcher.asc_deepep
 ```
 
 ## 应用过程
