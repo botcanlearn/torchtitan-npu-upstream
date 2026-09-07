@@ -11,10 +11,16 @@
 
 from __future__ import annotations
 
+import math
 import os
 import unittest
-from pathlib import Path
+from typing import TYPE_CHECKING
 
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
 
 LOG_PREFIX = "[LOSS_COMPARE]"
 TB_LOSS_TAG = "loss_metrics/global_avg_loss"
@@ -27,41 +33,51 @@ def log_print(message: str = "") -> None:
         print(LOG_PREFIX)
 
 
-def extract_losses_from_tensorboard(
-    job_dump_folder: str | Path, tb_folder: str
-) -> dict[int, float]:
-    """Copied from Torchtitan's loss comparison runner."""
+def extract_losses_from_tensorboard(job_dump_folder: str | Path, tb_folder: str) -> dict[int, float]:
+    """Read the global average loss using the shared scalar reader."""
+    return extract_scalar_from_tensorboard(job_dump_folder, tb_folder, TB_LOSS_TAG)
 
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
+def extract_scalar_from_tensorboard(job_dump_folder: str | Path, tb_folder: str, tag: str) -> dict[int, float]:
+    """Read finite, uniquely indexed TensorBoard scalars without rounding."""
     base_path = os.path.join(str(job_dump_folder), tb_folder)
     if not os.path.exists(base_path):
         raise FileNotFoundError(f"TensorBoard path does not exist: {base_path}")
 
-    subdirs = [
-        d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))
-    ]
+    subdirs = [d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))]
     if len(subdirs) != 1:
-        raise RuntimeError(
-            f"Expected exactly one subdirectory under {base_path}, "
-            f"found {len(subdirs)}: {subdirs}"
-        )
+        raise RuntimeError(f"Expected exactly one subdirectory under {base_path}, found {len(subdirs)}: {subdirs}")
 
     event_dir = os.path.join(base_path, subdirs[0])
     log_print(f"Loading TensorBoard events from: {event_dir}")
-    event_acc = EventAccumulator(event_dir)
+    event_acc = EventAccumulator(event_dir, size_guidance={"scalars": 0})
     event_acc.Reload()
     available_tags = event_acc.Tags().get("scalars", [])
-    if TB_LOSS_TAG not in available_tags:
-        raise KeyError(
-            f"Scalar tag '{TB_LOSS_TAG}' not found in TensorBoard events. "
-            f"Available tags: {available_tags}"
-        )
-    losses = {
-        scalar.step: scalar.value for scalar in event_acc.Scalars(TB_LOSS_TAG)
-    }
-    log_print(f"Extracted {len(losses)} steps from TensorBoard events")
-    return losses
+    if tag not in available_tags:
+        raise KeyError(f"Scalar tag '{tag}' not found in TensorBoard events. Available tags: {available_tags}")
+    values = {}
+    for scalar in event_acc.Scalars(tag):
+        if scalar.step in values or not math.isfinite(scalar.value):
+            raise ValueError(f"Invalid {tag} at step {scalar.step}: duplicate step or non-finite value")
+        values[scalar.step] = scalar.value
+    log_print(f"Extracted {len(values)} steps for {tag}")
+    return values
+
+
+def compare_checkpoint_metrics(job_dump_folder: str | Path, expected_steps: Sequence[Sequence[int]]) -> None:
+    """Require resumed loss and grad norm to equal the uninterrupted trajectory."""
+    for tag in (TB_LOSS_TAG, "grad_norm"):
+        phases = [extract_scalar_from_tensorboard(job_dump_folder, f"tb_phase_{idx}", tag) for idx in range(2)]
+        for idx, values in enumerate(phases):
+            if set(values) != set(expected_steps[idx]):
+                raise ValueError(f"{tag} phase {idx}: expected steps {list(expected_steps[idx])}, got {sorted(values)}")
+        baseline, resumed = phases
+        for step, value in resumed.items():
+            if step not in baseline or baseline[step] != value:
+                raise AssertionError(
+                    f"{tag} mismatch at step {step}: uninterrupted={baseline.get(step)!r}, resumed={value!r}"
+                )
+            log_print(f"[RESUME_MATCH] {tag} step={step} uninterrupted={baseline[step]!r} resumed={value!r}")
 
 
 def read_losses_from_file(loss_file: str | Path) -> dict[int, float]:
@@ -114,21 +130,17 @@ def assert_losses_equal(
                     self.assertEqual(
                         baseline_losses[step],
                         test_losses[step],
-                        f"Loss mismatch at step {step}: "
-                        f"baseline={repr(baseline_losses[step])}, "
-                        f"test={repr(test_losses[step])}",
+                        f"Loss mismatch at step {step}: baseline={baseline_losses[step]!r}, test={test_losses[step]!r}",
                     )
                 if imported_losses:
                     self.assertEqual(
                         baseline_losses[step],
                         imported_losses[step],
                         f"Loss mismatch at step {step}: "
-                        f"baseline={repr(baseline_losses[step])}, "
-                        f"imported={repr(imported_losses[step])}",
+                        f"baseline={baseline_losses[step]!r}, "
+                        f"imported={imported_losses[step]!r}",
                     )
 
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.TestLoader().loadTestsFromTestCase(LossEqualityTest)
-    )
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.TestLoader().loadTestsFromTestCase(LossEqualityTest))
     if not result.wasSuccessful():
         raise AssertionError("Loss assertion failed!")

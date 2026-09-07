@@ -55,6 +55,35 @@ def _build_case(
     )
 
 
+def build_deepseek_v4_checkpoint_resume_test_list() -> list[OverrideDefinitions]:
+    """Compare two resumed steps with uninterrupted FSDP2/EP2 training."""
+    checkpoint_args = (
+        "--checkpoint.enable",
+        "--checkpoint.interval=2",
+        "--checkpoint.no-last-save-model-only",
+        "--checkpoint.keep-latest-k=0",
+        "--hf-assets-path=tests/assets/deepseek_v3",
+        "--training.global-batch-size=2",
+        "--training.steps=4",
+        "--parallelism.data-parallel-shard-degree=2",
+        "--parallelism.expert-parallel-degree=2",
+    )
+    checkpoint_case = OverrideDefinitions(
+        override_args=[
+            GOLDEN_OVERRIDES + checkpoint_args,
+            GOLDEN_OVERRIDES + checkpoint_args + ("--checkpoint.load-step=2",),
+        ],
+        test_descr="DeepSeek-V4 checkpoint resume ep2 fsdp2 exact loss and grad norm",
+        test_name="dsv4_checkpoint_resume_ep2_fsdp2",
+        expected_steps=((1, 2, 3, 4), (3, 4)),
+        ngpu=2,
+        use_golden=True,
+        check_loss=False,
+        check_resume=True,
+    )
+    return [checkpoint_case]
+
+
 def build_deepseek_v4_test_list() -> list[OverrideDefinitions]:
     return [
         _build_case(

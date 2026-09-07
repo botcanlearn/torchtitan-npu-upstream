@@ -17,9 +17,13 @@ from pathlib import Path
 # torchtitan-npu override: the runner consumes the case definition at runtime.
 from tests.integration_tests import OverrideDefinitions  # noqa: TC001
 from tests.integration_tests.deepseek_v3_2 import build_deepseek_v3_2_test_list
-from tests.integration_tests.deepseek_v4 import build_deepseek_v4_test_list
+from tests.integration_tests.deepseek_v4 import (
+    build_deepseek_v4_checkpoint_resume_test_list,
+    build_deepseek_v4_test_list,
+)
 from tests.integration_tests.loss_compare import (
     assert_losses_equal,
+    compare_checkpoint_metrics,
     extract_losses_from_tensorboard,
     log_print,
     read_losses_from_file,
@@ -29,7 +33,11 @@ from tests.integration_tests.loss_compare import (
 def build_models_test_list() -> list[OverrideDefinitions]:
     """Return the model integration cases for the default smoke suite."""
 
-    return build_deepseek_v4_test_list() + build_deepseek_v3_2_test_list()
+    return (
+        build_deepseek_v4_test_list()
+        + build_deepseek_v4_checkpoint_resume_test_list()
+        + build_deepseek_v3_2_test_list()
+    )
 
 
 # torchtitan-npu override: register the DeepSeek-V4 and DeepSeek-V3.2 NPU suites.
@@ -37,6 +45,7 @@ _TEST_SUITES_FUNCTION = {
     "models": build_models_test_list,
     "deepseek_v3_2": build_deepseek_v3_2_test_list,
     "deepseek_v4": build_deepseek_v4_test_list,
+    "deepseek_v4_checkpoint": build_deepseek_v4_checkpoint_resume_test_list,
 }
 # torchtitan-npu override: reference losses are selected
 # from the repository using the case name.
@@ -56,6 +65,48 @@ DETERMINISTIC_ARGS = (
 )
 
 
+def _build_train_command(test_flavor, case_dir, idx, module, config):
+    env = os.environ.copy()
+    if module is not None:
+        env["MODULE"] = module
+    if config is not None:
+        env["CONFIG"] = config
+    if test_flavor.env_vars:
+        env.update(test_flavor.env_vars)
+    env["NGPU"] = str(test_flavor.ngpu)
+    env["LOG_RANK"] = ",".join(map(str, range(test_flavor.ngpu)))
+    cmd = ["bash", "scripts/run_train.sh", "--dump_folder", str(case_dir / "test_run")]
+    cmd.extend(DEFAULT_TRAIN_ARGS)
+    if test_flavor.check_loss or test_flavor.check_resume:
+        cmd.extend(DETERMINISTIC_ARGS)
+    cmd.extend(test_flavor.override_args[idx])
+    if test_flavor.expected_steps is not None:
+        cmd.append(f"--metrics.save_tb_folder=tb_phase_{idx}")
+    return cmd, env
+
+
+def _check_phase_results(test_flavor, case_dir, idx, golden_losses):
+    if test_flavor.expected_steps is None and not test_flavor.check_loss:
+        return
+    tb_folder = f"tb_phase_{idx}" if test_flavor.expected_steps is not None else "tb"
+    test_losses = extract_losses_from_tensorboard(case_dir / "test_run", tb_folder)
+    if test_flavor.expected_steps is not None:
+        expected_steps = set(test_flavor.expected_steps[idx])
+        if set(test_losses) != expected_steps:
+            raise RuntimeError(
+                f"{test_flavor.test_name} phase {idx}: expected steps {sorted(expected_steps)}, "
+                f"got {sorted(test_losses)}"
+            )
+    if test_flavor.check_loss:
+        try:
+            assert_losses_equal(golden_losses, test_losses)
+        except AssertionError:
+            print(f"[GOLDEN_MISMATCH] {test_flavor.test_name} — dumping actual losses for regeneration:")
+            for step in sorted(test_losses):
+                print(f"[GOLDEN_MISMATCH] {step} {test_losses[step]}")
+            raise
+
+
 def run_single_test(
     test_flavor: OverrideDefinitions,
     output_dir: str,
@@ -68,47 +119,22 @@ def run_single_test(
 
     test_name = test_flavor.test_name
     case_dir = Path(output_dir) / test_name
-    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
     golden_losses = None
+    if test_flavor.expected_steps is not None and len(test_flavor.expected_steps) != len(test_flavor.override_args):
+        raise ValueError(f"Expected one step sequence per phase for {test_name}")
+    if test_flavor.check_resume and (test_flavor.expected_steps is None or len(test_flavor.override_args) != 2):
+        raise ValueError(f"Resume comparison requires two phases with expected steps for {test_name}")
     if test_flavor.check_loss:
         if golden_file is None:
             raise ValueError(f"golden_file is required when check_loss=True for {test_name}")
         golden_losses = read_losses_from_file(golden_file)
 
-    for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = ""
-        if module is not None:
-            cmd += f"MODULE={module} "
-        if config is not None:
-            cmd += f"CONFIG={config} "
-        if test_flavor.env_vars:
-            cmd += " ".join(f"{key}={value}" for key, value in test_flavor.env_vars.items()) + " "
-        cmd += f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} bash scripts/run_train.sh"
-        cmd += f" --dump_folder {case_dir / 'test_run'}"
-        cmd += " " + " ".join(DEFAULT_TRAIN_ARGS)
-        if test_flavor.check_loss:
-            cmd += " " + " ".join(DETERMINISTIC_ARGS)
-        if override_arg:
-            cmd += " " + " ".join(override_arg)
-
-        # torchtitan-npu override: keep training output live and validate each
-        # variation against the checked-in reference.
-        subprocess.run(cmd, shell=True, check=True)
-
-        if not test_flavor.check_loss:
-            continue
-
-        test_losses = extract_losses_from_tensorboard(case_dir / "test_run", "tb")
-        assert golden_losses is not None
-        # torchtitan-npu override: on mismatch, print losses in the
-        # reference-file format to simplify deliberate regeneration.
-        try:
-            assert_losses_equal(golden_losses, test_losses)
-        except AssertionError:
-            print(f"[GOLDEN_MISMATCH] {test_name} — dumping actual losses for regeneration:")
-            for step in sorted(test_losses):
-                print(f"[GOLDEN_MISMATCH] {step} {test_losses[step]}")
-            raise
+    for idx in range(len(test_flavor.override_args)):
+        cmd, env = _build_train_command(test_flavor, case_dir, idx, module, config)
+        subprocess.run(cmd, env=env, check=True)
+        _check_phase_results(test_flavor, case_dir, idx, golden_losses)
+    if test_flavor.check_resume:
+        compare_checkpoint_metrics(case_dir / "test_run", test_flavor.expected_steps)
 
 
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):

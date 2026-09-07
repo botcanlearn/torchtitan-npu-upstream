@@ -11,6 +11,7 @@ torchtitan 迁移而来。
 |---|---|---|---|---:|---|---|
 | `dsv4_golden_1rank` | DeepSeek-V4 | 1 Rank 参考配置 | 1 | - | 是 | - |
 | `dsv4_golden_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2 | 2 | - | 是 | - |
+| `dsv4_checkpoint_resume_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2，step 2 恢复到 step 4 | 2 | - | 是，含 grad_norm | 与本次连续训练的 step 3、4 精确比较 |
 | `dsv4_smla_1rank_aot_eager` | DeepSeek-V4 | 1 Rank | 1 | `aot_eager` | 否 | SMLA 暂不支持 `--debug.deterministic` |
 | `dsv4_smla_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2 | 2 | `aot_eager` | 否 | SMLA 暂不支持 `--debug.deterministic` |
 | `dsv4_smla_cp2_ep2_fsdp2` | DeepSeek-V4 | CP2 + EP2 + FSDP2 | 4 | `aot_eager` | 否 | SMLA 暂不支持 `--debug.deterministic` |
@@ -28,6 +29,23 @@ torchtitan 迁移而来。
 
 两个 DeepSeek-V3.2 case 同样设置 `check_loss=True`，使用 RoPE workaround、Ascend DSA
 metadata/attention override，并分别对 1-rank 和 EP2/FSDP2 的 100-step loss 做精确比较。
+
+`dsv4_checkpoint_resume_ep2_fsdp2` 合并 checkpoint 保存、恢复和精度对齐验证，已注册到
+门禁的 `models` suite。它使用两卡 EP2 + FSDP2 和 Golden 算子，设置 `check_resume=True`，
+固定 seed=42 并开启 deterministic。第一阶段连续训练 4 步，保留 step 2 的完整 checkpoint；
+第二阶段在新进程中通过 `--checkpoint.load-step=2` 恢复，再训练第 3、4 步。
+两阶段均设置 `--training.steps=4`，确保学习率调度一致，共用 checkpoint 目录，
+分别写入 `tb_phase_0` 和 `tb_phase_1`。检查 TensorBoard 的
+`loss_metrics/global_avg_loss` 和 `grad_norm`：步骤集合必须分别为 `(1, 2, 3, 4)` 和 `(3, 4)`，
+续训两步的两个标量必须与连续训练逐值精确相等，不舍入、不使用容差；缺失、重复步骤或
+非有限值均失败。本次连续训练是动态基准，不读取或更新仓内 golden loss 文件。
+
+单独执行此用例：
+
+```bash
+python -m tests.integration_tests.run_tests /tmp/checkpoint_resume_output \
+  --test_suite models --test_name dsv4_checkpoint_resume_ep2_fsdp2 --ngpu 2
+```
 
 四个 SMLA case 都设置 `check_loss=False`，因此不会启用 `--debug.deterministic`，也不会
 读取 golden loss。它们用于覆盖 SMLA/NPU override 在单卡、EP+FSDP、CP+EP+FSDP 以及

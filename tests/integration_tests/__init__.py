@@ -29,6 +29,8 @@ class OverrideDefinitions:
     env_vars: Mapping[str, str] | None = None
     use_golden: bool = True
     check_loss: bool = True
+    expected_steps: Sequence[Sequence[int]] | None = None
+    check_resume: bool = False
 
     def __repr__(self):
         return self.test_descr
