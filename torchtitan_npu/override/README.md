@@ -308,7 +308,7 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 | `mhc.triton_hc_head` | `HcHead.Config` | `TritonHcHead.Config` | 使用 `mhc_pre_only_sinkhorn_op` + `mhc_pre_bmm_op` |
 | `mhc.tilelang_hc_head` | `HcHead.Config` | `TilelangHcHead.Config` | 使用 `mhc_head_compute_mix_tilelang` (TileLang 融合 kernel) |
 
-`sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 还支持可选的 `indexer_loss_coeff`，默认值为 `0.0`。
+`sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 和 `sparse_attn.pypto` 均支持可选的 `indexer_loss_coeff`，有效默认值为 `1.0`；如需关闭 Indexer KL 梯度，显式传入 `{"indexer_loss_coeff": 0.0}`。
 MHC 的 `asc_hc_pre` / `asc_hc_post` 与 `triton_hc_pre` / `triton_hc_post` / `triton_hc_head` / `tilelang_hc_head` 是可选入口（`deepseek_v4/__init__.py`
 默认只导入 `sparse_attn`），需要时显式加入 `override.imports`。`triton_hc_head` 与 `tilelang_hc_head` 声明同一 `HcHead.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` / `asc_hc_post` 共存。
 推荐直接使用 `examples/deepseek_v4/*.sh` wrapper；单机调试可使用

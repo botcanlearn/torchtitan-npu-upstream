@@ -117,7 +117,7 @@ overlap_valid    = [F, T, F, T, T, T]  # 文档起始块没有前驱
 1. 校验模型输入与 `CompressedVarlenMetadata` 一致，按 `self.compress_ratio` 取 plan。
 2. 把 query、原始 KV 转成 TND；压缩 KV 与 Indexer key 取容器网格头部 `n_blocks` 槽位转成打包流。
 3. 调用 LightningIndexer 生成序列内局部 TopK（使用 `asc_plans[ratio].li_metadata`）。
-4. 调用 SparseFlashMLA；`_SparseFlashMLATND` 在反向中调用 SMLAG 与 SLIG（使用 `asc_plans[ratio].smla_grad_metadata`、`asc_plans[ratio].slig_metadata`）。SLIG 的 Indexer KL 梯度按 `indexer_loss_coeff`（NPU 内核配置，默认 0.0）缩放，LI 损失值累积到 `_indexer_loss_acc` 缓冲；Indexer auxiliary loss 已从模型目录移除，随上游机制落地后另行设计。
+4. 调用 SparseFlashMLA；`_SparseFlashMLATND` 在反向中调用 SMLAG 与 SLIG（使用 `asc_plans[ratio].smla_grad_metadata`、`asc_plans[ratio].slig_metadata`）。SLIG 的 Indexer KL 梯度按 `indexer_loss_coeff` 缩放；`sparse_attn.asc` 和 `sparse_attn.pypto` 公开 override 入口的有效默认值均为 `1.0`，显式传入 `{"indexer_loss_coeff": 0.0}` 可关闭该梯度。LI 损失值累积到 `_indexer_loss_acc` 缓冲；Indexer auxiliary loss 已从模型目录移除，随上游机制落地后另行设计。
 
 `cann_ops_transformer` 包负责内核的算子注册（schema、meta/fake 实现），本仓只在融合路径内做前反向桥接，不再自建 `torch.library` 封装。
 
