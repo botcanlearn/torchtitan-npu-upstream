@@ -26,6 +26,7 @@ class OverrideDefinitions:
     ngpu: int = 4
     disabled: bool = False
     skip_rocm_test: bool = False
+    timeout: int | None = None
     env_vars: Mapping[str, str] | None = None
     use_golden: bool = True
     check_loss: bool = True

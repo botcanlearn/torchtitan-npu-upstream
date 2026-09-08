@@ -79,3 +79,27 @@ python -m tests.integration_tests.run_tests \
 其中`./test_reports/integration` 是必填的测试输出目录，运行前需要确保该目录为空。
 
 直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
+
+## 并行调度
+
+runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到固定的 NPU 池上，
+每个用例通过 `ASCEND_RT_VISIBLE_DEVICES` 绑定到互不相交的物理 NPU 子集，
+任一时刻在用 NPU 数量不超过设备池大小。设备池从真实可见性构造：若运行环境已通过
+`ASCEND_RT_VISIBLE_DEVICES` 限定可用 NPU 子集（如 CI 按任务分配设备），池从该
+子集构造并对超出的 `--ngpu` 硬报错；否则用 `torch.npu.device_count()` 枚举运行时
+实际暴露的物理 ID，`--ngpu` 超出实际设备数时告警并截断——绝不按 `range(--ngpu)`
+伪造 ID（不存在的 ID 会让子进程在 CANN `GetVisibleDevices` 阶段即失败，torchtitan
+设备探测退回 "cuda" 后以 `torch._C._cuda_setDevice` AttributeError 崩溃）。池小于
+某用例需求时该用例被显式 skip 而非在 `acquire()` 中死锁。用例按 `ngpu` 从大到小
+提交以减少队头阻塞；并行结束后 runner 会输出两行调度遥测：池利用率
+（`[parallel] pool: window/utilization/busy histogram/allocations`）与
+用例重叠（`[parallel] overlap: sequential vs window、节省时长、并发度直方图`），
+统计窗口均为首次分配到最后一次释放，可直接用于核验 CI canary 的打包与重叠效果。
+各用例的输出被整体缓存，结束后以带 `[case 名]` 前缀的连续块输出，避免多用例
+日志交错。如需强制串行执行，传入 `--no-parallel`。用例可通过
+`OverrideDefinitions.timeout` 设置超时；超时后 runner 会向子进程所在进程组先发
+`SIGTERM`、宽限期后再 `SIGKILL`，确保 `torchrun` 及各 rank 子进程全部退出，不会
+留下占用 NPU 的孤儿进程（超时按失败处理并输出已捕获日志）。
+
+调度器本身不设独立单元测试：其正确性（设备不重叠、失败/超时释放、并发打包、
+golden loss 等价）由集成测试自身的 canary 运行直接验证。

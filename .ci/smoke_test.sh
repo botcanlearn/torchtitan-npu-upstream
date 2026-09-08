@@ -24,7 +24,7 @@ TORCHTITAN_VERSION="$(grep -E '^torchtitan==' requirements.txt | head -1 | cut -
 TORCHTITAN_COMMIT="${TORCHTITAN_COMMIT:-v${TORCHTITAN_VERSION}}"
 TORCHTITAN_DIR="${TORCHTITAN_DIR:-${PROJECT_ROOT}/third_party/torchtitan}"
 OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/test_reports/smoke}"
-NGPU="${NGPU:-8}"
+NGPU="${NGPU:-4}"
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
     echo "Required interpreter not found: ${PYTHON_BIN}" >&2
