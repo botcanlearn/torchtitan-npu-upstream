@@ -80,9 +80,10 @@ bash scripts/run_train.sh \
 
 ### 单机 8 卡 EP8 训练任务
 
-直接复用 DeepSeek-V4 单机 8 卡示例脚本。该脚本默认使用 8 卡、EP8/DP8 并行配置和 `deepseek_v4_flash_43layers_16experts` 模型配置：
+直接复用 DeepSeek-V4 单机 8 卡示例脚本。该脚本默认使用 8 卡、EP8/DP8 并行配置和 `deepseek_v4_flash_43layers_16experts` 模型配置。运行前需准备与 DeepSeek-V4 配套的 Tokenizer，并将下面的 `HF_ASSETS_PATH` 替换为其实际目录：
 
 ```bash
+HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
 bash examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh \
   --training.steps 5
 ```
