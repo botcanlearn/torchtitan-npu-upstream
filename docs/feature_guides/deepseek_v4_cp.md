@@ -142,7 +142,7 @@ CP 方案中复杂度最高的是压缩器的借入与组装。以 `r = 4` 为�
 
 CP 方案依赖 AscendC `sparse_flash_mla` 家族的以下语义（均从内核行为验证得出）：
 
-- **TND 布局**：每段一个 batch；`cu_seqlens_q`、`cu_seqlens_ori_kv`、`cu_seqlens_cmp_kv`、`cmp_residual_kv` 为前缀和/每段余数；`kvHeadNum = 1`；`ori_win_left = window − 1`、`ori_win_right = 0`；`ori_mask_mode` / `cmp_mask_mode` 固定为 4 / 3。
+- **TND 布局**：每段一个 batch；`cu_seqlens_q`、`cu_seqlens_ori_kv`、`cu_seqlens_cmp_kv`、`cmp_residual_kv` 为前缀和/每段余数；`kvHeadNum = 1`；`ori_win_left = window − 1`、`ori_win_right = 0`。`sparse_flash_mla` 后端的 `ori_mask_mode` 固定为 `4`，`cmp_mask_mode` 通常为 `3`，但在 A5 且无压缩 KV（`ratio=1`）时为 `0`；这一契约在 metadata 生成、正向 `sparse_flash_mla` 和反向 `sparse_flash_mla_grad` 三处调用中保持一致。
 - **端对齐**：ori token `k` 被读作文档 token `(s1Size − oriLen) + k`，掩码以端对齐坐标计算，窗口范围由属性（`ori_win_left/right`）决定而非区间长度。因此 `cu_seqlens_ori_kv` 不必是因果前缀，窗口打包得以成立。
 - **压缩因果上限**：`limit(pos) = floor((p0 + pos + 1) / r)`。计划按文档相对块数与余数构造 `cu_seqlens_cmp_k` / `block_remainder`，使 CP 形式与参考调用的可见范围一致（内核的 p0 通道）。
 - **sink**：1-D fp32 `[N1]`，softmax 初值 `max = sink`、`sum = 1`；LSE 为 `log(sum) + max`。
