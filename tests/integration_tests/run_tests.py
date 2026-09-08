@@ -21,6 +21,7 @@ from tests.integration_tests.deepseek_v4 import (
     build_deepseek_v4_checkpoint_resume_test_list,
     build_deepseek_v4_test_list,
 )
+from tests.integration_tests.ema import assert_ema_checkpoint_written, build_ema_test_list
 from tests.integration_tests.loss_compare import (
     assert_losses_equal,
     compare_checkpoint_metrics,
@@ -37,6 +38,7 @@ def build_models_test_list() -> list[OverrideDefinitions]:
         build_deepseek_v4_test_list()
         + build_deepseek_v4_checkpoint_resume_test_list()
         + build_deepseek_v3_2_test_list()
+        + build_ema_test_list()
     )
 
 
@@ -46,6 +48,7 @@ _TEST_SUITES_FUNCTION = {
     "deepseek_v3_2": build_deepseek_v3_2_test_list,
     "deepseek_v4": build_deepseek_v4_test_list,
     "deepseek_v4_checkpoint": build_deepseek_v4_checkpoint_resume_test_list,
+    "ema": build_ema_test_list,
 }
 # torchtitan-npu override: reference losses are selected
 # from the repository using the case name.
@@ -132,6 +135,8 @@ def run_single_test(
     for idx in range(len(test_flavor.override_args)):
         cmd, env = _build_train_command(test_flavor, case_dir, idx, module, config)
         subprocess.run(cmd, env=env, check=True)
+        if test_flavor.verify_ema_checkpoint:
+            assert_ema_checkpoint_written(case_dir / "test_run")
         _check_phase_results(test_flavor, case_dir, idx, golden_losses)
     if test_flavor.check_resume:
         compare_checkpoint_metrics(case_dir / "test_run", test_flavor.expected_steps)

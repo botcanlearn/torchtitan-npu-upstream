@@ -31,6 +31,7 @@ class OverrideDefinitions:
     check_loss: bool = True
     expected_steps: Sequence[Sequence[int]] | None = None
     check_resume: bool = False
+    verify_ema_checkpoint: bool = False
 
     def __repr__(self):
         return self.test_descr

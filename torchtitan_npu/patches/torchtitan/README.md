@@ -4,6 +4,7 @@
 - https://github.com/pytorch/torchtitan/pull/3634
 - https://github.com/pytorch/torchtitan/pull/3864
 - https://github.com/pytorch/torchtitan/pull/4474
+- https://github.com/pytorch/torchtitan/pull/3985
 -->
 
 # TorchTitan 临时补丁
@@ -34,5 +35,6 @@ grep -L "Pending upstream PR: https://github.com/pytorch/torchtitan/pull/" \
 | [#3634](https://github.com/pytorch/torchtitan/pull/3634) | 补充 DeepSeek-V4 所需的公共组件及训练接入 |
 | [#3864](https://github.com/pytorch/torchtitan/pull/3864) | 为 torchtitan 补充 LoggedAuxLoss 辅助损失框架 |
 | [#4474](https://github.com/pytorch/torchtitan/pull/4474) | 补齐部分初始化的 optimizer state，支持完整 checkpoint 恢复 |
+| [#3985](https://github.com/pytorch/torchtitan/pull/3985) | 为 Trainer 补充 EMA 权重维护及 checkpoint 集成 |
 
 对应 PR 合入且 TorchTitan 依赖更新后，应删除相关补丁及导入；全部补丁清理完成后，删除本目录。
