@@ -109,14 +109,22 @@ def _load_checkpoint_conversion_module() -> types.ModuleType:
 @pytest.fixture
 def isolated_ema_environment():
     import torchtitan.components.checkpoint as upstream_checkpoint
+    import torchtitan.components.checkpointer as upstream_checkpointer
     import torchtitan.trainer as upstream_trainer
 
     original_modules = {name: module for name, module in sys.modules.items() if _is_torchtitan_npu_module(name)}
     original_sys_path = list(sys.path)
     original_trainer = upstream_trainer.Trainer
     original_post_dataloading_process = original_trainer.post_dataloading_process
-    original_checkpoint_manager = upstream_checkpoint.CheckpointManager
-    checkpoint_config = original_checkpoint_manager.Config
+    # torchtitan v0.3.0 keeps CheckpointManager in the checkpointer package with
+    # a legacy shim re-export; the EMA patch replaces the name in all three
+    # namespaces, so all three are saved and restored here.
+    original_checkpoint_managers = (
+        upstream_checkpoint.CheckpointManager,
+        upstream_checkpointer.CheckpointManager,
+        upstream_checkpointer.dcp.CheckpointManager,
+    )
+    checkpoint_config = original_checkpoint_managers[0].Config
     missing = object()
     original_config_attributes = {
         name: vars(checkpoint_config).get(name, missing) for name in _PATCHED_CONFIG_ATTRIBUTES
@@ -129,7 +137,9 @@ def isolated_ema_environment():
         sys.path[:] = original_sys_path
         upstream_trainer.Trainer = original_trainer
         original_trainer.post_dataloading_process = original_post_dataloading_process
-        upstream_checkpoint.CheckpointManager = original_checkpoint_manager
+        upstream_checkpoint.CheckpointManager = original_checkpoint_managers[0]
+        upstream_checkpointer.CheckpointManager = original_checkpoint_managers[1]
+        upstream_checkpointer.dcp.CheckpointManager = original_checkpoint_managers[2]
         _restore_config_attributes(checkpoint_config, original_config_attributes, missing)
         _clear_torchtitan_npu_modules()
         sys.modules.update(original_modules)
@@ -325,7 +335,7 @@ def test_hf_model_only_load_reseeds_ema(ema_modules: EMAModules, tmp_path: Path)
         _fill_tensors(state_dict, LOADED_VALUE)
 
     try:
-        with patch("torchtitan.components.checkpoint.dcp.load", fake_dcp_load):
+        with patch("torchtitan.components.checkpointer.dcp.dcp.load", fake_dcp_load):
             assert manager.load()
         _assert_all_tensors(list(model.parameters()), LOADED_VALUE)
         _assert_all_tensors(_ema_tensors(ema_optimizer), LOADED_VALUE)

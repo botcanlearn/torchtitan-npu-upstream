@@ -36,7 +36,7 @@ class TrainerEx(Trainer):
                 self.parallelism.tensor_parallel_degree > 1 or self.parallelism.pipeline_parallel_degree > 1
             ):
                 raise ValueError(
-                    "DeepSeek-V4 DistributedMuon requires "
+                    "DeepSeek-V4 DistMuon requires "
                     "tensor_parallel_degree=1 and pipeline_parallel_degree=1; "
                     "TP _StridedShard and PP stage-local parameter groups are not admitted yet"
                 )

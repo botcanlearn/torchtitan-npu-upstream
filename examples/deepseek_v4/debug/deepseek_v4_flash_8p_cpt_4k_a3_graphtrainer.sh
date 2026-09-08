@@ -6,5 +6,5 @@
 
 export CONFIG="${CONFIG:-graph_trainer_deepseek_v4_flash_43layers_16experts}"
 bash examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh \
-    --parallelism.spmd-backend default \
+    --parallelism.spmd-backend partial_dtensor \
     "$@"

@@ -9,8 +9,7 @@
 import os
 from dataclasses import replace
 
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import LRSchedulersContainer, default_adamw
 from torchtitan.hf_datasets.text_datasets import ChatDataLoader
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.config_registry import qwen35_27b

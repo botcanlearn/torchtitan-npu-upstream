@@ -14,10 +14,12 @@ _setup_torchtitan() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local requirements_file="${script_dir}/../requirements.txt"
-    local requirement_pattern='^[[:space:]]*torchtitan[[:space:]]+@[[:space:]]*[^[:space:]]+@[0-9a-f]{40}[[:space:]]*$'
+    local requirement_pattern='^[[:space:]]*torchtitan==[0-9][0-9A-Za-z.+-]*[[:space:]]*$'
     local torchtitan_requirement
     torchtitan_requirement="$(grep -E "${requirement_pattern}" "${requirements_file}")"
-    local torchtitan_commit="${torchtitan_requirement##*@}"
+    local torchtitan_version="${torchtitan_requirement##*==}"
+    torchtitan_version="${torchtitan_version//[[:space:]]/}"
+    local torchtitan_commit="v${torchtitan_version}"
 
     echo "Preparing torchtitan at ${torchtitan_commit}..."
 

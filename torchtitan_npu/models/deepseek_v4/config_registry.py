@@ -10,16 +10,14 @@ from typing import Any, cast
 from torch.distributed.tensor import Shard
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import LRSchedulersContainer, default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.distributed.flex_shard import (
-    AttentionPerHeadComputeView,
+    BlockShard,
     BucketConfig,
     ComputeLayout,
-    MuonComputeShardingConfig,
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -55,8 +53,8 @@ from .parallelize import parallelize_graph_trainer_deepseek_v4
 def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     """Build the DSV4-owned parameter and FlexShard policy for Muon."""
     model_config = cast("DeepSeekV4Model.Config", model_spec.model)
-    owned = MuonComputeShardingConfig(
-        compute_layout=ComputeLayout(shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()})
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
     )
     attention_shardings = {"wq_a": owned, "wkv": owned, "wo_b": owned}
     expert_projections = ("w1", "w2", "w3")
@@ -66,7 +64,8 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         layer_config: Any,
         *,
         include_mtp_projections: bool,
-    ) -> dict[str, MuonComputeShardingConfig]:
+    ) -> dict[str, ComputeLayout]:
+        attention = layer_config.attention
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
             for projection, compute_sharding in attention_shardings.items()
@@ -74,26 +73,30 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         shardings.update(
             {f"{prefix}.moe.shared_experts.{projection}.weight": owned for projection in expert_projections}
         )
-        shardings[f"{prefix}.attention.wq_b.weight"] = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)}),
-            compute_view=AttentionPerHeadComputeView(num_heads=layer_config.attention.n_heads),
+        # ``wq_b`` stores one [head_dim, q_lora_rank] matrix per head flattened
+        # into [n_heads * head_dim, q_lora_rank]; ``wo_a`` stores one
+        # [o_lora_rank, per_group_in] matrix per group flattened likewise.
+        # BlockShard computes Muon on each per-head/per-group matrix.
+        shardings[f"{prefix}.attention.wq_b.weight"] = ComputeLayout(
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_size=attention.head_dim),
+            },
         )
-        shardings[f"{prefix}.attention.wo_a.weight"] = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)}),
-            compute_view=AttentionPerHeadComputeView(num_heads=layer_config.attention.n_groups),
+        shardings[f"{prefix}.attention.wo_a.weight"] = ComputeLayout(
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_size=attention.wo_a.out_features),
+            },
         )
         if getattr(layer_config.attention, "compressor", None) is not None:
             for projection in ("wkv", "wgate"):
                 shardings[f"{prefix}.attention.compressor.{projection}.weight"] = owned
             shardings[f"{prefix}.attention.compressor.ape"] = owned
-        expert_sharding = MuonComputeShardingConfig(
-            compute_layout=ComputeLayout(
-                shardings_by_mesh_axis={
-                    MeshAxisName.DP_SHARD.value: Shard(0),
-                    MeshAxisName.EFSDP.value: Shard(0),
-                    MeshAxisName.EP.value: Shard(0),
-                }
-            )
+        expert_sharding = ComputeLayout(
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: Shard(0),
+                MeshAxisName.EFSDP.value: Shard(0),
+                MeshAxisName.EP.value: Shard(0),
+            }
         )
         for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
             shardings[f"{prefix}.moe.routed_experts.inner_experts.{projection}"] = expert_sharding
@@ -161,7 +164,7 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     return MuonOptimizerProfile(
         muon_pattern=muon_pattern,
         optimizer_factory_kwargs={
-            "DistributedMuon": {
+            "DistMuon": {
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
                 "bucket_configs": bucket_configs,
             }

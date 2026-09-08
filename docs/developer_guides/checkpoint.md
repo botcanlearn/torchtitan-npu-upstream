@@ -3,7 +3,8 @@
 本文说明如何使用 TorchTitan 的 checkpoint 机制保存、加载
 `torchtitan-npu` 训练状态，以及如何加载或保存 Hugging Face safetensors 权重。
 
-当前实现基于上游 `torchtitan.components.checkpoint.CheckpointManager`：
+当前实现基于上游 `torchtitan.components.checkpointer.CheckpointManager`
+（torchtitan v0.3.0 起 `torchtitan.components.checkpoint` 仅为兼容再导出）：
 
 - DCP（Distributed Checkpoint）用于保存和加载分布式训练状态。
 - Hugging Face safetensors 只用于模型权重的加载或保存，不能加载优化器和训练步数。
@@ -98,7 +99,7 @@ bash scripts/run_train.sh \
 也可以在配置注册表中设置：
 
 ```python
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager
 
 checkpoint = CheckpointManager.Config(
     enable=True,

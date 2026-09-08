@@ -178,7 +178,7 @@ def test_config_manager_materializes_muon_from_cli(monkeypatch, tmp_path):
     profile = MuonOptimizerProfile(
         muon_pattern=r"matrix\\.weight",
         optimizer_factory_kwargs={
-            "DistributedMuon": {
+            "DistMuon": {
                 "compute_sharding_by_fqn": {},
                 "bucket_configs": (),
             }
@@ -218,7 +218,7 @@ def test_config_manager_materializes_muon_from_cli(monkeypatch, tmp_path):
     assert config.optimizer.name == "Muon"
     assert len(config.optimizer.param_groups) == 2
     muon_group, adamw_group = config.optimizer.param_groups
-    assert muon_group.optimizer_name == "DistributedMuon"
+    assert muon_group.optimizer_name == "DistMuon"
     assert muon_group.optimizer_kwargs["lr"] == pytest.approx(2.2e-4)
     assert muon_group.optimizer_kwargs["momentum"] == pytest.approx(0.95)
     assert muon_group.optimizer_kwargs["nesterov"] is True

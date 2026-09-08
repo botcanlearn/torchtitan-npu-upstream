@@ -19,8 +19,8 @@ def _function_source(path: Path, name: str) -> str:
     raise AssertionError(f"function {name!r} not found in {path}")
 
 
-def test_distributed_muon_patch_admits_only_npu_storage():
-    path = _ROOT / "torchtitan_npu/patches/torchtitan/distributed/flex_shard/distributed_muon.py"
+def test_dist_muon_patch_admits_only_npu_storage():
+    path = _ROOT / "torchtitan_npu/patches/torchtitan/distributed/flex_shard/dist_muon.py"
     source = _function_source(path, "_validate_parameter_storage")
 
     assert "isinstance(param, DTensor)" in source
@@ -88,7 +88,7 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
     assert "_PAPER_" not in source
     assert "_distributed_paper_parameter_muon_optimizer" not in source
     assert "deepseek_v4_debugmodel_paper_muon" not in source
-    assert "AttentionPerHeadComputeView" in source
+    assert "BlockShard(dim=0" in source
     assert "MeshAxisName.DP_SHARD.value: Shard(0)" in source
     assert "MeshAxisName.EFSDP.value: Shard(0)" in source
     for unified_muon_parameter in (

@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
 
-"""Explicit CPU offload policy for DistributedMuon and AdamW optimizer state."""
+"""Explicit CPU offload policy for DistMuon and AdamW optimizer state."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from torch.distributed._tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import derive, override
-from torchtitan.distributed.flex_shard.distributed_muon import DistributedMuon
+from torchtitan.distributed.flex_shard.dist_muon import DistMuon
 
 from torchtitan_npu.extensions.novaswap import swap_api
 from torchtitan_npu.extensions.novaswap.swap_primitive import validate_tensor_for_swap
@@ -34,7 +34,7 @@ class MuonSwapOptimizersContainer(OptimizersContainer):
         }
         optimizer_instance_by_part: dict[int, int] = {}
         for optimizer in self.optimizers:
-            if isinstance(optimizer, DistributedMuon):
+            if isinstance(optimizer, DistMuon):
                 part_indices = {
                     parameter_to_part[id(parameter)]
                     for group in optimizer.param_groups
@@ -42,7 +42,7 @@ class MuonSwapOptimizersContainer(OptimizersContainer):
                 }
                 if len(part_indices) != 1:
                     raise RuntimeError(
-                        "DistributedMuon optimizer must own parameters from exactly "
+                        "DistMuon optimizer must own parameters from exactly "
                         f"one model part, got part indices {sorted(part_indices)}"
                     )
                 part_index = next(iter(part_indices))
@@ -79,7 +79,7 @@ def _set_runtime_attribute(target: object, name: str, value: object) -> None:
     setattr(target, name, value)
 
 
-def _install_muon_swap_adapter(optimizer: DistributedMuon, model_part: int, optimizer_instance: int) -> None:
+def _install_muon_swap_adapter(optimizer: DistMuon, model_part: int, optimizer_instance: int) -> None:
     names: dict[torch.Tensor, str] = {}
     contracts: dict[torch.Tensor, tuple[Any, ...]] = {}
     _set_runtime_attribute(optimizer, "_torchtitan_npu_swap_names", names)
@@ -236,7 +236,7 @@ def _install_adamw_swap_adapter(optimizer: torch.optim.AdamW) -> None:
 
 @override(
     target=OptimizersContainer.Config,
-    description="Offload DistributedMuon and AdamW state by globally unique names",
+    description="Offload DistMuon and AdamW state by globally unique names",
 )
 def muon_state_swap(cfg: OptimizersContainer.Config) -> MuonSwapOptimizersContainer.Config:
     return derive(cfg, MuonSwapOptimizersContainer.Config)

@@ -15,6 +15,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from torchtitan.distributed.utils import set_spmd_backend
 
 from torchtitan_npu.ops.ascendc import moe_re_routing, moe_token_unpermute
 from torchtitan_npu.override.common import token_dispatcher as npu_token_dispatcher
@@ -592,6 +593,10 @@ def _install_cpu_npu_moe_fakes():
 
 
 def _alltoall_worker(rank: int, rendezvous: str, result_file: str, use_npu: bool = False):
+    # torchtitan v0.3.0 defaults the SPMD backend to "spmd_types"; this worker
+    # wires a plain ep mesh without setting up the spmd TLS mesh, so pin the
+    # backend explicitly to keep the dispatcher on the ep_mesh group path.
+    set_spmd_backend("partial_dtensor")
     dist.init_process_group(
         "gloo",
         init_method=f"file://{rendezvous}",

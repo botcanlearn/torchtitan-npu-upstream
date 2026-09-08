@@ -18,7 +18,7 @@ QuantizationRecipe = Literal["all_mxfp8", "mix", "all_block_fp8"]
 
 @dataclass(frozen=True, slots=True)
 class MuonOptimizerProfile:
-    """Model-owned metadata required to construct DistributedMuon.
+    """Model-owned metadata required to construct DistMuon.
 
     The profile intentionally excludes scalar optimizer hyperparameters. Those
     are public CLI fields on :class:`OptimizerConfig` and are materialized only
@@ -65,7 +65,7 @@ class OptimizerConfig(OptimizersContainer.Config):
         self.param_groups = [
             ParamGroupConfig(
                 pattern=self._muon_profile.muon_pattern,
-                optimizer_name="DistributedMuon",
+                optimizer_name="DistMuon",
                 optimizer_kwargs={
                     "lr": self.lr,
                     "weight_decay": self.weight_decay,

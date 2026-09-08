@@ -1,14 +1,14 @@
 # DeepSeek-V4 Muon 优化器
 
 本文说明当前 `master` 分支中的 Muon 方案、使用方法和能力边界。
-实现以 TorchTitan 上游 `DistributedMuon`/FlexShard 为核心；上游 FlexShard 的
+实现以 TorchTitan 上游 `DistMuon`/FlexShard 为核心；上游 FlexShard 的
 `ComputeLayout`、`Owned`、`BlockShard`、bucket 和 storage-to-compute 语义，参见
 [TorchTitan FlexShard README](https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/flex_shard/README.md)。
 
 ## 当前方案
 
 DSV4 使用一个混合优化器容器：匹配 Muon 规则的矩阵参数交给
-`DistributedMuon`，其余参数交给 AdamW。配置入口是
+`DistMuon`，其余参数交给 AdamW。配置入口是
 `torchtitan_npu/models/deepseek_v4/config_registry.py` 中的
 `_dsv4_muon_profile()`。该 profile 只承载模型参数匹配、FlexShard compute
 layout 和 bucket 元数据；所有可调优化器标量由 CLI schema 提供。
@@ -77,12 +77,12 @@ bash scripts/run_train.sh \
 ```
 
 `--optimizer.name` 默认为 `native`，保持常规 recipe 原有的 AdamW 行为；设为
-`Muon` 时才生成 DistributedMuon 与 AdamW fallback 两组。不存在 `_muon` 专用
+`Muon` 时才生成 DistMuon 与 AdamW fallback 两组。不存在 `_muon` 专用
 recipe。DSV4 Muon 当前要求：
 
 - `tensor_parallel_degree=1`；
 - `pipeline_parallel_degree=1`；
-- optimizer 使用 `DistributedMuon` 的 FlexShard compute layout；
+- optimizer 使用 `DistMuon` 的 FlexShard compute layout；
 - routed experts 的布局同时声明 DP shard、EFSDP 和 EP，以覆盖当前 EP=8/EP=1
   的存储 mesh；
 - AdamW 组保持 `foreach=False`。Ascend 上 `foreach=True` 可能触发
@@ -151,7 +151,7 @@ torchtitan_npu.override.common.muon_state_swap.muon_state_swap_checkpoint
 当前方案适合 DSV4 单机 8 卡、TP/PP=1、EP/DP-shard 并行的实验和训练。以下能力
 尚未由当前实现证明：
 
-- TP>1 或 PP>1 的 DistributedMuon；
+- TP>1 或 PP>1 的 DistMuon；
 - swap 开启时的 optimizer checkpoint 保存、加载和断点续训；
 - 长程收敛与无 swap 基线的数值等价；
 - all-rank profiling skew 和多机 HCCL 场景；

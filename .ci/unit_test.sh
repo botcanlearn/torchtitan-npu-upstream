@@ -33,7 +33,8 @@ trap _cleanup_python_shims EXIT
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TORCHTITAN_REPO="${TORCHTITAN_REPO:-https://gitcode.com/GitHub_Trending/to/torchtitan.git}"
-TORCHTITAN_COMMIT="${TORCHTITAN_COMMIT:-$(grep '^torchtitan @ ' "${PROJECT_ROOT}/requirements.txt" | cut -d@ -f3)}"
+TORCHTITAN_VERSION="$(grep -E '^torchtitan==' "${PROJECT_ROOT}/requirements.txt" | head -1 | cut -d= -f3 | tr -d '[:space:][:cntrl:]')"
+TORCHTITAN_COMMIT="${TORCHTITAN_COMMIT:-v${TORCHTITAN_VERSION}}"
 TORCHTITAN_DIR="${TORCHTITAN_DIR:-${PROJECT_ROOT}/third_party/torchtitan}"
 
 source /home/jenkins/Ascend/cann-9.2.0/set_env.sh

@@ -12,6 +12,8 @@ query NPU hardware on CPU-only runners.
 import torch
 import torchtitan.components.checkpoint_utils
 import torchtitan.components.optimizer
+import torchtitan.components.optimizer.optimizer
+import torchtitan.components.optimizer.utils
 from torch.distributed import checkpoint as dcp
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 
@@ -20,7 +22,8 @@ from torchtitan_npu.patches.torchtitan.components import optimizer as optimizer_
 
 def test_patch_replaces_loaded_optimizer_state_helpers():
     assert torchtitan.components.checkpoint_utils.init_optim_state is optimizer_patch.patched_init_optim_state
-    assert torchtitan.components.optimizer.init_optim_state is optimizer_patch.patched_init_optim_state
+    assert torchtitan.components.optimizer.utils.init_optim_state is optimizer_patch.patched_init_optim_state
+    assert torchtitan.components.optimizer.optimizer.init_optim_state is optimizer_patch.patched_init_optim_state
 
 
 def test_init_optim_state_materializes_missing_state():
@@ -117,7 +120,7 @@ def test_init_optim_state_is_idempotent_after_state_is_complete():
     saved_grad = param.grad
     saved_state = {key: value.clone() for key, value in optim.state[param].items()}
 
-    torchtitan.components.optimizer.init_optim_state(optim)
+    torchtitan.components.optimizer.optimizer.init_optim_state(optim)
 
     assert param.grad is saved_grad
     for key, value in saved_state.items():

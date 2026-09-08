@@ -60,8 +60,13 @@ def patched_init_optim_state(optim: torch.optim.Optimizer) -> None:
 
 def apply() -> None:
     logger.info("[PATCH] checkpoint_utils.init_optim_state and optimizer.init_optim_state -> patched_init_optim_state")
+    # torchtitan v0.3.0 moved init_optim_state into the components.optimizer
+    # package (optimizer/utils.py) and stopped re-exporting it from the package
+    # root. The sole runtime caller binds it in optimizer/optimizer.py via
+    # "from .utils import init_optim_state", so patch every consumer namespace.
+    torchtitan.components.optimizer.utils.init_optim_state = patched_init_optim_state
+    torchtitan.components.optimizer.optimizer.init_optim_state = patched_init_optim_state
     torchtitan.components.checkpoint_utils.init_optim_state = patched_init_optim_state
-    torchtitan.components.optimizer.init_optim_state = patched_init_optim_state
 
 
 apply()
