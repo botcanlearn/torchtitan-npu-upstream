@@ -113,7 +113,6 @@ OPTIMIZER_ARGS="
 "
 OPTIMIZER_OVERRIDES="
     torchtitan_npu.override.common.optimizer.virtual
-    torchtitan_npu.override.common.optimizer.checkpoint_virtual
 "
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then

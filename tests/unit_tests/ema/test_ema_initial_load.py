@@ -517,7 +517,6 @@ def test_ema_schema_is_inherited_by_npu_trainer_ex_config() -> None:
         import torchtitan.trainer as upstream_trainer
 
         assert upstream_trainer.Trainer is trainer_module.EMATrainer
-        assert upstream_checkpoint.CheckpointManager is EMACheckpointManager
         assert "ema_weights" in trainer_module.EMATrainer.Config.__dataclass_fields__
         config = TrainerEx.Config()
         assert isinstance(config, trainer_module.EMATrainer.Config)

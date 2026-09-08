@@ -56,8 +56,8 @@ MTP+CP 场景下的实际构图、编译和训练执行路径；单卡、EP2 和
 MTP forward、chunked loss 和 backward。
 
 这里的 integration recipe 聚焦 sparse-attention / MHC 回归边界。端到端 example 脚本
-额外启用 Virtual Optimizer / checkpoint override；这些 storage/checkpoint override 不属于
-当前 integration loss regression 的覆盖范围。
+额外启用 Virtual Optimizer；checkpoint 保存兼容由 extension `CheckpointManager` 提供。
+这些 optimizer state/checkpoint 路径不属于当前 integration loss regression 的覆盖范围。
 
 ## 入口
 

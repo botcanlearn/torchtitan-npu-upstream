@@ -56,57 +56,39 @@ Virtual Optimizer 通过 TorchTitan 的配置级 override 启用，不增加 `vi
 python -m torchtitan_npu.train \
   --module torchtitan_npu.models.deepseek_v4 \
   --config deepseek_v4_debugmodel \
-  --override.imports "torchtitan_npu.override.common.optimizer.virtual,torchtitan_npu.override.common.optimizer.checkpoint_virtual" \
+  --override.imports torchtitan_npu.override.common.optimizer.virtual \
   --checkpoint.enable \
   --checkpoint.async-mode disabled
 ```
 
-如果 recipe 已经启用了 attention、RoPE、RMSNorm 等 override，应将以上两个入口追加到现有 `override.imports` 列表，不要覆盖模型原有入口。
+如果 recipe 已经启用了 attention、RoPE、RMSNorm 等 override，应将该入口追加到现有 `override.imports` 列表，不要覆盖模型原有入口。
 
 也可以在 Python 配置中添加：
 
 ```python
-cfg.override.imports.extend(
-    [
-        "torchtitan_npu.override.common.optimizer.virtual",
-        "torchtitan_npu.override.common.optimizer.checkpoint_virtual",
-    ]
+cfg.override.imports.append(
+    "torchtitan_npu.override.common.optimizer.virtual"
 )
 cfg.checkpoint.enable = True
 cfg.checkpoint.async_mode = "disabled"
 ```
 
-两个入口分别替换不同的 TorchTitan 配置节点：
+Virtual Optimizer override 只替换 `OptimizersContainer.Config`，负责创建 swap-backed
+`exp_avg` 和 `exp_avg_sq`。Checkpoint 保存兼容已由 extension `CheckpointManager` 提供，
+无需额外 checkpoint override。
 
-| Override | 配置节点 | 作用 |
-| --- | --- | --- |
-| `optimizer.virtual` | `OptimizersContainer.Config` | 创建 swap-backed `exp_avg` 和 `exp_avg_sq` |
-| `optimizer.checkpoint_virtual` | `CheckpointManager.Config` | 兼容同步 native DCP 保存 live swap tensors |
-
-只需要使用 Virtual Optimizer、但不保存 checkpoint 时，可以只启用 `optimizer.virtual`。需要同步保存并恢复完整训练状态时，应同时启用两个入口。
-
-如果还需要 checkpoint SHA-256 manifest 校验，应使用单一的组合 checkpoint replacement
-替换 `optimizer.checkpoint_virtual`，避免两个 override 同时声明 `config.checkpoint`：
+如果还需要 checkpoint SHA-256 manifest 校验，增加：
 
 ```bash
---override.imports \
-  torchtitan_npu.override.common.optimizer.virtual,\
-  'torchtitan_npu.override.checkpoint.npu_virtual={"verify_hash_manifest":true}' \
---checkpoint.enable \
---checkpoint.async-mode disabled
+--checkpoint.extensions.verify-hash-manifest
 ```
-
-`torchtitan_npu.override.checkpoint.npu_virtual` 同时保留同步 native DCP 的
-`per_thread_copy_ahead=0` writer 和 manifest 生成、加载校验行为。不要再追加
-`torchtitan_npu.override.common.optimizer.checkpoint_virtual` 或
-`torchtitan_npu.override.checkpoint.npu`。该组合入口与原 Virtual Optimizer writer 一样，
-只支持同步、本地 native DCP 保存。
 
 ## Virtual Optimizer 与 Checkpoint
 
 TorchTitan 在保存 optimizer checkpoint 前会初始化尚未创建的 optimizer state，因此即使保存发生在第一次真实 optimizer step 之前，也能先建立形状和分片正确的 swap-backed moments。
 
-PyTorch DCP 默认 `FileSystemWriter` 的 copy-ahead 路径与当前 NPU swap storage 不兼容。`optimizer.checkpoint_virtual` 因此只对同步 native DCP 本地保存使用以下 writer：
+PyTorch DCP 默认 `FileSystemWriter` 的 copy-ahead 路径与当前 NPU swap storage 不兼容。
+Extension `CheckpointManager` 因此对同步 native DCP 保存使用以下 writer：
 
 ```python
 dcp.FileSystemWriter(
@@ -115,7 +97,9 @@ dcp.FileSystemWriter(
 )
 ```
 
-该 checkpoint 修改只用于解决 Virtual Optimizer state 的保存兼容问题，不是独立的 checkpoint 特性。DCP 加载不需要单独改写：fresh optimizer 会先创建 swap-backed load targets，再由 DCP 将 checkpoint 数据写入这些 targets；已有 state 和 repeated load 会复用当前 state。
+该 writer 配置只用于解决 Virtual Optimizer state 的保存兼容问题。DCP 加载不需要单独
+改写：fresh optimizer 会先创建 swap-backed load targets，再由 DCP 将 checkpoint 数据
+写入这些 targets；已有 state 和 repeated load 会复用当前 state。
 
 ## 适用范围与限制
 
@@ -123,7 +107,7 @@ dcp.FileSystemWriter(
 - 当前只接管 `exp_avg` 和 `exp_avg_sq`，`step` 仍为参数 device 上的普通 FP32 scalar。
 - 不包含 AMSGrad 的 `max_exp_avg_sq`，也不是通用 optimizer-state offload 实现。
 - 不提供 CPU cache、分块 Load/Update/Offload、多 stream 更新流水线或可配置 swap 容量。
-- checkpoint writer 特化仅覆盖同步 native DCP 的本地文件系统保存。
+- checkpoint writer 特化覆盖同步 native DCP 保存；路径能力沿用 TorchTitan DCP 支持的本地或远程文件系统。
 - async、async-with-pinned-memory 和 Hugging Face 保存继续使用 TorchTitan 上游路径，不经过当前 writer 特化。
 - 多卡组合、async 和 Hugging Face 路径尚未在本特性中完成完整验证。
 - 本文不声明未经独立验证的最低驱动版本、性能提升或 HBM 节省比例。
@@ -133,9 +117,8 @@ dcp.FileSystemWriter(
 | 现象 | 检查项 |
 | --- | --- |
 | Virtual Optimizer 未生效 | 确认 `override.imports` 使用完整的 `module.function` 路径，并检查启动日志中的 override 应用记录 |
-| 只启用 `checkpoint_virtual` 后没有 swap state | `checkpoint_virtual` 只处理保存兼容；还需启用 `optimizer.virtual` |
-| 同步保存仍使用默认 writer | 确认使用 native DCP、`async_mode="disabled"`，且不是 Hugging Face 保存 |
-| 模型原有 override 丢失 | 将两个入口追加到现有列表，不要用新列表覆盖原配置 |
+| 同步保存仍使用默认 writer | 确认使用 extension `CheckpointManager`、native DCP、`async_mode="disabled"`，且不是 Hugging Face 保存 |
+| 模型原有 override 丢失 | 将 `optimizer.virtual` 追加到现有 `override.imports`，不要用新列表覆盖原配置 |
 | zero-sized shard 分配失败 | 检查当前 rank 的 local shard 是否进入普通 `empty_like` 分支 |
 
 ## 验证状态

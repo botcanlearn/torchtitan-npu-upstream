@@ -71,8 +71,7 @@ torchrun --nproc_per_node=8 -m torchtitan.train \
     torchtitan_npu.override.deepseek_v4.mhc.asc_hc_pre \
     torchtitan_npu.override.deepseek_v4.mhc.asc_hc_post \
     torchtitan_npu.override.common.token_dispatcher.asc \
-    torchtitan_npu.override.common.optimizer.virtual \
-    torchtitan_npu.override.common.optimizer.checkpoint_virtual
+    torchtitan_npu.override.common.optimizer.virtual
 ```
 
 编译配置（`aot_fx_trace`、禁用 `cudagraph_pass`）由配置工厂内置，无需 CLI 传入；`--compile.disable_passes cudagraph_pass` 仅对 eager 配置的默认编译路径必需。

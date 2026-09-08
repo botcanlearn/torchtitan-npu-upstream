@@ -16,7 +16,6 @@ import threading
 import types
 import uuid
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
-from unittest import mock
 from enum import Enum
 from pathlib import Path
 from unittest.mock import patch
@@ -87,7 +86,7 @@ checkpoint_stub.AsyncMode = _AsyncMode
 tools_stub = types.ModuleType("torchtitan.tools")
 tools_stub.filesystem = _FilesystemAdapter
 
-module_path = Path(__file__).resolve().parents[4] / "torchtitan_npu/override/checkpoint/validation.py"
+module_path = Path(__file__).resolve().parents[4] / "torchtitan_npu/extensions/components/validation.py"
 module_spec = importlib.util.spec_from_file_location("checkpoint_verified_under_test", module_path)
 product_validation = importlib.util.module_from_spec(module_spec)
 
@@ -194,13 +193,3 @@ def test_verify_manifest_rejects_checkpoint_with_pending_marker(tmp_path):
 
     with pytest.raises(product_validation.CheckpointManifestError, match="incomplete"):
         product_validation.verify_checkpoint_manifest(tmp_path)
-
-
-def _write_local_manifest(checkpoint_path, hash_mapping):
-    manifest = {
-        "granularity": "file",
-        "algorithm": "sha256",
-        "hash": hash_mapping,
-    }
-    manifest_path = checkpoint_path / product_validation._MANIFEST_FILENAME
-    manifest_path.write_text(json.dumps(manifest))

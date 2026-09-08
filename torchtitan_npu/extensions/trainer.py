@@ -12,6 +12,7 @@ from torchtitan_npu.config import manager as config_manager
 from torchtitan_npu.config.configs import ExtensionConfig, OptimizerConfig, TrainingConfig
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed.utils import set_allow_hf32
+from torchtitan_npu.extensions.components.checkpoint import CheckpointManager
 
 
 class TrainerEx(Trainer):
@@ -22,6 +23,9 @@ class TrainerEx(Trainer):
         extension: ExtensionConfig = field(default_factory=ExtensionConfig)
         optimizer: OptimizerConfig = field(  # pyrefly: ignore [bad-override]
             default_factory=OptimizerConfig,
+        )
+        checkpoint: CheckpointManager.Config = field(  # pyrefly: ignore [bad-override]
+            default_factory=CheckpointManager.Config
         )
         training: TrainingConfig = field(  # pyrefly: ignore [bad-override]
             default_factory=TrainingConfig,
@@ -67,6 +71,7 @@ config_manager.register_config_converter(
         target_type=TrainerEx.Config,
         component_types={
             "optimizer": OptimizerConfig,
+            "checkpoint": CheckpointManager.Config,
             "training": TrainingConfig,
         },
     ),

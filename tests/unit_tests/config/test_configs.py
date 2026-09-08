@@ -71,9 +71,14 @@ def test_config_manager_adapts_standard_component_configs_without_changing_value
     assert isinstance(config.optimizer, OptimizerConfig)
     assert config.optimizer.name == "native"
     for config_field in fields(Trainer.Config):
-        if config_field.name in ("optimizer", "training"):
+        if config_field.name in ("optimizer", "training", "checkpoint"):
             continue
         assert getattr(config, config_field.name) == getattr(source, config_field.name)
+    for config_field in fields(source.checkpoint):
+        assert getattr(config.checkpoint, config_field.name) == getattr(
+            source.checkpoint,
+            config_field.name,
+        )
     for config_field in fields(source.optimizer):
         assert getattr(config.optimizer, config_field.name) == getattr(
             source.optimizer,

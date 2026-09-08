@@ -251,7 +251,7 @@ def _make_trainer_config(
         ),
         activation_checkpoint=FullAC.Config(),
         compile=CompileConfig(enable=False),
-        checkpoint=CheckpointManager.Config(
+        checkpoint=CheckpointManager.Config(  # pyrefly: ignore[bad-argument-type]
             enable=False,
             interval=100,
         ),

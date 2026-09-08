@@ -17,7 +17,6 @@ can run independently from the torchtitan-npu package tests.
 import pytest
 import torch
 from torchao.quantization.qat.fake_quantize_config import Float8FakeQuantizeConfig
-
 from torchao_npu.quantization.quant_configs import (
     BlockQuantizeConfig,
     MXQuantizeConfig,
