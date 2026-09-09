@@ -31,7 +31,6 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from torchtitan_npu.config import (
@@ -39,6 +38,7 @@ from torchtitan_npu.config import (
     OptimizerConfig,
     TrainingConfig,
 )
+from torchtitan_npu.extensions.profiler import CANNProfiler
 from torchtitan_npu.extensions.trainer import TrainerEx
 
 from . import (
@@ -224,7 +224,7 @@ def _make_trainer_config(
         )
     return TrainerEx.Config(
         loss=loss,
-        profiler=Profiler.Config(
+        profiler=CANNProfiler.Config(
             enable_profiling=False,
             profile_freq=10,
             profiler_active=10,

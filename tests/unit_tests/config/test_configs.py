@@ -26,6 +26,7 @@ from torchtitan_npu.config import TrainingConfig as NPUTrainingConfig
 from torchtitan_npu.config import manager as config_manager
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed import utils as distributed_utils
+from torchtitan_npu.extensions.profiler import CANNProfiler
 from torchtitan_npu.extensions.trainer import TrainerEx
 
 
@@ -71,9 +72,22 @@ def test_config_manager_adapts_standard_component_configs_without_changing_value
     assert isinstance(config.optimizer, OptimizerConfig)
     assert config.optimizer.name == "native"
     for config_field in fields(Trainer.Config):
-        if config_field.name in ("optimizer", "training", "checkpoint"):
+        if config_field.name in ("optimizer", "profiler", "training", "checkpoint"):
             continue
         assert getattr(config, config_field.name) == getattr(source, config_field.name)
+    assert isinstance(config.profiler, CANNProfiler.Config)
+    assert isinstance(config.profiler.build(), CANNProfiler)
+    for config_field in fields(source.profiler):
+        assert getattr(config.profiler, config_field.name) == getattr(
+            source.profiler,
+            config_field.name,
+        )
+    assert config.profiler.extension.profiler_start is None
+    assert config.profiler.extension.profiler_end is None
+    assert config.profiler.extension.profile_ranks == [-1]
+    assert config.profiler.extension.profile_with_memory is False
+    assert config.profiler.extension.profile_with_stack is False
+    assert config.profiler.extension.enable_online_parse is True
     for config_field in fields(source.checkpoint):
         assert getattr(config.checkpoint, config_field.name) == getattr(
             source.checkpoint,
@@ -143,6 +157,50 @@ def test_config_manager_parses_training_extension_hf32_option(
 
     assert isinstance(config, TrainerEx.Config)
     assert config.training.extension.allow_hf32 is False
+
+
+def test_config_manager_parses_cann_profiler_without_override(
+    monkeypatch,
+    tmp_path,
+):
+    module_name = "_torchtitan_npu_profiler_config_registry"
+
+    def test_config() -> Trainer.Config:
+        return Trainer.Config(hf_assets_path=str(tmp_path))
+
+    _install_config_registry(monkeypatch, module_name, test_config)
+
+    config = ConfigManager().parse_args(
+        [
+            "--module",
+            module_name,
+            "--config",
+            "test_config",
+            "--profiler.enable-profiling",
+            "--profiler.extension.profiler-start",
+            "5",
+            "--profiler.extension.profiler-end",
+            "8",
+            "--profiler.profiler-warmup",
+            "3",
+            "--profiler.extension.profile-ranks",
+            "0",
+            "--profiler.extension.profile-with-memory",
+            "--profiler.extension.profile-with-stack",
+            "--profiler.extension.no-enable-online-parse",
+        ]
+    )
+
+    assert isinstance(config.profiler, CANNProfiler.Config)
+    assert config.override.imports == []
+    assert config.profiler.enable_profiling is True
+    assert config.profiler.extension.profiler_start == 5
+    assert config.profiler.extension.profiler_end == 8
+    assert config.profiler.profiler_warmup == 3
+    assert config.profiler.extension.profile_ranks == [0]
+    assert config.profiler.extension.profile_with_memory is True
+    assert config.profiler.extension.profile_with_stack is True
+    assert config.profiler.extension.enable_online_parse is False
 
 
 def test_config_manager_parses_quantization_extension(

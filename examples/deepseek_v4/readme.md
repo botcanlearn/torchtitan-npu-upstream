@@ -56,8 +56,6 @@ bash examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh \
 --profiler.enable-profiling
 ```
 
-Profiler override 使用多行 JSON 配置，但仍作为 `--override.imports` 的单个参数传入。
-
 ### 32P Pro 32-expert Debug
 
 Pro 32-expert 是独立的裁剪模型 debug/performance 入口，不与 8P Flash launcher 强制复用：

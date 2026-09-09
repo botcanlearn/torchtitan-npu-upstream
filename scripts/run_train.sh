@@ -12,11 +12,6 @@
 #
 #   PATTERN_IMPORTS=<pattern-import-path> \
 #   COMPILE_BACKEND=inductor ./scripts/run_train.sh
-#
-# Profiling is off by default. Enable it explicitly with ENABLE_PROFILING=1
-# (optionally combined with the PROFILE_START/PROFILE_END window below):
-#
-#   ENABLE_PROFILING=1 PROFILE_START=5 PROFILE_END=6 ./scripts/run_train.sh
 
 set -euo pipefail
 
@@ -43,39 +38,6 @@ TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-}
 export TORCHTITAN_NPU_PATTERN_IMPORTS="${PATTERN_IMPORTS:-${TORCHTITAN_NPU_PATTERN_IMPORTS:-}}"
 
 ARGS=()
-
-ENABLE_PROFILING=${ENABLE_PROFILING:-0}
-if [ "${ENABLE_PROFILING}" = "1" ]; then
-    ARGS+=(--profiler.enable-profiling)
-fi
-
-if [ -n "${PROFILE_START:-}" ] || [ -n "${PROFILE_END:-}" ]; then
-    if [[ ! "${PROFILE_START:-}" =~ ^[1-9][0-9]*$ ]] || [[ ! "${PROFILE_END:-}" =~ ^[1-9][0-9]*$ ]]; then
-        echo "PROFILE_START and PROFILE_END must be positive integers" >&2
-        exit 2
-    fi
-    PROFILE_WARMUP=${PROFILE_WARMUP:-3}
-    if [[ ! "${PROFILE_WARMUP}" =~ ^[0-9]+$ ]]; then
-        echo "PROFILE_WARMUP must be a non-negative integer" >&2
-        exit 2
-    fi
-    if [ "${PROFILE_END}" -le "${PROFILE_START}" ]; then
-        echo "PROFILE_END must be greater than PROFILE_START" >&2
-        exit 2
-    fi
-
-    PROFILE_SKIP_FIRST=$(( PROFILE_START > PROFILE_WARMUP ? PROFILE_START - PROFILE_WARMUP - 1 : 0 ))
-    PROFILE_WARMUP_STEPS=$(( PROFILE_START - 1 - PROFILE_SKIP_FIRST ))
-    PROFILE_ACTIVE=$(( PROFILE_END - PROFILE_START ))
-    PROFILE_FREQ=$(( PROFILE_WARMUP_STEPS + PROFILE_ACTIVE ))
-    ARGS+=(
-        --profiler.profile-freq "${PROFILE_FREQ}"
-        --profiler.profiler-warmup "${PROFILE_WARMUP_STEPS}"
-        --profiler.profiler-active "${PROFILE_ACTIVE}"
-        --profiler.profiler-repeat 1
-        --profiler.profiler-skip-first "${PROFILE_SKIP_FIRST}"
-    )
-fi
 
 if [ -n "${COMPILE_BACKEND:-}" ]; then
     ARGS+=(

@@ -71,6 +71,7 @@ logfile=${LOG_PREFIX:-${CONFIG}}_${time}_node${NODE_RANK}_${LOCAL_HOST//./_}.log
 mkdir -p logs
 
 ARGS=()
+
 if [ -n "${COMPILE_BACKEND:-}" ]; then
     ARGS+=(
         --compile.enable

@@ -151,7 +151,7 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 - `--extension.quantization.recipe`：选择 `all_mxfp8`、`mix` 或 `all_block_fp8`，默认使用 `mix`。
 - `--extension.quantization.enable-mxfp4-qat` 与 `--extension.quantization.no-enable-mxfp4-qat`：控制 routed expert 的 Block FP8 weight 是否增加 MXFP4 QAT fake quant 数值约束，默认关闭，仅对包含 Block FP8 的 recipe 生效。该选项不是持久化 4-bit 参数训练，也不会把算子替换为原生 A8W4 GEMM。
 - `--extension.quantization.dst-type-max`：MXFP4 fake quant 的目标数据类型最大值，默认 `0.0`，由数据类型自动推导。
-- `--profiler.enable-profiling`：启用 profiler；如需 CANN profiler override，还需将 `torchtitan_npu.override.common.profiler.cann` 加入 override imports。
+- `--profiler.enable-profiling`：启用性能分析。
 - `USE_GOLDEN`：设为 `1` 时选择 golden attention override；默认使用 Ascend 融合算子路径。
 
 启动日志中出现 `Applied TorchAO-NPU recipe=...` 表示低精度 recipe 已生效。

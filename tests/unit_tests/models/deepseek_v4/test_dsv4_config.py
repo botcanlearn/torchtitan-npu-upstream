@@ -30,3 +30,13 @@ def test_flash_mtp_4k_model_flops():
         290_942_278_866,
         92_762_352_876,
     )
+
+
+def test_debugmodel_uses_cann_profiler_extension():
+    from torchtitan_npu.extensions.profiler import CANNProfiler
+    from torchtitan_npu.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel()
+
+    assert isinstance(config.profiler, CANNProfiler.Config)
+    assert isinstance(config.profiler.build(), CANNProfiler)

@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal
 import tyro
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.config import TrainingConfig as _BaseTrainingConfig
+from torchtitan.tools.profiler import Profiler as _BaseProfiler
 
 QuantizationRecipe = Literal["all_mxfp8", "mix", "all_block_fp8"]
 
@@ -151,4 +152,36 @@ class TrainingConfig(_BaseTrainingConfig):
 
     extension: TrainingExtensionConfig = field(
         default_factory=TrainingExtensionConfig,
+    )
+
+
+@dataclass(kw_only=True, slots=True)
+class ProfilerExtensionConfig:
+    """NPU-specific options for the profiler component."""
+
+    profiler_start: int | None = None
+    """Absolute first training step to profile, inclusive."""
+
+    profiler_end: int | None = None
+    """Absolute training step at which profiling stops, exclusive."""
+
+    profile_ranks: list[int] = field(default_factory=lambda: [-1])
+    """Ranks to profile. ``[-1]`` profiles every rank."""
+
+    profile_with_memory: bool = False
+    """Whether to record memory events in the profiler trace."""
+
+    profile_with_stack: bool = False
+    """Whether to record Python/C++ stack information in the trace."""
+
+    enable_online_parse: bool = True
+    """Whether CANN should parse traces online via its trace handler."""
+
+
+@dataclass(kw_only=True, slots=True)
+class ProfilerConfig(_BaseProfiler.Config):
+    """TorchTitan profiler configuration with NPU-specific extensions."""
+
+    extension: ProfilerExtensionConfig = field(
+        default_factory=ProfilerExtensionConfig,
     )

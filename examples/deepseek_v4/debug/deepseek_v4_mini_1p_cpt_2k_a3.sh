@@ -90,6 +90,7 @@ PROFILER_ARGS="
     --profiler.profile-freq 10
     --profiler.profiler-warmup 3
     --profiler.profiler-active 1
+    --profiler.extension.profile-ranks 0
 "
 
 # Communication

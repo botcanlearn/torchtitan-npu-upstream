@@ -31,15 +31,6 @@ python -m torchtitan_npu.train \
   'torchtitan_npu.override.deepseek_v4.sparse_attn.asc={"indexer_loss_coeff": 2.0}'
 ```
 
-也可以直接设置配置：
-
-```python
-cfg.override.imports = [
-    "torchtitan_npu.override.common.rope.workaround",
-    "torchtitan_npu.override.deepseek_v4.sparse_attn.golden",
-]
-```
-
 NPU DeepEP dispatcher 与上游 `moe_comm_backend="deepep"` 配置绑定。模型配置选择
 `deepep` 后，显式启用以下 override 即可；`hidden_dim` 和
 `num_max_tokens_per_rank` 会由 `update_from_config()` 根据模型及训练形状填充。
@@ -47,6 +38,15 @@ NPU DeepEP dispatcher 与上游 `moe_comm_backend="deepep"` 配置绑定。模�
 ```bash
 --override.imports \
   torchtitan_npu.override.common.token_dispatcher.asc_deepep
+```
+
+也可以直接设置配置：
+
+```python
+cfg.override.imports = [
+    "torchtitan_npu.override.common.rope.workaround",
+    "torchtitan_npu.override.deepseek_v4.sparse_attn.golden",
+]
 ```
 
 ## 应用过程
@@ -71,10 +71,13 @@ torchtitan_npu/override/
 ├── common/
 │   ├── __init__.py
 │   ├── optimizer.py
-│   ├── profiler.py
 │   ├── rms_norm.py
 │   ├── rope.py
 │   └── token_dispatcher.py
+├── checkpoint/
+│   ├── __init__.py
+│   ├── checkpoint.py
+│   └── validation.py
 ├── deepseek_v3_2/
 │   ├── __init__.py
 │   └── sparse_attn/
@@ -95,6 +98,7 @@ torchtitan_npu/override/
 ```
 
 - `common/` 存放只依赖 TorchTitan 公共组件、不依赖具体模型配置或元数据契约的实现。
+- `checkpoint/` 存放 checkpoint manager replacement 及其文件级完整性校验逻辑。
 - `<model>/` 存放依赖模型专属 target、配置字段、张量布局或元数据契约的实现。
 - 模型专属实现不得跨模型目录引用。可复用部分应先下移到 `common/` 或其他公共模块。
 - 简单 target 使用单文件，文件名采用 target 的 snake_case 语义，例如
@@ -119,7 +123,7 @@ torchtitan_npu.override.<scope>.<target>.<variant>
 | Variant | 含义 |
 | --- | --- |
 | `asc` | 调用 CANN 或 `torch_npu` 的融合计算能力 |
-| `cann` | 调用 CANN 或 `torch_npu` API 的非融合能力，如 `profiler.cann` |
+| `cann` | 调用 CANN 或 `torch_npu` API 的非融合能力 |
 | `npu` | NPU runtime 级能力；仅在不能用具体 CANN、Torch 或行为名称表达时使用 |
 | `golden` | 模型专属的 eager 数值参考 |
 | `torch` | 完全由标准 PyTorch 算子组成的独立实现 |
@@ -192,6 +196,42 @@ converter 处理后的实际配置类型和 FQN 核对匹配结果。
 
 ## 当前入口
 
+### Checkpoint 完整性校验
+
+`torchtitan_npu.override.checkpoint.npu` 为基础 `CheckpointManager` 增加文件级 SHA-256
+manifest。该入口默认不启用校验；使用以下参数后，保存会生成
+`_checkpoint_hash_manifest.json`，加载会在物化 checkpoint state 前验证清单：
+
+```bash
+--override.imports \
+  'torchtitan_npu.override.checkpoint.npu={"verify_hash_manifest":true}'
+```
+
+| 入口 | Target | Replacement | 适用范围 |
+| --- | --- | --- | --- |
+| `torchtitan_npu.override.checkpoint.npu` | `CheckpointManager.Config`（精确匹配） | `NPUCheckpointManager.Config` | 基础 checkpoint manager |
+| `torchtitan_npu.override.checkpoint.npu_virtual` | `CheckpointManager.Config`（精确匹配） | `NPUVirtualCheckpointManager.Config` | 同时需要 SHA-256 manifest 和 Virtual Optimizer checkpoint writer |
+
+Virtual Optimizer 组合场景使用单一 checkpoint replacement，不能再同时启用
+`optimizer.checkpoint_virtual`：
+
+```bash
+--override.imports \
+  torchtitan_npu.override.common.optimizer.virtual,\
+  'torchtitan_npu.override.checkpoint.npu_virtual={"verify_hash_manifest":true}'
+```
+
+两个 checkpoint 入口均使用精确匹配，不会替换 `TorchFTCheckpointManager.Config` 等上游
+特化配置；当前不为 TorchFT 提供 SHA-256 manifest variant。基础 `npu` 入口的 manifest I/O
+支持本地路径和 TorchTitan 支持的 fsspec 远程 native DCP 路径；`npu_virtual` 仍受 Virtual
+Optimizer writer 的同步、本地 native DCP 限制。异步保存只有在 DCP 和 manifest 均成功后
+才完成；遗留 pending 标记会使加载失败。没有 manifest 且没有 pending 标记时，checkpoint
+按旧格式加载并跳过校验。
+
+清单只接受 checkpoint 目录中的单层普通文件，不读取绝对路径、父目录、符号链接或其他
+非普通文件。CPU 单元测试覆盖本地路径、fsspec `memory://`、异步完成与失败传播，以及路径
+边界；实际 S3/GCS backend 和 NPU 分布式训练尚未在本特性中完成验证。
+
 ### Common
 
 以下入口省略 `torchtitan_npu.override.common.` 前缀：
@@ -199,14 +239,13 @@ converter 处理后的实际配置类型和 FQN 核对匹配结果。
 | 入口 | Target | Replacement | 说明 |
 | --- | --- | --- | --- |
 | `optimizer.virtual` | `OptimizersContainer.Config` | `VirtualOptimizersContainer.Config` | 将 Adam/AdamW 的 `exp_avg` 和 `exp_avg_sq` 放入 NPU swap memory |
-| `profiler.cann` | `Profiler.Config` | `CANNProfiler.Config` | 使用 `torch_npu.profiler` 采集 CPU/NPU trace |
+| `optimizer.checkpoint_virtual` | `CheckpointManager.Config` | `VirtualCheckpointManager.Config` | 为 Virtual Optimizer 的同步 native DCP 保存关闭 writer copy-ahead |
 | `rms_norm.asc` | `RMSNorm.Config` | `AscRMSNorm.Config` | 使用 `torch_npu.npu_rms_norm` |
 | `rope.workaround` | `ComplexRoPE.Config` | `WorkaroundComplexRoPE.Config` | 预展开 cos/sin cache，并使用 PyTorch 小算子计算 interleaved RoPE；仅精确匹配 `ComplexRoPE.Config` |
 | `rope.asc_complex` | `ComplexRoPE.Config` | `AscComplexRoPE.Config` | 使用 interleave 模式的 `torch_npu.npu_rotary_mul`；仅精确匹配 |
 | `rope.asc_cossin` | `CosSinRoPE.Config` | `AscCosSinRoPE.Config` | 使用 half 模式的 `torch_npu.npu_rotary_mul` |
 | `token_dispatcher.asc` | `AllToAllTokenDispatcher.Config` | `AscAllToAllTokenDispatcher.Config` | 使用 `torch_npu.npu_moe_token_permute` `npu_moe_token_unpermute` 融合 MoE dispatch/combine |
 | `token_dispatcher.asc_deepep` | `DeepEPTokenDispatcher.Config` | `AscDeepEPTokenDispatcher.Config` | 使用 `cann_ops_transformer.ElasticBuffer` 实现训练路径的 MoE DeepEP dispatch/combine；当前要求 `expert_parallel_degree > 1` |
-
 
 `rope.workaround` 与 `rope.asc_complex` 会声明同一 target，不能同时启用。
 `AscComplexRoPE` 和 `AscCosSinRoPE` 当前都要求同一 batch 内各行的位置布局一致，
@@ -216,13 +255,18 @@ converter 处理后的实际配置类型和 FQN 核对匹配结果。
 ### Virtual Optimizer 与 checkpoint
 
 Virtual Optimizer 使用 NPU swap memory 保存 Adam/AdamW 的 `exp_avg` 和
-`exp_avg_sq`，只需启用 optimizer override：
+`exp_avg_sq`。通过同步 native DCP 保存和恢复完整训练状态时，应同时启用：
 
 ```bash
---override.imports torchtitan_npu.override.common.optimizer.virtual
+--override.imports \
+  torchtitan_npu.override.common.optimizer.virtual,\
+  torchtitan_npu.override.common.optimizer.checkpoint_virtual
 ```
 
-完整的数据流、支持范围和限制见
+`optimizer.virtual` 负责创建 swap-backed optimizer state，`optimizer.checkpoint_virtual`
+负责让同步 native DCP 正确保存这些 live swap tensors。两个入口位于同一模块，但
+作用于不同的配置节点；checkpoint 逻辑是 Virtual Optimizer 的保存兼容处理，不是独立
+checkpoint 特性。完整的数据流、支持范围和限制见
 [Virtual Optimizer 特性说明](../../docs/feature_guides/virtual_optimizer.md)。
 
 ### DeepSeek-V3.2
@@ -261,7 +305,7 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 | `mhc.triton_hc_head` | `HcHead.Config` | `TritonHcHead.Config` | 使用 `mhc_pre_only_sinkhorn_op` + `mhc_pre_bmm_op` |
 | `mhc.tilelang_hc_head` | `HcHead.Config` | `TilelangHcHead.Config` | 使用 `mhc_head_compute_mix_tilelang` (TileLang 融合 kernel) |
 
-`sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 和 `sparse_attn.pypto` 均支持可选的 `indexer_loss_coeff`，有效默认值为 `1.0`；如需关闭 Indexer KL 梯度，显式传入 `{"indexer_loss_coeff": 0.0}`。
+`sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 还支持可选的 `indexer_loss_coeff`，默认值为 `0.0`。
 MHC 的 `asc_hc_pre` / `asc_hc_post` 与 `triton_hc_pre` / `triton_hc_post` / `triton_hc_head` / `tilelang_hc_head` 是可选入口（`deepseek_v4/__init__.py`
 默认只导入 `sparse_attn`），需要时显式加入 `override.imports`。`triton_hc_head` 与 `tilelang_hc_head` 声明同一 `HcHead.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` / `asc_hc_post` 共存。
 推荐直接使用 `examples/deepseek_v4/*.sh` wrapper；单机调试可使用

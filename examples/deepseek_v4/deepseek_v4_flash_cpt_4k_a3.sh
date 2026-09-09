@@ -106,15 +106,9 @@ PROFILER_ARGS="
     --profiler.profile-freq 10
     --profiler.profiler-warmup 3
     --profiler.profiler-active 1
+    --profiler.extension.profile-ranks 0
+    --profiler.extension.no-enable-online-parse
 "
-PROFILER_OVERRIDES=(
-    'torchtitan_npu.override.common.profiler.cann={
-        "profile_ranks": [0],
-        "profile_with_memory": false,
-        "profile_with_stack": false,
-        "enable_online_parse": false
-    }'
-)
 
 # Communication
 COMM_ARGS="
@@ -174,5 +168,5 @@ bash scripts/run_train_multinodes.sh \
     $PROFILER_ARGS \
     $COMM_ARGS \
     $CHECKPOINT_ARGS \
-    --override.imports "${NPU_OPS_OVERRIDES[@]}" "${PROFILER_OVERRIDES[@]}" $OPTIMIZER_OVERRIDES \
+    --override.imports "${NPU_OPS_OVERRIDES[@]}" $OPTIMIZER_OVERRIDES \
     "$@"
