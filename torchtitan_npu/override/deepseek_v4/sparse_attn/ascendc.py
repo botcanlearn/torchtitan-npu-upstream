@@ -370,6 +370,7 @@ class _SparseFlashMLATND(torch.autograd.Function):
         if cu_seqlens_ori_kv is None:
             cu_seqlens_ori_kv = cu_seqlens_q
         has_compressed = ratio > 1
+        torch._check(swa_k.shape[0] > 0, lambda: "SparseFlashMLA original KV must not be empty")
         result, softmax_lse = hooks.sparse_flash_mla(
             q,
             ori_kv=swa_k,

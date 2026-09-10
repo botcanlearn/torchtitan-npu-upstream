@@ -921,3 +921,34 @@ def test_multiprocess_gloo(tmp_path):
         with open(outdir / f"rank{r}.json") as f:
             rep = json.load(f)
         assert rep["ok"] is True, (r, rep)
+
+
+def test_cp_gather_compile_reuses_graph_across_dynamic_splits_gloo():
+    """Dynamic split sizes keep one compiled graph for the gather contract.
+
+    The real two-rank Gloo transport is exercised by ``test_multiprocess_gloo``;
+    this compile-level check protects the same dynamic split interface.
+    """
+    compiled_graphs = []
+
+    def counting_backend(graph_module, _example_inputs):
+        compiled_graphs.append(graph_module)
+        return graph_module.forward
+
+    def use_split_sizes(x, plan):
+        send_splits, recv_splits = plan.splits_for_collective()
+        return x.new_zeros(
+            (send_splits[0] + recv_splits[0], send_splits[1] + recv_splits[1])
+        )
+
+    compiled = torch.compile(use_split_sizes, backend=counting_backend, fullgraph=True)
+    first = compiled(torch.ones(1), cp_mod._build_exchange_plan(
+        (list(range(5)), [2, 3], [4, 5], list(range(9))), torch.device("cpu")
+    ))
+    second = compiled(torch.ones(1), cp_mod._build_exchange_plan(
+        (list(range(13)), [6, 7], [8, 9], list(range(17))), torch.device("cpu")
+    ))
+
+    assert first.shape == (6, 8)
+    assert second.shape == (14, 16)
+    assert len(compiled_graphs) == 1

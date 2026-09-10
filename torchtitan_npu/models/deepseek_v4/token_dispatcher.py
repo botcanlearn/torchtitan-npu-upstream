@@ -59,7 +59,7 @@ segment with each ratio plan's ``cmp_k_global_gather_indices``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
@@ -497,16 +497,33 @@ class ExchangePlan:
     offset of the k-th foreign receive position in the exchange output
     (cat over senders of [my rows from that sender]).
 
-    The splits are plain host lists, built once per batch: the collective
-    APIs need Python ints and the per-layer exchange must never call
-    ``.tolist()`` (a D2H sync per layer per step).  Only the payload rows
-    and the receive offsets ride as tensors.
+    The splits are plain host lists, built once per batch: the eager
+    collective APIs need Python ints and the per-layer exchange must never
+    call ``.tolist()`` (a D2H sync per layer per step). During tracing, CPU
+    tensors expose the same sizes as data-dependent ``SymInt`` values so a new
+    packed batch does not recompile every block. Keeping those scalar inputs on
+    CPU avoids a per-layer NPU-to-CPU sync.
     """
 
     send_indices: torch.Tensor
     send_splits: list[int]
     recv_splits: list[int]
     recv_offsets: torch.Tensor
+    send_splits_tensor: torch.Tensor = field(init=False)
+    recv_splits_tensor: torch.Tensor = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.send_splits_tensor = torch.tensor(self.send_splits, dtype=torch.int64, device="cpu")
+        self.recv_splits_tensor = torch.tensor(self.recv_splits, dtype=torch.int64, device="cpu")
+
+    def splits_for_collective(self) -> tuple[list[int], list[int]]:
+        """Return dynamic sizes while tracing and host sizes in eager mode."""
+        if torch.compiler.is_compiling() or torch.compiler._is_non_strict_tracing():
+            return (
+                self.send_splits_tensor.tolist(),
+                self.recv_splits_tensor.tolist(),
+            )
+        return self.send_splits, self.recv_splits
 
 
 @dataclass(kw_only=True, slots=True)
@@ -593,10 +610,11 @@ class CPTokenDispatcher(Configurable):
                 return x.flatten(0, 1)[plan.gather_indices].view(1, -1, *x.shape[2:])
             return x
         ex = plan.exchange
+        send_splits, recv_splits = ex.splits_for_collective()
         rows = self._all_to_all(
             x.flatten(0, 1)[ex.send_indices],
-            ex.send_splits,
-            ex.recv_splits,
+            send_splits,
+            recv_splits,
         )
         aug = torch.cat([x.flatten(0, 1), rows[ex.recv_offsets]], dim=0)[plan.gather_indices]
         return aug.view(1, -1, *x.shape[2:])
