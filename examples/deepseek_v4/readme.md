@@ -207,6 +207,17 @@ A3 脚本不默认启用量化；如需 A3 量化训练，请显式传入上面�
 --profiler.profiler-skip-first 4
 ```
 
+如需不依赖 recipe 固定单次采样窗口，请在命令末尾完整追加：
+
+```sh
+--profiler.enable-profiling \
+--profiler.profile-freq 10 \
+--profiler.profiler-warmup 3 \
+--profiler.profiler-active 1 \
+--profiler.profiler-repeat 1 \
+--profiler.profiler-skip-first 0
+```
+
 ## Checkpoint 说明
 
 Flash 多机 CPT 基线默认启用 `--checkpoint.load-only`，即只负责加载，不会保存新的训练 checkpoint。需要保存时必须显式覆盖：
