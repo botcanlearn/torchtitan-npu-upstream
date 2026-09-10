@@ -83,3 +83,5 @@ COMPILE_BACKEND=inductor ./scripts/run_train.sh
 `TORCHINDUCTOR_NPU_EXT_DEBUG=allfallback`。
 
 > 注：当前 DeepSeek-V4 golden attention 不支持启用 inplace partial RoPE pattern。
+
+> 注：`torchtitan_npu.compile.patterns.deepseek_v4.inplace_partial_rope` 的使能依赖 `torchtitan_npu.override.common.rope.workaround`，启用 pattern 时应一并注入该 override。
