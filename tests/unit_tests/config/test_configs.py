@@ -384,13 +384,15 @@ def test_trainer_ex_applies_enabled_quantization_before_base_initialization(monk
     def apply_hf32(allow_hf32):
         events.append(("apply_hf32", allow_hf32))
 
-    def initialize_base_trainer(_self, base_config):
+    def initialize_base_trainer(trainer, base_config):
+        trainer.model_parts = []
+        trainer.gradient_accumulation_steps = 1
         events.append(("initialize_base", base_config.model_spec))
 
     converter_module.apply_quantization_converter = apply_quantization
     monkeypatch.setitem(sys.modules, "interfaces.torchao_converter", converter_module)
     monkeypatch.setattr(trainer_module, "set_allow_hf32", apply_hf32)
-    monkeypatch.setattr(Trainer, "__init__", initialize_base_trainer)
+    monkeypatch.setattr(TrainerEx.__base__, "__init__", initialize_base_trainer)
 
     config = TrainerEx.Config(
         model_spec=source_model_spec,
@@ -422,13 +424,15 @@ def test_trainer_ex_skips_disabled_quantization_and_preserves_model_spec(monkeyp
     def unexpected_quantization(*args, **kwargs):
         raise AssertionError("quantization converter must remain disabled")
 
-    def initialize_base_trainer(_self, base_config):
+    def initialize_base_trainer(trainer, base_config):
+        trainer.model_parts = []
+        trainer.gradient_accumulation_steps = 1
         initialized_model_specs.append(base_config.model_spec)
 
     converter_module.apply_quantization_converter = unexpected_quantization
     monkeypatch.setitem(sys.modules, "interfaces.torchao_converter", converter_module)
     monkeypatch.setattr(trainer_module, "set_allow_hf32", lambda _allow_hf32: None)
-    monkeypatch.setattr(Trainer, "__init__", initialize_base_trainer)
+    monkeypatch.setattr(TrainerEx.__base__, "__init__", initialize_base_trainer)
 
     config = TrainerEx.Config(model_spec=source_model_spec)
     trainer = config.build()
@@ -448,11 +452,13 @@ def test_trainer_ex_applies_training_hf32_before_base_initialization(monkeypatch
     def apply_hf32(allow_hf32):
         events.append(("apply_hf32", allow_hf32))
 
-    def initialize_base_trainer(_self, base_config):
+    def initialize_base_trainer(trainer, base_config):
+        trainer.model_parts = []
+        trainer.gradient_accumulation_steps = 1
         events.append(("initialize_base", base_config))
 
     monkeypatch.setattr(trainer_module, "set_allow_hf32", apply_hf32)
-    monkeypatch.setattr(Trainer, "__init__", initialize_base_trainer)
+    monkeypatch.setattr(TrainerEx.__base__, "__init__", initialize_base_trainer)
 
     TrainerEx(config)
 

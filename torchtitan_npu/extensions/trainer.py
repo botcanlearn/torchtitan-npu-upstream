@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
@@ -17,6 +18,7 @@ from torchtitan_npu.config.configs import (
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed.utils import set_allow_hf32
 from torchtitan_npu.extensions.components.checkpoint import CheckpointManager
+from torchtitan_npu.extensions.components.sdc import SDC
 
 from .profiler import CANNProfiler
 
@@ -39,6 +41,7 @@ class TrainerEx(Trainer):
         training: TrainingConfig = field(  # pyrefly: ignore [bad-override]
             default_factory=TrainingConfig,
         )
+        sdc: SDC.Config = field(default_factory=SDC.Config)
 
         def __post_init__(self) -> None:
             # ``slots=True`` dataclasses are recreated by the decorator, so a
@@ -72,6 +75,18 @@ class TrainerEx(Trainer):
 
         set_allow_hf32(config.training.extension.allow_hf32)
         super().__init__(config)
+        self._sdc = config.sdc.build(
+            trainer_config=config,
+            model_parts=self.model_parts,
+            gradient_accumulation_steps=self.gradient_accumulation_steps,
+        )
+
+    def forward_backward_step(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().forward_backward_step(*args, **kwargs)
+        # Advancing SDC state after a failed or partial step would corrupt its
+        # accumulation window, so post-processing is intentionally success-only.
+        self._sdc.finalize_sdc_step()
+        return result
 
 
 config_manager.register_config_converter(
