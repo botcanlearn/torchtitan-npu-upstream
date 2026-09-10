@@ -6,8 +6,12 @@
 import torch
 import torch_npu
 
-from ..quantization.quant_configs import MXQuantizeConfig
-from ..quantization.quant_primitives.mx import mxfp4_dequantize
+from torchao_npu.quantization.quant_configs import MXQuantizeConfig
+from torchao_npu.quantization.quant_primitives.mx import (
+    mx_quantize,
+    mx_quantize_dual_axis,
+    mxfp4_dequantize,
+)
 
 __all__ = [
     "mxfp4_fake_quantize",
@@ -16,22 +20,6 @@ __all__ = [
     "to_mx_then_grouped_mm",
     "to_mx_then_mm",
 ]
-
-
-def _to_npu_dtype_override(dtype: torch.dtype) -> int | None:
-    """Return NPU dtype int for ``x1_dtype``/``x2_dtype``, or ``None`` to omit.
-
-    ``npu_quant_matmul``'s ``x1_dtype``/``x2_dtype`` parameters must only be
-    passed for dtypes where the tensor's storage dtype differs from its logical
-    dtype.  ``float4_e2m1fn_x2`` is stored as ``uint8`` (two FP4 values per
-    byte), so the kernel needs the explicit hint ``torch_npu.float4_e2m1fn_x2``.
-    Standard FP8 types (``float8_e4m3fn``, ``float8_e5m2``) are natively
-    represented by the tensor's dtype and **must not** be passed — doing so
-    causes a ``RuntimeError`` under ``torch.compile``'s fake-tensor tracing.
-    """
-    if dtype == torch.float4_e2m1fn_x2:
-        return torch_npu.float4_e2m1fn_x2
-    return None
 
 
 class MXFP4FakeQuantize(torch.autograd.Function):
@@ -48,7 +36,7 @@ class MXFP4FakeQuantize(torch.autograd.Function):
     def forward(ctx, hp: torch.Tensor, config: MXQuantizeConfig, axis: int = -1):  # pyrefly: ignore [bad-override]
         weight_mx, w_scale = torch_npu.npu_dynamic_mx_quant(
             hp,
-            dst_type=torch_npu.float4_e2m1fn_x2,
+            dst_type=config.npu_elem_dtype,
             axis=axis,
             block_size=config.block_size,
             round_mode=config.round_mode,
@@ -75,6 +63,9 @@ def mxfp4_fake_quantize(
     axis: int = -1,
 ) -> torch.Tensor:
     """Thin wrapper around ``MXFP4FakeQuantize.apply``."""
+    assert config.elem_dtype is torch.float4_e2m1fn_x2, (
+        f"mxfp4_fake_quantize only supports elem_dtype=torch.float4_e2m1fn_x2, got {config.elem_dtype}"
+    )
     return MXFP4FakeQuantize.apply(hp, config, axis)
 
 
@@ -153,20 +144,10 @@ class _MXQuantMM(torch.autograd.Function):
         assert A.shape[-1] == B.shape[-2], f"contracting dim mismatch: A[-1]={A.shape[-1]} != B[-2]={B.shape[-2]}"
 
         # --- Step 1: quantize A with dual-axis MX quant ---
-        A_q1, A_s1, A_q2, A_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            A.reshape(-1, A.shape[-1]),
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-        )
+        A_q1, A_s1, A_q2, A_s2 = mx_quantize_dual_axis(A.reshape(-1, A.shape[-1]), config_A)
 
         # --- Step 2: quantize B with dual-axis MX quant ---
-        B_q1, B_s1, B_q2, B_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            B,
-            round_mode=config_B.round_mode,
-            dst_type=config_B.elem_dtype,
-            scale_alg=config_B.scale_alg,
-        )
+        B_q1, B_s1, B_q2, B_s2 = mx_quantize_dual_axis(B, config_B)
 
         # --- Step 3: low-precision matmul, contracting over K ---
         Y = torch_npu.npu_quant_matmul(
@@ -176,10 +157,10 @@ class _MXQuantMM(torch.autograd.Function):
             pertoken_scale=A_s1,
             output_dtype=A.dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_B.elem_dtype),
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
         )
 
         if A.ndim != 2:
@@ -201,12 +182,7 @@ class _MXQuantMM(torch.autograd.Function):
         config_B = ctx.config_B
 
         # --- Step 1: quantize dY with dual-axis MX quant ---
-        dY_q1, dY_s1, dY_q2, dY_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            dY.reshape(-1, dY.shape[-1]),
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-        )
+        dY_q1, dY_s1, dY_q2, dY_s2 = mx_quantize_dual_axis(dY.reshape(-1, dY.shape[-1]), config_A)
 
         # --- Step 2: dgrad  dA = dY @ B^T  (contract over N) ---
         dA = torch_npu.npu_quant_matmul(
@@ -216,10 +192,10 @@ class _MXQuantMM(torch.autograd.Function):
             pertoken_scale=dY_s1,
             output_dtype=A_dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_B.elem_dtype),
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
         )
 
         # --- Step 3: wgrad  dB = A^T @ dY  (contract over M) ---
@@ -230,10 +206,10 @@ class _MXQuantMM(torch.autograd.Function):
             pertoken_scale=A_s2.transpose(0, 1),
             output_dtype=A_dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_A.elem_dtype),
+            scale_dtype=config_A.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_A.npu_matmul_dtype,
         )
 
         if dY.ndim != 2:
@@ -285,32 +261,20 @@ class _MXQuantGroupedMM(torch.autograd.Function):
         assert A.shape[-1] == B.shape[-2], f"contracting dim mismatch: A[-1]={A.shape[-1]} != B[-2]={B.shape[-2]}"
 
         # --- Step 1: quantize A along K-dim (contracting dim for forward) ---
-        A_q1, A_s1 = torch_npu.npu_dynamic_mx_quant(
-            A,
-            axis=-1,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            block_size=config_A.block_size,
-            scale_alg=config_A.scale_alg,
-        )
+        A_q1, A_s1 = mx_quantize(A, -1, config_A)
 
         # --- Step 2: quantize A along M-dim with grouped quant (zero boundaries) ---
         A_q2, A_s2 = torch_npu.npu_grouped_dynamic_mx_quant(
             A,
             group_list.to(torch.int32),
             round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
+            dst_type=config_A.npu_elem_dtype,
             blocksize=config_A.block_size,
             scale_alg=config_A.scale_alg,
         )
 
         # --- Step 3: dual-axis quantize B (q1/s1 = N-dim, q2/s2 = K-dim) ---
-        B_q1, B_s1, B_q2, B_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            B,
-            round_mode=config_B.round_mode,
-            dst_type=config_B.elem_dtype,
-            scale_alg=config_B.scale_alg,
-        )
+        B_q1, B_s1, B_q2, B_s2 = mx_quantize_dual_axis(B, config_B)
 
         # --- Step 4: grouped low-precision matmul, group_type=0 (contract over K) ---
         Y = torch_npu.npu_grouped_matmul(
@@ -322,8 +286,8 @@ class _MXQuantGroupedMM(torch.autograd.Function):
             group_type=0,
             output_dtype=A.dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
             split_item=3,
         )[0]
 
@@ -344,21 +308,14 @@ class _MXQuantGroupedMM(torch.autograd.Function):
         assert dY.ndim == 2, f"dY must be 2D, got {dY.ndim}D"
 
         # --- Step 1: quantize dY along N-dim (for dgrad) ---
-        dY_q1, dY_s1 = torch_npu.npu_dynamic_mx_quant(
-            dY,
-            axis=-1,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            block_size=config_A.block_size,
-            scale_alg=config_A.scale_alg,
-        )
+        dY_q1, dY_s1 = mx_quantize(dY, -1, config_A)
 
         # --- Step 2: quantize dY along M-dim with grouped quant (zero boundaries) ---
         dY_q2, dY_s2 = torch_npu.npu_grouped_dynamic_mx_quant(
             dY,
             group_list.to(torch.int32),
             round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
+            dst_type=config_A.npu_elem_dtype,
             blocksize=config_A.block_size,
             scale_alg=config_A.scale_alg,
         )
@@ -373,8 +330,8 @@ class _MXQuantGroupedMM(torch.autograd.Function):
             group_type=0,
             output_dtype=A_dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
             split_item=3,
         )[0]
 
@@ -388,8 +345,8 @@ class _MXQuantGroupedMM(torch.autograd.Function):
             group_type=2,
             output_dtype=A_dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_A.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
             split_item=3,
         )[0]
 
@@ -454,20 +411,10 @@ class _MXQuantBMM(torch.autograd.Function):
         )
 
         # --- Step 1: dual-axis quantize A (left operand) ---
-        A_q1, A_s1, A_q2, A_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            A,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-        )
+        A_q1, A_s1, A_q2, A_s2 = mx_quantize_dual_axis(A, config_A)
 
         # --- Step 2: dual-axis quantize B (right operand) ---
-        B_q1, B_s1, B_q2, B_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            B,
-            round_mode=config_B.round_mode,
-            dst_type=config_B.elem_dtype,
-            scale_alg=config_B.scale_alg,
-        )
+        B_q1, B_s1, B_q2, B_s2 = mx_quantize_dual_axis(B, config_B)
 
         # --- Step 3: low-precision batched matmul, contracting over K ---
         Y = torch_npu.npu_quant_matmul(
@@ -477,10 +424,10 @@ class _MXQuantBMM(torch.autograd.Function):
             pertoken_scale=A_s1,
             output_dtype=A.dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_B.elem_dtype),
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
         )
 
         ctx.save_for_backward(A_q2, A_s2, B_q1, B_s1)
@@ -497,12 +444,7 @@ class _MXQuantBMM(torch.autograd.Function):
         config_B = ctx.config_B
 
         # --- Step 1: quantize dY with dual-axis MX quant ---
-        dY_q1, dY_s1, dY_q2, dY_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            dY,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-        )
+        dY_q1, dY_s1, dY_q2, dY_s2 = mx_quantize_dual_axis(dY, config_A)
 
         # --- Step 2: dgrad  dA = dY @ B^T  (contract over N) ---
         dA = torch_npu.npu_quant_matmul(
@@ -512,10 +454,10 @@ class _MXQuantBMM(torch.autograd.Function):
             pertoken_scale=dY_s1,
             output_dtype=A_dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_B.elem_dtype),
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
         )
 
         # --- Step 3: wgrad  dB = A^T @ dY  (contract over M) ---
@@ -526,10 +468,10 @@ class _MXQuantBMM(torch.autograd.Function):
             pertoken_scale=A_s2.transpose(-2, -3),
             output_dtype=A_dtype,
             group_sizes=[1, 1, config_A.block_size],
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-            x1_dtype=_to_npu_dtype_override(config_A.elem_dtype),
-            x2_dtype=_to_npu_dtype_override(config_A.elem_dtype),
+            scale_dtype=config_A.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_A.npu_matmul_dtype,
         )
 
         return dA, dB, None, None

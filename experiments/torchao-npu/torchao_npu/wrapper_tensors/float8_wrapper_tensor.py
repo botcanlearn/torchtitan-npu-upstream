@@ -15,9 +15,9 @@ from torchao.quantization.qat.fake_quantize_config import (
 )
 from torchao.utils import TorchAOBaseTensor
 
-from ..ops.float8_ops import float8_rowwise_fake_quantize
-from ..quantization.transform import register_parameter_swap_handler
-from .base_wrapper_tensor import BaseTrainingWeightWrapperTensor
+from torchao_npu.ops.float8_ops import float8_rowwise_fake_quantize
+from torchao_npu.quantization.transform import register_parameter_swap_handler
+from torchao_npu.wrapper_tensors import BaseTrainingWeightWrapperTensor
 
 
 class Float8TrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
@@ -151,7 +151,7 @@ def _(
     param: nn.Parameter,
     extra_args: tuple[Any, ...] = (),
 ):
-    from ..configs import ParamSwapConfig
+    from torchao_npu.configs import ParamSwapConfig
 
     config: ParamSwapConfig = extra_args[0]
 

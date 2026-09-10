@@ -26,7 +26,7 @@ import tyro
 from torchao.core.config import AOBaseConfig  # noqa: TC002
 from torchao.quantization.quant_api import quantize_
 from torchao_npu.configs import ParamSwapConfig
-from torchao_npu.quantization.quant_configs import BlockQuantizeConfig, MXQuantizeConfig
+from torchao_npu.quantization.quant_configs import BlockMXQuantizeConfig, MXQuantizeConfig
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import derive
 from torchtitan.models.common.linear import Linear
@@ -228,7 +228,7 @@ def _block_fp8_param_swap(
             dst_type_max=dst_type_max,
         )
     return ParamSwapConfig(
-        weight_config=BlockQuantizeConfig(
+        weight_config=BlockMXQuantizeConfig(
             mxfp4_fake_quantize_config=mxfp4_config,
         ),
         activation_config=MXQuantizeConfig(),

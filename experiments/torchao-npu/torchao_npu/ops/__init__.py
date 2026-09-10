@@ -8,7 +8,7 @@
 Import ops from their concrete submodules; each submodule declares its
 public surface via ``__all__``:
 
-- :mod:`torchao_npu.ops.block_ops` — Block FP8 matmul ops
+- :mod:`torchao_npu.ops.block_mx_ops` — Block MX matmul ops
 - :mod:`torchao_npu.ops.float8_ops` — FP8 row-wise fake quantization
 - :mod:`torchao_npu.ops.mx_ops` — MX (FP8/FP4) matmul and (de)quantization ops
 """

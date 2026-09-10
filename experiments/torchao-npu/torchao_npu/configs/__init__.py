@@ -5,7 +5,7 @@
 
 """Public quantization configurations for torchao-npu."""
 
-from .param_swap import ParamSwapConfig
+from torchao_npu.configs.param_swap import ParamSwapConfig
 
 __all__ = [
     "ParamSwapConfig",

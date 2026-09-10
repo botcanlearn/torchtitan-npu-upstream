@@ -9,14 +9,14 @@ import torch
 from torch import nn
 from torchao.prototype.moe_training.utils import unwrap_weight
 
-from ..ops.mx_ops import (
+from torchao_npu.ops.mx_ops import (
     to_mx_then_bmm,
     to_mx_then_grouped_mm,
     to_mx_then_mm,
 )
-from ..quantization.quant_configs import MXQuantizeConfig
-from ..quantization.transform import register_parameter_swap_handler
-from .base_wrapper_tensor import BaseTrainingWeightWrapperTensor
+from torchao_npu.quantization.quant_configs import MXQuantizeConfig
+from torchao_npu.quantization.transform import register_parameter_swap_handler
+from torchao_npu.wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
 
 
 class MXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
@@ -43,10 +43,10 @@ class MXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
         if activation_config is None:
             raise ValueError(f"`activation_config` is required for {type(self).__name__}.")
 
-        if not isinstance(weight_config, MXQuantizeConfig):
+        if type(weight_config) is not MXQuantizeConfig:
             raise ValueError(f"Only `MXQuantizeConfig` is supported for `weight_config` in {type(self).__name__}.")
 
-        if not isinstance(activation_config, MXQuantizeConfig):
+        if type(activation_config) is not MXQuantizeConfig:
             raise ValueError(f"Only `MXQuantizeConfig` is supported for `activation_config` in {type(self).__name__}.")
 
         if weight_config != activation_config:
@@ -155,19 +155,19 @@ def _(
     param: nn.Parameter,
     extra_args: tuple[Any, ...] = (),
 ):
-    from ..configs import ParamSwapConfig
+    from torchao_npu.configs import ParamSwapConfig
 
     config: ParamSwapConfig = extra_args[0]
 
     if not isinstance(config, ParamSwapConfig):
         raise ValueError(f"extra_args[0] must be a ParamSwapConfig, got {type(config).__name__}.")
 
-    if config.activation_config is not None and not isinstance(config.activation_config, MXQuantizeConfig):
+    if config.activation_config is not None and type(config.activation_config) is not MXQuantizeConfig:
         raise ValueError(
             f"activation_config must be {MXQuantizeConfig.__name__}, got {type(config.activation_config).__name__}."
         )
 
-    if config.weight_config is not None and not isinstance(config.weight_config, MXQuantizeConfig):
+    if config.weight_config is not None and type(config.weight_config) is not MXQuantizeConfig:
         raise ValueError(
             f"weight_config must be {MXQuantizeConfig.__name__}, got {type(config.weight_config).__name__}."
         )

@@ -56,14 +56,14 @@ def _is_parameter(param: nn.Parameter, fqn: str) -> bool:
     Default filter for parameter-level recursion: returns True for all
     ``nn.Parameter`` not already wrapped.
     """
-    from ..wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
+    from torchao_npu.wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
 
     return isinstance(param, nn.Parameter) and not isinstance(param.data, BaseTrainingWeightWrapperTensor)
 
 
 def _is_parameter_with_wrapped_data(param: nn.Parameter, fqn: str) -> bool:
     """Filter for the convert step, identifying Parameters with wrapped data."""
-    from ..wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
+    from torchao_npu.wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
 
     return isinstance(param, nn.Parameter) and isinstance(param.data, BaseTrainingWeightWrapperTensor)
 

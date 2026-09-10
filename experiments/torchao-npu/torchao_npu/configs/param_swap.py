@@ -15,12 +15,12 @@ from torchao.quantization.qat.fake_quantize_config import (
 from torchao.quantization.quant_api import Float8DynamicActivationFloat8WeightConfig
 from torchao.quantization.transform_module import register_quantize_module_handler
 
-from ..quantization.filters import ParameterFilterFn, _is_parameter, _is_parameter_with_wrapped_data
-from ..quantization.quant_configs import (
-    BlockQuantizeConfig,
+from torchao_npu.quantization.filters import ParameterFilterFn, _is_parameter, _is_parameter_with_wrapped_data
+from torchao_npu.quantization.quant_configs import (
+    BlockMXQuantizeConfig,
     MXQuantizeConfig,
 )
-from ..quantization.transform import (
+from torchao_npu.quantization.transform import (
     _PARAM_SWAP_QUANTIZE_CONFIG_HANDLER,
     _replace_params_with_custom_fn_if_matches_filter,
     unwrap_param,
@@ -50,8 +50,8 @@ class ParamSwapConfig(QATConfig):
     (:class:`~torchao.quantization.qat.fake_quantize_config.Float8FakeQuantizeConfig`),
     NPU MX block-wise
     (:class:`~torchao_npu.quantization.quant_configs.MXQuantizeConfig`),
-    and NPU Block FP8
-    (:class:`~torchao_npu.quantization.quant_configs.BlockQuantizeConfig`).
+    and NPU Block MX
+    (:class:`~torchao_npu.quantization.quant_configs.BlockMXQuantizeConfig`).
     """
 
     def __init__(
@@ -68,18 +68,21 @@ class ParamSwapConfig(QATConfig):
 
     def __post_init__(self):
         torch._C._log_api_usage_once("torchao.prototype.param_swap.ParamSwapConfig")
-        if self.activation_config is not None and not isinstance(
-            self.activation_config, (Float8FakeQuantizeConfig, MXQuantizeConfig)
+        if self.activation_config is not None and type(self.activation_config) not in (
+            Float8FakeQuantizeConfig,
+            MXQuantizeConfig,
         ):
             raise ValueError(
                 "Only `Float8FakeQuantizeConfig` or `MXQuantizeConfig` "
                 "is supported for `activation_config` in ParamSwapConfig yet."
             )
-        if self.weight_config is not None and not isinstance(
-            self.weight_config, (Float8FakeQuantizeConfig, MXQuantizeConfig, BlockQuantizeConfig)
+        if self.weight_config is not None and type(self.weight_config) not in (
+            Float8FakeQuantizeConfig,
+            MXQuantizeConfig,
+            BlockMXQuantizeConfig,
         ):
             raise ValueError(
-                "Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `BlockQuantizeConfig` "
+                "Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `BlockMXQuantizeConfig` "
                 "is supported for `weight_config` in ParamSwapConfig yet."
             )
 
@@ -118,7 +121,7 @@ def _param_swap_config_transform(
 
     # Handlers are registered as an import side effect of the wrapper tensor modules;
     # importing them here populates the registry `_PARAM_SWAP_QUANTIZE_CONFIG_HANDLER` read below.
-    from .. import wrapper_tensors  # noqa: F401
+    import torchao_npu.wrapper_tensors  # noqa: F401
 
     if config.step == QATStep.PREPARE:
         assert config.weight_config is not None

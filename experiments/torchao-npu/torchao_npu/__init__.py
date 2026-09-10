@@ -3,8 +3,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .configs import ParamSwapConfig
+from torchao_npu.configs import ParamSwapConfig
 
 __all__ = [
     "ParamSwapConfig",
 ]
+
+
+def normalize_dim(dim: int, ndim: int) -> int:
+    """Return ``dim`` as a non-negative index into an ``ndim``-D tensor."""
+    if not -ndim <= dim < ndim:
+        raise IndexError(f"dim {dim} out of range for {ndim}D tensor")
+    return dim % ndim

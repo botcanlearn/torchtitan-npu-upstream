@@ -10,7 +10,7 @@ from typing import Any
 from torch import nn
 from torchao.quantization.qat.fake_quantize_config import FakeQuantizeConfigBase
 
-from .filters import ParameterFilterFn, _is_parameter
+from torchao_npu.quantization.filters import ParameterFilterFn, _is_parameter
 
 """
 Registry mapping a :class:`FakeQuantizeConfigBase` type to a handler that
@@ -50,7 +50,7 @@ def unwrap_param(
     param: nn.Parameter,
     extra_args: tuple[Any, ...] = (),
 ):
-    from ..wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
+    from torchao_npu.wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
 
     # ``unwrap_param`` is invoked with parameters already wrapped by
     # ``BaseTrainingWeightWrapperTensor`` (the convert step pairs with

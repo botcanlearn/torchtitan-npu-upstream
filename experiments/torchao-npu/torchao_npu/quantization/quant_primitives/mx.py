@@ -13,6 +13,193 @@ ops in :mod:`torchao_npu.ops.mx_ops`
 import functools
 
 import torch
+import torch_npu
+
+from torchao_npu import normalize_dim
+from torchao_npu.quantization.quant_configs import MXQuantizeConfig
+
+
+def mx_quantize(
+    tensor: torch.Tensor,
+    axis: int,
+    config: MXQuantizeConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """MX quantize ``tensor`` along ``axis``, avoiding a real transpose when possible.
+
+    ``npu_dynamic_mx_quant`` requires dense (``is_contiguous()``) input and,
+    given a non-dense tensor, silently inserts a ``Contiguous/Transpose`` copy
+    before quantizing -- even when the quant axis is already contiguous in
+    memory (the op checks ``is_contiguous()`` on the whole tensor, not per-axis).
+    This is an inherent limitation of the underlying operator; the kernel has no
+    stride handling, so it can only consume a dense layout.
+
+    How a real transpose can be avoided: if the quant axis is the innermost-contiguous
+    dimension (``stride(axis) == 1``) and ``tensor`` is not already dense, it is
+    a pure permutation view. We then reorder dims so the quant axis lands at -1
+    (a view, no copy), quantize along -1 (now dense, so no transpose fires), and
+    permute both outputs back to the original layout.
+
+    When a real transpose is inevitable, no view can make the tensor dense and
+    the raw op performs a real copy internally. (We still permute the outputs
+    back, so the result is correct regardless.) This happens when any of:
+
+    - the quant axis is strided (``stride(axis) != 1``);
+    - the tensor is not a pure permutation view, so the permuted tensor stays
+      non-dense.
+
+    A dense input is nevertheless quantized as-is: ``npu_dynamic_mx_quant``
+    only inserts the transposing copy for a non-dense tensor.
+
+    Warning:
+        The transpose-avoiding optimization assumes every dim has a positive
+        stride; it does not consider tensors with a stride-0 dim (e.g. a
+        broadcast dim) yet.
+
+    Args:
+        tensor: Tensor to quantize, shape ``(..., K, ...)``.
+        axis: Dimension to quantize along.
+        config: MX quantization parameters.
+
+    Returns:
+        ``(y, scale)``; ``y`` has the same shape/dtype as ``tensor`` and
+        ``scale`` the same shape ``npu_dynamic_mx_quant`` would produce.
+    """
+
+    axis = normalize_dim(axis, tensor.ndim)
+
+    # Call the raw op directly
+    # 1) tensor.stride(axis) != 1:
+    #       a quant axis that isn't innermost-contiguous, a real transpose in inevitable.
+    # 2) tensor.stride(axis) == 1 and tensor.is_contiguous():
+    #       dense input, ``npu_dynamic_mx_quant`` does not insert a ``Contiguous/Transpose`` copy.
+    #
+    # The two conditions combined are simplied as below.
+    if tensor.stride(axis) != 1 or tensor.is_contiguous():
+        y, scale = torch_npu.npu_dynamic_mx_quant(
+            tensor,
+            axis=axis,
+            dst_type=config.npu_elem_dtype,
+            block_size=config.block_size,
+            round_mode=config.round_mode,
+            scale_alg=config.scale_alg,
+            dst_type_max=config.dst_type_max,
+        )
+        return y.view(config.elem_dtype), scale
+
+    else:
+        # Non-dense, innermost-contiguous quant axis: permute it to -1.
+        # ``stride(axis) == 1`` here, so ordering the other dims by descending
+        # stride and appending ``axis`` reproduces the dense layout (a pure view)
+        # whenever the tensor is a pure permutation view. Appending ``axis``
+        # explicitly -- instead of relying on a descending-stride sort to place
+        # it last -- keeps the quant axis at -1 even when another dim ties on
+        # stride 1, e.g. a size-1 dim.
+        perm_indices = sorted(
+            (d for d in range(tensor.ndim) if d != axis),
+            key=lambda d: tensor.stride(d),
+            reverse=True,
+        )
+        perm_indices.append(axis)
+        tensor_p = tensor.permute(perm_indices)
+
+        y_p, scale_p = torch_npu.npu_dynamic_mx_quant(
+            tensor_p,
+            axis=-1,
+            dst_type=config.npu_elem_dtype,
+            block_size=config.block_size,
+            round_mode=config.round_mode,
+            scale_alg=config.scale_alg,
+            dst_type_max=config.dst_type_max,
+        )
+        y_p = y_p.view(config.elem_dtype)
+
+        # Inverse permutation: y_p dim j corresponds to tensor dim perm_indices[j].
+        perm_back_indices = [0] * tensor.ndim
+        for j, p in enumerate(perm_indices):
+            perm_back_indices[p] = j
+        y = y_p.permute(perm_back_indices)
+
+        # scale_p has tensor.ndim+1 dims: the non-axis dims (in permuted order),
+        # then the block dim, then the trailing pack-2 dim. The inverse
+        # permutation already maps the quant axis to the block slot, so just
+        # append tensor.ndim to restore the canonical layout, [.. axis .., block, .. , 2].
+        perm_back_indices.append(tensor.ndim)
+        scale = scale_p.permute(perm_back_indices)
+
+        return y, scale
+
+
+def mx_quantize_dual_axis(
+    tensor: torch.Tensor,
+    config: MXQuantizeConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """MX quantize ``tensor`` along its two trailing dims, avoiding real transposes when possible.
+
+    ``npu_dynamic_mx_quant_with_dual_axis`` quantizes the two trailing dims of a
+    dense tensor and returns ``(y1, s1, y2, s2)`` (``y1``/``s1`` along dim -1,
+    ``y2``/``s2`` along dim -2). Given a non-dense tensor it silently inserts a
+    ``Contiguous/Transpose`` copy before quantizing, because the kernel has no
+    stride handling and can only consume a dense layout. This is an inherent
+    limitation of the underlying operator.
+
+    How a real transpose can be avoided: the dims fall into two parts -- the two
+    quant dims (-2, -1) and the leading dims. Crossing a dim between parts would
+    quantize a different pair and change the semantics, so we only permute within
+    each part. We permute each part by descending stride and quantize the result;
+    this reproduces the raw op exactly (the op only ever quantizes the trailing
+    two dims). When the two quant dims are the two innermost dims the permutation
+    is dense, so no copy is needed; otherwise the op copies internally, no worse
+    than calling it directly. If the op quantized the two dims in the opposite
+    order, we swap ``q1``/``q2`` so the result matches the raw op.
+
+    Args:
+        tensor: Tensor to quantize, shape ``(..., row, col)`` (``ndim >= 2``).
+        config: MX quantization parameters.
+
+    Returns:
+        ``(y1, s1, y2, s2)`` with the same shapes ``npu_dynamic_mx_quant_with_dual_axis``
+        would produce for ``tensor``.
+    """
+    # Permute each part so that, within each part, the strides run descending.
+    strides = tensor.stride()
+    # Part 1 (leading dims): order them by stride so they run outermost-first.
+    lead = sorted(range(tensor.ndim - 2), key=lambda d: strides[d], reverse=True)
+    # Part 2 (the two quant dims): order them descending so the innermost one
+    # lands at -1. Whether this reverses the original [-2, -1] decides the swap.
+    swap = strides[tensor.ndim - 1] > strides[tensor.ndim - 2]
+    quant_order = [tensor.ndim - 2, tensor.ndim - 1] if not swap else [tensor.ndim - 1, tensor.ndim - 2]
+    perm_indices = [*lead, *quant_order]
+    tensor_p = tensor.permute(perm_indices)
+
+    y1_p, s1_p, y2_p, s2_p = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
+        tensor_p,
+        round_mode=config.round_mode,
+        dst_type=config.npu_elem_dtype,
+        scale_alg=config.scale_alg,
+        dst_type_max=config.dst_type_max,
+    )
+    y1_p = y1_p.view(config.elem_dtype)
+    y2_p = y2_p.view(config.elem_dtype)
+
+    # Inverse permutation of the tensor dims. Applying it to any op output --
+    # appending the extra block/pack dim for a scale -- returns the tensor to the
+    # original layout.
+    perm_back_indices = [0] * tensor.ndim
+    for j, p in enumerate(perm_indices):
+        perm_back_indices[p] = j
+
+    y1 = y1_p.permute(perm_back_indices)
+    y2 = y2_p.permute(perm_back_indices)
+    s1 = s1_p.permute([*perm_back_indices, tensor.ndim])
+    s2 = s2_p.permute([*perm_back_indices, tensor.ndim])
+
+    # The op's q1 is along tensor_p's -1. When the two quant dims were permuted
+    # in the opposite order, that dim is the original -2: swap the outputs so q1
+    # tracks the original -1 (and q2 the original -2).
+    if swap:
+        y1, y2 = y2, y1
+        s1, s2 = s2, s1
+    return y1, s1, y2, s2
 
 
 def mxfp4_dequantize(

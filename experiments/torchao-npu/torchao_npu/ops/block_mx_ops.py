@@ -3,9 +3,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Block FP8 low-precision matmul ops for NPU.
+"""Block MX low-precision matmul ops for NPU.
 
-Quantization scheme (non-grouped ``to_block_fp8_then_mm``):
+Quantization scheme (non-grouped ``to_block_mx_then_mm``):
 - A (activation):  ``npu_dynamic_mx_quant_with_dual_axis``
   - s1 = per-32-group scale along dim -1  (``A_s1``)
   - s2 = per-32-group scale along dim -2  (``A_s2``)
@@ -13,7 +13,7 @@ Quantization scheme (non-grouped ``to_block_fp8_then_mm``):
   - s1 = per-32-group scale along dim -1  (``B_s1``)
   - s2 = per-32-group scale along dim -2  (``B_s2``)
 
-Quantization scheme (grouped ``to_block_fp8_then_grouped_mm``):
+Quantization scheme (grouped ``to_block_mx_then_grouped_mm``):
 - A (activation), K-dim:    ``npu_dynamic_mx_quant(axis=-1)``
 - A (activation), M-dim:    ``npu_grouped_dynamic_mx_quant``
 - B (weight):               ``npu_dynamic_block_mx_quant``
@@ -24,23 +24,22 @@ Quantization scheme (grouped ``to_block_fp8_then_grouped_mm``):
 import torch
 import torch_npu
 
-from ..quantization.quant_configs import (
-    BlockQuantizeConfig,
+from torchao_npu.quantization.quant_configs import (
+    BlockMXQuantizeConfig,
     MXQuantizeConfig,
 )
-from ..quantization.quant_primitives.block_fp8 import (
-    block_fp8_mxfp4_fake_quantize,
-)
+from torchao_npu.quantization.quant_primitives.block_mx import block_mx_quantize
+from torchao_npu.quantization.quant_primitives.mx import mx_quantize, mx_quantize_dual_axis
 
 __all__ = [
-    "to_block_fp8_then_bmm",
-    "to_block_fp8_then_grouped_mm",
-    "to_block_fp8_then_mm",
+    "to_block_mx_then_bmm",
+    "to_block_mx_then_grouped_mm",
+    "to_block_mx_then_mm",
 ]
 
 
-class _BlockFP8QuantMM(torch.autograd.Function):
-    """Block FP8 matrix multiply: ``A[M,K] @ B[K,N] = Y[M,N]``.
+class _BlockMXQuantMM(torch.autograd.Function):
+    """Block MX matrix multiply: ``A[M,K] @ B[K,N] = Y[M,N]``.
 
     Forward:
       1. ``A_q1, A_s1, A_q2, A_s2 = npu_dynamic_mx_quant_with_dual_axis(A, **config_A)``
@@ -69,7 +68,7 @@ class _BlockFP8QuantMM(torch.autograd.Function):
         A: torch.Tensor,
         B: torch.Tensor,
         config_A: MXQuantizeConfig,
-        config_B: BlockQuantizeConfig,
+        config_B: BlockMXQuantizeConfig,
     ):
         assert A.ndim >= 2, f"A must be >=2D, got {A.ndim}D"
         assert A.shape[-2] % config_A.block_size == 0, (
@@ -80,18 +79,12 @@ class _BlockFP8QuantMM(torch.autograd.Function):
 
         # --- Step 1: quantize A with dual-axis MX quant ---
         # Flatten leading dims inside the quant call (like MXfp8MM uses view_as_n_dim)
-        A_q1, A_s1, A_q2, A_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            A.reshape(-1, A.shape[-1]),
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        A_q1, A_s1, A_q2, A_s2 = mx_quantize_dual_axis(A.reshape(-1, A.shape[-1]), config_A)
 
-        # --- Step 2: block FP8 quantize B (with optional mxfp4 fake-quant pre-pass) ---
+        # --- Step 2: block MX quantize B (with optional mxfp4 fake-quant pre-pass) ---
         # B [K, N] → B_s1 (N-dim scale) [K, ceil(ceil(N/32)/2), 2]
         #           → B_s2 (K-dim scale) [ceil(ceil(K/32)/2), N, 2]
-        B_q, B_s1, B_s2 = block_fp8_mxfp4_fake_quantize(B, axis=-2, config=config_B)
+        B_q, B_s1, B_s2 = block_mx_quantize(B, config=config_B, axis=-2)
 
         # --- Step 3: low-precision matmul, contracting over K ---
         # x1 = A_q1 [M, K] → pertoken_scale = A_s1 [M, ceil(ceil(K/32)/2), 2]
@@ -102,8 +95,10 @@ class _BlockFP8QuantMM(torch.autograd.Function):
             B_s2,
             pertoken_scale=A_s1,
             output_dtype=A.dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
@@ -127,13 +122,7 @@ class _BlockFP8QuantMM(torch.autograd.Function):
 
         # --- Step 1: quantize dY with dual-axis MX quant ---
         # Flatten leading dims inside the quant call (like MXfp8MM)
-        dY_q1, dY_s1, dY_q2, dY_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            dY.reshape(-1, dY.shape[-1]),
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        dY_q1, dY_s1, dY_q2, dY_s2 = mx_quantize_dual_axis(dY.reshape(-1, dY.shape[-1]), config_A)
 
         # --- Step 2: dgrad  dA = dY @ B^T  (contract over N) ---
         # x1 = dY_q1 [M, N] → pertoken_scale = dY_s1 [M, ceil(ceil(N/32)/2), 2]
@@ -144,8 +133,10 @@ class _BlockFP8QuantMM(torch.autograd.Function):
             B_s1.transpose(0, 1),
             pertoken_scale=dY_s1,
             output_dtype=A_dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
@@ -159,8 +150,10 @@ class _BlockFP8QuantMM(torch.autograd.Function):
             dY_s2,
             pertoken_scale=A_s2.transpose(0, 1),
             output_dtype=A_dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_A.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_A.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
@@ -171,19 +164,19 @@ class _BlockFP8QuantMM(torch.autograd.Function):
         return dA, dB, None, None
 
 
-def to_block_fp8_then_mm(
+def to_block_mx_then_mm(
     A: torch.Tensor,
     B: torch.Tensor,
     config_A: MXQuantizeConfig,
-    config_B: BlockQuantizeConfig,
+    config_B: BlockMXQuantizeConfig,
 ) -> torch.Tensor:
-    """Block FP8 matrix multiply: ``A @ B`` with mixed-format quantization.
+    """Block MX matrix multiply: ``A @ B`` with mixed-format quantization.
 
     Quantization scheme:
     - A: ``npu_dynamic_mx_quant_with_dual_axis`` (params from ``config_A``)
     - B: ``npu_dynamic_block_mx_quant``, 32×32 blocks (params from ``config_B``)
 
-    See ``_BlockFP8QuantMM`` for details of the three GEMMs.
+    See ``_BlockMXQuantMM`` for details of the three GEMMs.
 
     Args:
         A: Shape ``(M, K)``.
@@ -194,11 +187,11 @@ def to_block_fp8_then_mm(
     Returns:
         Output tensor, shape ``(M, N)``, dtype matching ``A``.
     """
-    return _BlockFP8QuantMM.apply(A, B, config_A, config_B)
+    return _BlockMXQuantMM.apply(A, B, config_A, config_B)
 
 
-class _BlockFP8QuantGroupedMM(torch.autograd.Function):
-    """Block FP8 grouped matmul: ``A[M,K] @ B[E,K,N] = Y[M,N]``.
+class _BlockMXQuantGroupedMM(torch.autograd.Function):
+    """Block MX grouped matmul: ``A[M,K] @ B[E,K,N] = Y[M,N]``.
 
     Rows of ``A`` are partitioned into ``E`` groups via ``group_list``
     (cumsum offsets, length ``E``).  Each slice ``A[group_list[i-1]:group_list[i]]``
@@ -248,7 +241,7 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
         B: torch.Tensor,
         group_list: torch.Tensor,
         config_A: MXQuantizeConfig,
-        config_B: BlockQuantizeConfig,
+        config_B: BlockMXQuantizeConfig,
     ):
         assert A.ndim == 2, f"A must be 2D, got {A.ndim}D"
         assert B.ndim == 3, f"B must be 3D, got {B.ndim}D"
@@ -256,15 +249,7 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
 
         # --- Step 1: quantize A along K-dim (contracting dim for forward) ---
         # A [M, K] → A_s1 (K-dim scale) [M, ceil(ceil(K/32)/2), 2]
-        A_q1, A_s1 = torch_npu.npu_dynamic_mx_quant(
-            A,
-            axis=-1,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            block_size=config_A.block_size,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        A_q1, A_s1 = mx_quantize(A, -1, config_A)
 
         # --- Step 2: quantize A along M-dim with grouped quant (zero boundaries) ---
         # A [M, K] → A_s2 (M-dim scale) [M//64 + E, K, 2]
@@ -272,15 +257,15 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
             A,
             group_list.to(torch.int32),
             round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
+            dst_type=config_A.npu_elem_dtype,
             blocksize=config_A.block_size,
             scale_alg=config_A.scale_alg,
         )
 
-        # --- Step 3: block FP8 quantize B (with optional mxfp4 fake-quant pre-pass) ---
+        # --- Step 3: block MX quantize B (with optional mxfp4 fake-quant pre-pass) ---
         # B [E, K, N] → B_s1 (N-dim scale) [E, K, ceil(ceil(N/32)/2), 2]
         #              → B_s2 (K-dim scale) [E, ceil(ceil(K/32)/2), N, 2]
-        B_q, B_s1, B_s2 = block_fp8_mxfp4_fake_quantize(B, axis=-2, config=config_B)
+        B_q, B_s1, B_s2 = block_mx_quantize(B, config=config_B, axis=-2)
 
         # --- Step 4: grouped low-precision matmul, group_type=0 (contract over K) ---
         # x = A_q1 [M, K]    → per_token_scale = A_s1 [M, ceil(K/64), 2]
@@ -294,8 +279,10 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
             group_type=0,
             output_dtype=A.dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
+            x_dtype=config_A.npu_matmul_dtype,
+            weight_dtype=config_B.npu_matmul_dtype,
             split_item=3,
         )[0]
 
@@ -312,19 +299,12 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
         A_q2, A_s2, B_q, B_s1, group_list = ctx.saved_tensors
         A_dtype = ctx.A_dtype
         config_A = ctx.config_A
+        config_B = ctx.config_B
         assert dY.ndim == 2, f"dY must be 2D, got {dY.ndim}D"
 
         # --- Step 1: quantize dY along N-dim (for dgrad) ---
         # dY [M, N] → dY_s1 (N-dim scale) [M, ceil(ceil(N/32)/2), 2]
-        dY_q1, dY_s1 = torch_npu.npu_dynamic_mx_quant(
-            dY,
-            axis=-1,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            block_size=config_A.block_size,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        dY_q1, dY_s1 = mx_quantize(dY, -1, config_A)
 
         # --- Step 2: quantize dY along M-dim with grouped quant (zero boundaries) ---
         # dY [M, N] → dY_s2 (M-dim scale) [M//64 + E, N, 2]
@@ -332,7 +312,7 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
             dY,
             group_list.to(torch.int32),
             round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
+            dst_type=config_A.npu_elem_dtype,
             blocksize=config_A.block_size,
             scale_alg=config_A.scale_alg,
         )
@@ -349,8 +329,10 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
             group_type=0,
             output_dtype=A_dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
+            x_dtype=config_A.npu_matmul_dtype,
+            weight_dtype=config_B.npu_matmul_dtype,
             split_item=3,
         )[0]
 
@@ -369,22 +351,25 @@ class _BlockFP8QuantGroupedMM(torch.autograd.Function):
             group_type=2,
             output_dtype=A_dtype,
             group_list_type=0,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            # wgrad: the weight operand is dY_q2, quantized with config_A
+            scale_dtype=config_A.npu_scale_dtype,
+            per_token_scale_dtype=config_A.npu_scale_dtype,
+            x_dtype=config_A.npu_matmul_dtype,
+            weight_dtype=config_A.npu_matmul_dtype,
             split_item=3,
         )[0]
 
         return dA, dB, None, None, None
 
 
-def to_block_fp8_then_grouped_mm(
+def to_block_mx_then_grouped_mm(
     A: torch.Tensor,
     B: torch.Tensor,
     group_list: torch.Tensor,
     config_A: MXQuantizeConfig,
-    config_B: BlockQuantizeConfig,
+    config_B: BlockMXQuantizeConfig,
 ) -> torch.Tensor:
-    """Block FP8 grouped matrix multiply with mixed-format quantization.
+    """Block MX grouped matrix multiply with mixed-format quantization.
 
     ``A`` is a 2D tensor ``(M, K)`` whose rows are partitioned among
     ``E`` groups via ``group_list`` (cumsum offsets, length ``E``).
@@ -397,7 +382,7 @@ def to_block_fp8_then_grouped_mm(
     - A along M-dim: ``npu_grouped_dynamic_mx_quant`` (params from ``config_A``)
     - B:             ``npu_dynamic_block_mx_quant``, 32×32 blocks (params from ``config_B``)
 
-    See ``_BlockFP8QuantGroupedMM`` for details of the three GEMMs.
+    See ``_BlockMXQuantGroupedMM`` for details of the three GEMMs.
 
     Args:
         A: Input tensor, shape ``(M, K)``.
@@ -410,16 +395,16 @@ def to_block_fp8_then_grouped_mm(
     Returns:
         Output tensor, shape ``(M, N)``, dtype matching ``A``.
     """
-    return _BlockFP8QuantGroupedMM.apply(A, B, group_list, config_A, config_B)
+    return _BlockMXQuantGroupedMM.apply(A, B, group_list, config_A, config_B)
 
 
-class _BlockFP8QuantBMM(torch.autograd.Function):
-    """Block FP8 batched matmul: ``A[B,M,K] @ B[B,K,N] = Y[B,M,N]``.
+class _BlockMXQuantBMM(torch.autograd.Function):
+    """Block MX batched matmul: ``A[B,M,K] @ B[B,K,N] = Y[B,M,N]``.
 
     Both operands are 3D and share the leading batch dimension. The forward
     dual-axis quantizes ``A`` (params from ``config_A``) and block quantizes
     ``B`` in 32×32 blocks (params from ``config_B``, via
-    ``block_fp8_mxfp4_fake_quantize``), then performs the low-precision matmul
+    ``block_mx_quantize``), then performs the low-precision matmul
     contracting over K. The backward reuses the forward-quantized ``A_q2/A_s2``
     and ``B_q/B_s1`` transposed and only quantizes ``dY`` fresh.
     """
@@ -430,7 +415,7 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
         A: torch.Tensor,
         B: torch.Tensor,
         config_A: MXQuantizeConfig,
-        config_B: BlockQuantizeConfig,
+        config_B: BlockMXQuantizeConfig,
     ):
         assert A.ndim == 3, f"A must be 3D, got {A.ndim}D"
         assert B.ndim == 3, f"B must be 3D, got {B.ndim}D"
@@ -447,16 +432,10 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
         )
 
         # --- Step 1: dual-axis MX quantize A (left operand) ---
-        A_q1, A_s1, A_q2, A_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            A,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        A_q1, A_s1, A_q2, A_s2 = mx_quantize_dual_axis(A, config_A)
 
-        # --- Step 2: block FP8 quantize B (right operand, optional mxfp4 pre-pass) ---
-        B_q, B_s1, B_s2 = block_fp8_mxfp4_fake_quantize(B, axis=-2, config=config_B)
+        # --- Step 2: block MX quantize B (right operand, optional mxfp4 pre-pass) ---
+        B_q, B_s1, B_s2 = block_mx_quantize(B, config=config_B, axis=-2)
 
         # --- Step 3: low-precision batched matmul, contracting over K ---
         Y = torch_npu.npu_quant_matmul(
@@ -465,8 +444,10 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
             B_s2,
             pertoken_scale=A_s1,
             output_dtype=A.dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
@@ -484,13 +465,7 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
         config_B = ctx.config_B
 
         # --- Step 1: dual-axis MX quantize dY ---
-        dY_q1, dY_s1, dY_q2, dY_s2 = torch_npu.npu_dynamic_mx_quant_with_dual_axis(
-            dY,
-            round_mode=config_A.round_mode,
-            dst_type=config_A.elem_dtype,
-            scale_alg=config_A.scale_alg,
-            dst_type_max=config_A.dst_type_max,
-        )
+        dY_q1, dY_s1, dY_q2, dY_s2 = mx_quantize_dual_axis(dY, config_A)
 
         # --- Step 2: dgrad  dA = dY @ B^T  (contract over N) ---
         dA = torch_npu.npu_quant_matmul(
@@ -499,8 +474,10 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
             B_s1.transpose(-2, -3),
             pertoken_scale=dY_s1,
             output_dtype=A_dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_B.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_B.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
@@ -511,33 +488,35 @@ class _BlockFP8QuantBMM(torch.autograd.Function):
             dY_s2,
             pertoken_scale=A_s2.transpose(-2, -3),
             output_dtype=A_dtype,
-            scale_dtype=torch_npu.float8_e8m0fnu,
-            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+            scale_dtype=config_A.npu_scale_dtype,
+            pertoken_scale_dtype=config_A.npu_scale_dtype,
+            x1_dtype=config_A.npu_matmul_dtype,
+            x2_dtype=config_A.npu_matmul_dtype,
             group_sizes=[1, 1, config_B.block_size],
         )
 
         return dA, dB, None, None
 
 
-def to_block_fp8_then_bmm(
+def to_block_mx_then_bmm(
     A: torch.Tensor,
     B: torch.Tensor,
     config_A: MXQuantizeConfig,
-    config_B: BlockQuantizeConfig,
+    config_B: BlockMXQuantizeConfig,
 ) -> torch.Tensor:
-    """Block FP8 batched matmul: ``A[B,M,K] @ B[B,K,N] = Y[B,M,N]``.
+    """Block MX batched matmul: ``A[B,M,K] @ B[B,K,N] = Y[B,M,N]``.
 
     Both operands are 3D and must share the leading batch dimension.
     Quantization configs are drawn from ``config_A`` (MX, for A and dY) and
-    ``config_B`` (Block FP8, for B).
+    ``config_B`` (Block MX, for B).
 
     Args:
         A: Shape ``(B, M, K)``.
         B: Shape ``(B, K, N)``.
         config_A: MX config for A's quantization.
-        config_B: Block FP8 config for B's quantization.
+        config_B: Block MX config for B's quantization.
 
     Returns:
         Output tensor, shape ``(B, M, N)``, dtype matching ``A``.
     """
-    return _BlockFP8QuantBMM.apply(A, B, config_A, config_B)
+    return _BlockMXQuantBMM.apply(A, B, config_A, config_B)
