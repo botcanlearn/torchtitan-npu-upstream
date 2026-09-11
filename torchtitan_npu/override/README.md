@@ -299,6 +299,7 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 | `sparse_attn.pypto` (replaces `sparse_attn.asc`) | `CompressedSparseInnerAttention.Config` | `PyPTOCompressedSparseInnerAttention.Config` |
 | `sparse_attn.golden` | `CompressedSparseInnerAttention.Config` | `GoldenCompressedSparseInnerAttention.Config` |
 | `mhc.asc_hc_pre` | `HcPre.Config` | `AscHcPre.Config` | 使用 `torch_npu.npu_mhc_pre` + `torch_npu.npu_mhc_sinkhorn` |
+| `mhc.tilelang_hc_pre` | `HcPre.Config` | `TilelangHcPre.Config` | 使用外部 TileKernels Split/Apply 与 `torch_npu.npu_mhc_sinkhorn` |
 | `mhc.asc_hc_post` | `HcPost.Config` | `AscHcPost.Config` | 使用 `cann_ops_transformer.ops.mhc_post` |
 | `mhc.triton_hc_pre` | `HcPre.Config` | `TritonHcPre.Config` | 使用 `mhc_pre_sinkhorn_op` + `mhc_pre_bmm_op` |
 | `mhc.triton_hc_post` | `HcPost.Config` | `TritonHcPost.Config` | 使用 `mhc_post_bmm1_op` + `mhc_post_bmm2_op` |
@@ -310,6 +311,9 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 MHC 的 `asc_hc_pre` / `asc_hc_post` 与 `triton_hc_pre` / `triton_hc_post` / `triton_hc_head` / `tilelang_hc_head` 是可选入口（`deepseek_v4/__init__.py`
 默认只导入 `sparse_attn`），需要时显式加入 `override.imports`。`triton_hc_head` 与 `tilelang_hc_head` 声明同一 `HcHead.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` / `asc_hc_post` 共存。
 `tilelang_hc_post` 与 `asc_hc_post` 声明同一 `HcPost.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` 共存。
+`tilelang_hc_pre` 与 `asc_hc_pre`、`triton_hc_pre` 作用于同一 `HcPre.Config` 节点，只能选择一个；它可以与作用于 `HcPost.Config` 的 `asc_hc_post` 同时启用。
+
+依赖的 tilelang/tile_kernels 暂时未开源，不随默认 requirements 安装。
 推荐直接使用 `examples/deepseek_v4/*.sh` wrapper；单机调试可使用
 [deepseek_v4_mini_1p_cpt_2k_a3.sh](../../examples/deepseek_v4/debug/deepseek_v4_mini_1p_cpt_2k_a3.sh)，
 它会组装 `--override.imports` 并调用 `scripts/run_train.sh`：

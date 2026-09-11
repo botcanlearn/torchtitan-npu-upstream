@@ -6,9 +6,9 @@
 """DeepSeek-V4 MHC overrides (registry-facing module).
 
 The CANN fused implementations live in ``ascendc.py``, the hand-written
-Triton kernels in ``triton.py``, and the TileLang HcHead/HcPost implementations
+Triton kernels in ``triton.py``, and the TileLang HcHead/HcPre/HcPost implementations
 in ``tilelang.py``; the registrations are defined here so the override paths
-stay ``override.deepseek_v4.mhc.{asc_hc_pre, asc_hc_post, triton_hc_pre,
+stay ``override.deepseek_v4.mhc.{asc_hc_pre, tilelang_hc_pre, asc_hc_post, triton_hc_pre,
 triton_hc_post, triton_hc_head, tilelang_hc_head, tilelang_hc_post}``.
 The HcHead entries (``triton_hc_head`` / ``tilelang_hc_head``) target the same
 ``HcHead.Config`` node, while the HcPost entries (``asc_hc_post`` /
@@ -22,7 +22,7 @@ from torchtitan.config import derive, override
 from torchtitan_npu.models.deepseek_v4.mhc import HcHead, HcPost, HcPre
 
 from .ascendc import AscHcPost, AscHcPre
-from .tilelang import TilelangHcHead, TilelangHcPost
+from .tilelang import TilelangHcHead, TilelangHcPost, TilelangHcPre
 from .triton import TritonHcHead, TritonHcPost, TritonHcPre
 
 
@@ -33,6 +33,15 @@ from .triton import TritonHcHead, TritonHcPost, TritonHcPre
 )
 def asc_hc_pre(cfg: HcPre.Config) -> AscHcPre.Config:
     return derive(cfg, AscHcPre.Config)
+
+
+@override(
+    target=HcPre.Config,
+    exact=True,
+    description="DeepSeek-V4 HcPre backed by TileKernels Split/Apply and torch_npu Sinkhorn",
+)
+def tilelang_hc_pre(cfg: HcPre.Config) -> TilelangHcPre.Config:
+    return derive(cfg, TilelangHcPre.Config)
 
 
 @override(

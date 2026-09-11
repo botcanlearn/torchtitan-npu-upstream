@@ -16,8 +16,8 @@ import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor
 
-from torchtitan_npu.models.deepseek_v4.mhc import HcHead, HcPost
-from torchtitan_npu.ops.tilelang import mhc_head_compute_mix_tilelang, tilelang_mhc_post
+from torchtitan_npu.models.deepseek_v4.mhc import HcHead, HcPost, HcPre
+from torchtitan_npu.ops.tilelang import mhc_head_compute_mix_tilelang, tilelang_mhc_post, tilelang_mhc_pre
 
 
 def _to_local_tensor(tensor: Tensor) -> Tensor:
@@ -124,3 +124,53 @@ class TilelangHcPost(HcPost):
             raise ValueError("TileLang HcPost requires contiguous x, residual, post and comb inputs")
 
         return tilelang_mhc_post(x, residual, post.unsqueeze(-1), comb)
+
+
+class TilelangHcPre(HcPre):
+    """Run TileKernels HcPre without HcPost-coupled grad accumulation.
+
+    Norm stays in PyTorch because the external kernel's validated hidden
+    sizes start above the mini-model's 256-wide shape. The existing
+    ``torch_npu`` Sinkhorn also keeps this adapter compatible with
+    TileLang releases whose PTO backend cannot lower ``tl.simd.vdup``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HcPre.Config):
+        pass
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(x, DTensor) or any(
+            isinstance(parameter, DTensor) for parameter in (self.hc_fn, self.hc_base, self.hc_scale)
+        ):
+            raise ValueError(
+                "TileLang HcPre does not support DTensor/full_dtensor; use the validated spmd_types backend"
+            )
+        if x.device.type != "npu":
+            raise ValueError(f"TileLang HcPre requires NPU input, got {x.device}")
+        if x.ndim != 4:
+            raise ValueError(f"TileLang HcPre expects x with shape [B,S,N,H], got {tuple(x.shape)}")
+        if self.hc_mult != 4:
+            raise ValueError(f"TileLang HcPre currently supports only hc_mult=4, got {self.hc_mult}")
+        if x.shape[-2] != self.hc_mult:
+            raise ValueError(f"TileLang HcPre expects N={self.hc_mult}, got x shape {tuple(x.shape)}")
+        if x.shape[-1] % 64 != 0:
+            raise ValueError(f"TileLang HcPre requires a hidden size divisible by 64, got x shape {tuple(x.shape)}")
+        if x.dtype != torch.bfloat16:
+            raise ValueError(f"TileLang HcPre requires torch.bfloat16 input, got {x.dtype}")
+        if not x.is_contiguous():
+            raise ValueError("TileLang HcPre requires contiguous input")
+
+        return tilelang_mhc_pre(
+            x,
+            self.hc_fn.float(),
+            self.hc_scale.float(),
+            self.hc_base.float(),
+            self.hc_mult,
+            self.sinkhorn_iters,
+            self.eps,
+            self.norm_eps,
+        )
