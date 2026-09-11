@@ -63,15 +63,15 @@ TND 只存在于 NPU 融合内核的局部计算中，不会成为模型公共�
 
 ## 压缩布局：CompressedVarlenMetadata
 
-[`metadata.py`](../../torchtitan_npu/models/deepseek_v4/metadata.py) 定义唯一的注意力契约 `CompressedVarlenMetadata`，由同文件中的 `CompressedBlockMaskHandler`（模型目录默认 handler）每个 batch 构建一次，供所有 DSA 层复用：
+[`metadata.py`](../../torchtitan_npu/models/deepseek_v4/metadata.py) 定义公共注意力契约 `CompressedVarlenMetadata`。每个 batch 由 `DeepSeekV4Model.build_attention_masks` 统一构建：先从 `VarlenMetadata` 调用 `build_compressed_varlen_metadata` 生成公共契约；启用 CP 时，再由 `_build_cp_metadata` 调用 `build_cp_plan` 生成 rank-local varlen、压缩计划和窗口计划；最后由 `metadata_extension` 补充参考路径或 AscendC 路径专属的 metadata。结果供所有 DSA 层复用：
 
-- `varlen`：`VarlenMetadata`，`cu_seq_q` 是序列边界的唯一权威来源。模型目录的参考 tier 要求 `cu_seq_q == cu_seq_k`（连续文档，non-CP）；统一 kernel contract（`build_kernel_layout`）无此限制，CP 流由 AscendC 融合路径消费。
+- `varlen`：`VarlenMetadata` 或 CP 下的 `CPVarlenMetadata`，`cu_seq_q` 是序列边界的唯一权威来源。`build_kernel_layout` 只构建普通流计划，并明确要求 `cu_seq_q == cu_seq_k`；CP 的 rank-local 计划由 `build_cp_plan` 构建，不会把 CP metadata 传给 `build_kernel_layout`。参考 tier 同样只支持 `cu_seq_q == cu_seq_k` 的非 CP 连续文档。
 - `batch_size` / `seq_len`：容器网格形状。DSV4 打包场景使用 `local_batch_size == 1`，因此 `batch_size == 1`、`seq_len` 等于总 token 数（`cu_seq_q[-1]`），元数据完全由 varlen 流推导，不依赖 positions。
 - `plans[ratio]`：每个模型实际使用的压缩比（1、4、128）对应一个 `CompressedBlockLayout`：
   - `cu_seqlens_cmp_k`、`block_remainder`：打包压缩块流边界与每文档尾部余数，直接喂给 AscendC 算子；
-  - `gather_indices`、`block_positions`、`first_indices`：统一的 Compressor 契约（块 token gather、文档内块起点 RoPE、文档/段首块位置——重叠 borrow 掩码），CP 与非 CP 以同一字段名提供（CP 下 `plans[ratio]` 即 CP ratio plan——part 1 由 `build_kernel_layout` 在虚拟增强流上推导，`block_positions` 经 `+A` 文档锚定；`first_indices` 为 plan-block 序的段首位置；非 CP 下为 `cu_seqlens_cmp_k[:-1]`）；
-  - `dense_mask` / `doc_of_block` / `block_local` / `static_blocks`：参考 tier（`reference.py`），`window_size`/`block_size` 为模型配置常量，经 `ReferenceMetadataExtension` 一次性预计算；
-  - AscendC `*_metadata` 张量不进入模型目录元数据；AscendC override handler 返回携带 `asc_plans` 的 `AscCompressedVarlenMetadata` 包装。
+  - `gather_indices`、`block_positions`、`first_indices`：统一的 Compressor 契约（块 token gather、文档内块起点 RoPE、文档/段首块位置——重叠 borrow 掩码），CP 与非 CP 以同一字段名提供。非 CP 字段由 `build_kernel_layout` 生成；CP 下的 `plans[ratio]` 由 `build_cp_plan` 生成，并额外携带 dispatcher 所需字段。
+- `reference.ratios[ratio]`：保存 `dense_mask`、`doc_of_block`、`block_local` 和 `static_blocks` 等参考路径字段，由 `ReferenceMetadataExtension` 一次性预计算，不属于公共 `plans[ratio]`。
+- `asc_plans[ratio]`：保存 AscendC 的 `smla_metadata`、`smla_grad_metadata`、`li_metadata` 和 `slig_metadata`。这些张量不进入模型目录的公共 metadata；AscendC extension 返回携带该字段的 `AscCompressedVarlenMetadata`。
 
 一个 batch 里可以打包多条序列，所以 `B` 与序列条数无关。例如：
 
@@ -102,13 +102,13 @@ block_positions  = [0, 4, 0, 4, 8, 12]
 overlap_valid    = [F, T, F, T, T, T]  # 文档起始块没有前驱
 ```
 
-- `r=1`：不生成压缩 KV，仅执行原始 KV 的滑窗注意力（plan 只含 AscendC metadata，`has_cmp_kv=False`）。
+- `r=1`：不生成压缩 KV，仅执行原始 KV 的滑窗注意力。公共 `plans[1]` 不包含压缩块，AscendC extension 仍生成对应的 `asc_plans[1]`，融合算子使用 `has_cmp_kv=False`。
 - `r=4`（CSA）：启用重叠压缩和 LightningIndexer；前驱块必须属于同一文档（`overlap_valid`）。
 - `r=128`（HCA）：生成连续压缩 KV，不执行 LightningIndexer TopK。
 
 ## 参考路径（默认内核与 golden）
 
-模型目录默认内核是 varlen 化的 `CompressedSparseInnerAttention`（上游 port）：在 `[swa_k | cmp_k | sink]` 拼接的容器 KV 上构建文档感知的两级 `BlockMask`（块列表超集 + token 级 `mask_mod`），CSA 的 top-k 由 `Indexer.select` 在 dense mask 上选择。块列表的静态部分（滑窗、sink、HCA 压缩区）由 handler 预计算进 `static_blocks`，每层只做 CSA top-k scatter 与 mask_mod 过滤。golden override 用 eager 逐文档 FP32 实现（gather-matmul + 逐文档 indexer top-k）作为比特级数值参考。
+模型目录默认内核是 varlen 化的 `CompressedSparseInnerAttention`（上游 port）：在 `[swa_k | cmp_k | sink]` 拼接的容器 KV 上构建文档感知的两级 `BlockMask`（块列表超集 + token 级 `mask_mod`），CSA 的 top-k 由 `Indexer.select` 在 dense mask 上选择。块列表的静态部分（滑窗、sink、HCA 压缩区）由 `ReferenceMetadataExtension` 预计算进 `reference.ratios[ratio].static_blocks`，每层只做 CSA top-k scatter 与 mask_mod 过滤。golden override 用 eager 逐文档 FP32 实现（gather-matmul + 逐文档 indexer top-k）作为比特级数值参考。
 
 ## AscendC 融合路径
 
@@ -127,7 +127,7 @@ overlap_valid    = [F, T, F, T, T, T]  # 文档起始块没有前驱
 | `cu_seqlens_cmp_kv` | `plan.cu_seqlens_cmp_k` |
 | `cmp_residual_kv` | `plan.block_remainder` |
 | `layout_q` / `layout_kv` | 固定为 `TND` |
-| 四个 `*_metadata` 张量 | `plan`（NPU handler 预计算） |
+| 四个 `*_metadata` 张量 | `asc_plans[ratio]`（AscendC extension 预计算） |
 
 ## 当前边界
 
