@@ -37,7 +37,7 @@ from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan_npu.models.deepseek_v4 import compressor as comp_mod
 from torchtitan_npu.models.deepseek_v4 import metadata as meta_mod
 from torchtitan_npu.models.deepseek_v4 import token_dispatcher as cp_mod
-from torchtitan_npu.models.deepseek_v4.attention import Attention
+from torchtitan_npu.models.deepseek_v4.attention import Attention, CompressedSparseAttention
 from torchtitan_npu.models.deepseek_v4.token_dispatcher import (
     build_cp_plan,
     segment_structure,
@@ -564,6 +564,7 @@ def test_asc_extension_cp_metadata(dsv4_globals, dsv4):
     _v, cp_metas, shard_len = make_cp_metas(docs, 2, lb)
     from torchtitan_npu.override.deepseek_v4.sparse_attn.ascendc import (
         AscMetadataExtension,
+        AscLightningIndexerMetadata,
     )
 
     for r in range(2):
@@ -577,6 +578,13 @@ def test_asc_extension_cp_metadata(dsv4_globals, dsv4):
             window_size=128,
             ratios=[1, ratio, 128],
         )
+        md = AscLightningIndexerMetadata(
+            AscLightningIndexerMetadata.Config(
+                window_size=128, index_n_heads=8, index_head_dim=128, index_topk=512
+            )
+        )(
+            dsv4.metadata.CompressedVarlenMetadata(varlen=cp_meta, plans=plans, window=window)
+        )
         md = AscMetadataExtension(
             AscMetadataExtension.Config(
                 window_size=128,
@@ -586,11 +594,7 @@ def test_asc_extension_cp_metadata(dsv4_globals, dsv4):
                 index_head_dim=128,
                 index_topk=512,
             )
-        )(
-            dsv4.metadata.CompressedVarlenMetadata(
-                varlen=cp_meta, plans=plans, window=window
-            )
-        )
+        )(md)
         assert md.batch_size == 1 and md.seq_len == shard_len
         assert md.window is not None
         # the window plan's packed-ori cumsum drives the kernel tensors
@@ -632,6 +636,15 @@ class _RecorderCore(nn.Module):
     def forward(self, *args, **kwargs):
         self.last = (args, kwargs)
         return args[0]
+
+
+class _RecorderLI(nn.Module):
+    def forward(self, idx_q, idx_k, idx_w, *, attention_masks):
+        self.last = (idx_q, idx_k, idx_w)
+        return torch.zeros(
+            idx_q.shape[0], idx_q.shape[1], 1, 2,
+            dtype=torch.long, device=idx_q.device,
+        )
 
 
 class _RopeStub(nn.Module):
@@ -749,6 +762,7 @@ def test_cp_attention_flow(dsv4_globals, dsv4):
     x = torch.randn(1, 64, DIM)
     x_flat = x.flatten(0, 1)
 
+    inner_attention_cfg = _RecorderCore.Config()
     cfg = Attention.Config(
         n_heads=2,
         head_dim=HD,
@@ -768,9 +782,15 @@ def test_cp_attention_flow(dsv4_globals, dsv4):
         wo_b=make_linear_cfg(8, DIM),
         compressor=make_compressor_cfg(ratio),
         indexer=make_indexer_cfg(DIM, 4, HD, RD, ratio),
-        inner_attention=_RecorderCore.Config(),
+        inner_attention=inner_attention_cfg,
+        compressed_sparse_attention=CompressedSparseAttention.Config(
+            lightning_indexer=None,
+            inner_attention=inner_attention_cfg,
+        ),
     )
     attn = Attention(cfg)
+    li_recorder = _RecorderLI()
+    attn.compressed_sparse_attention.lightning_indexer = li_recorder
 
     mds = []
     for r in range(2):
@@ -840,20 +860,26 @@ def test_cp_attention_flow(dsv4_globals, dsv4):
         positions = torch.arange(r * shard_len, (r + 1) * shard_len).unsqueeze(0)
         out = attn(x_local.view(1, shard_len, DIM), md, positions)
         assert out.shape == (1, shard_len, DIM)
-        core = attn.inner_attention
+        core = attn.compressed_sparse_attention.inner_attention
+        li_idx_q, li_idx_k, li_idx_w = li_recorder.last
+        assert li_idx_q.shape == (1, shard_len, 4, HD)
+        assert li_idx_w.shape == (1, shard_len, 4)
         args, kwargs = core.last
-        q, swa_k, cmp_k, idx_q, idx_k, idx_w = args[:6]
+        q, swa_k, cmp_k = args[:3]
+        idx_q = kwargs["idx_q"]
+        idx_k = kwargs["idx_k"]
+        idx_w = kwargs["idx_w"]
         assert kwargs["attn_sink"].shape == (2,)
         assert q.shape == (1, shard_len, 2, HD)
         assert swa_k.shape == (1, int(windows[r].cu_seqlens_ori_kv[-1]), HD)
         # the core receives the padded containers (the ShardingConfig
         # all-gather + the per-segment assembly happen at/inside the core)
         assert cmp_k.shape == (1, int(plan_dicts[r][ratio].out_width), HD)
+        assert kwargs["sparse_indices"].shape[:2] == (1, shard_len)
         assert idx_q.shape == (1, shard_len, 4, HD)
         assert idx_k.shape == cmp_k.shape
-        # idx_w is the local rows (the indexer sees x, not the augmented
-        # stream — no strip)
         assert idx_w.shape == (1, shard_len, 4)
+        assert li_idx_k.shape == cmp_k.shape
         # the containers' leading slots = the oracle's kept blocks
         kept_flat = kept[r][0]
         assert torch.allclose(

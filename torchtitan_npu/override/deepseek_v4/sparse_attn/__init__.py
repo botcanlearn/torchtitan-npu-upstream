@@ -3,7 +3,8 @@
 The AscendC fused implementation (metadata extension + kernel) lives in
 ``ascendc.py``, the eager golden reference in ``golden.py``; the registrations
 are defined here so the override paths stay
-``override.deepseek_v4.sparse_attn.{asc_metadata, asc, pypto, golden}``.  The
+``override.deepseek_v4.sparse_attn.{asc_li_metadata, asc_li,
+asc_metadata, asc, pypto, golden}``.  The
 model's ``build_attention_masks`` owns the per-batch metadata construction
 (including context parallel); the ``asc_metadata`` override injects the
 AscendC kernel-metadata extension (the model dir stays backend-agnostic).
@@ -15,8 +16,12 @@ import spmd_types as spmd
 from torchtitan.config import derive, override
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 
-from torchtitan_npu.models.common.metadata_extension import MetadataExtension
+from torchtitan_npu.models.common.metadata_extension import (
+    LightningIndexerMetadata,
+    MetadataExtension,
+)
 from torchtitan_npu.models.deepseek_v4.attention import CompressedSparseInnerAttention
+from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
 
 from .golden import GoldenCompressedSparseInnerAttention
 
@@ -36,6 +41,30 @@ def asc_metadata(
     from .ascendc import AscMetadataExtension
 
     return derive(cfg, AscMetadataExtension.Config)
+
+
+@override(
+    target=LightningIndexerMetadata.Config,
+    exact=True,
+    description="Precompute AscendC BF16 LightningIndexer metadata",
+)
+def asc_li_metadata(
+    cfg: LightningIndexerMetadata.Config,
+):
+    from .ascendc import AscLightningIndexerMetadata
+
+    return derive(cfg, AscLightningIndexerMetadata.Config)
+
+
+@override(
+    target=LightningIndexer.Config,
+    exact=True,
+    description="Use AscendC TND LightningIndexer",
+)
+def asc_li(cfg: LightningIndexer.Config):
+    from .ascendc import AscLightningIndexer
+
+    return derive(cfg, AscLightningIndexer.Config)
 
 
 @override(
@@ -84,6 +113,17 @@ def pypto(
         PyPTOCompressedSparseInnerAttention.Config,
         indexer_loss_coeff=indexer_loss_coeff,
     )
+
+
+@override(
+    target=LightningIndexer.Config,
+    exact=True,
+    description="Use PyPTO LightningIndexer",
+)
+def pypto_li(cfg: LightningIndexer.Config):
+    from .pypto import PyPTOLightningIndexer
+
+    return derive(cfg, PyPTOLightningIndexer.Config)
 
 
 @override(

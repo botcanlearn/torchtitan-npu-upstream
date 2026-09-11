@@ -18,8 +18,11 @@ from functools import cache
 
 import torch
 
+from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
+
 from .ascendc import (
     AscCompressedSparseInnerAttention,
+    AscCompressedVarlenMetadata,
     _SparseAttentionHooks,
 )
 
@@ -62,6 +65,44 @@ def _pypto_sparse_flash_mla_grad(*args, **kwargs):
     finally:
         if deterministic_mode:
             torch.set_deterministic_debug_mode(deterministic_mode)
+
+
+class PyPTOLightningIndexer(LightningIndexer):
+    """AscendC LI input preparation with the PyPTO LI kernel."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(LightningIndexer.Config):
+        pass
+
+    def forward(self, idx_q, idx_k, idx_w, *, attention_masks):
+        if not isinstance(attention_masks, AscCompressedVarlenMetadata):
+            raise TypeError("PyPTOLightningIndexer requires AscCompressedVarlenMetadata.")
+        plan = attention_masks.plans.get(4)
+        if plan is None or plan.cu_seqlens_cmp_k is None or plan.li_metadata is None:
+            raise ValueError("PyPTOLightningIndexer requires a ratio-4 plan with LI metadata.")
+        flat_k = idx_k.flatten(0, 1)
+        if plan.cmp_k_global_gather_indices is not None:
+            idx_k_tnd = flat_k[plan.cmp_k_global_gather_indices].unsqueeze(1).contiguous()
+        else:
+            idx_k_tnd = flat_k[: plan.n_cmp_blocks_host].unsqueeze(1).contiguous()
+        cfg = self.li_kernel_config
+        op = _load_pypto_op(_LI_MODULE, "lightning_indexer", _device_index(idx_q))
+        sparse_indices, _ = op(
+            idx_q.flatten(0, 1),
+            idx_k_tnd,
+            idx_w.flatten(0, 1).float(),
+            self.index_topk,
+            cu_seqlens_q=attention_masks.varlen.cu_seq_q,
+            cu_seqlens_k=plan.cu_seqlens_cmp_k,
+            cmp_residual_k=plan.block_remainder,
+            metadata=plan.li_metadata,
+            layout_q=cfg.layout_q,
+            layout_k=cfg.layout_k,
+            mask_mode=cfg.mask_mode,
+            cmp_ratio=cfg.cmp_ratio,
+            return_value=1,
+        )
+        return sparse_indices.reshape(idx_q.shape[0], idx_q.shape[1], 1, -1)
 
 
 _PYPTO_SPARSEATTN_HOOK = _SparseAttentionHooks(

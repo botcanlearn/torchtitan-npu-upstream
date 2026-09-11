@@ -14,8 +14,8 @@ token count ``cu_seq_q[-1]``.
 This module carries only the **common** contract — the kernel-contract
 ``plans`` (``cu_seqlens_cmp_k`` / ``block_remainder`` / ``gather_indices`` /
 ``block_positions`` / ``first_indices`` per ratio) consumed by the
-Compressor, the kernels, and every attention path.  Two further layers live
-outside this module:
+Compressor, the kernels, and every attention path.  Further layers live
+outside this module; the LI metadata provider fills ``plans[4].li_metadata``:
 
 - the **reference tier** (per-token document ids/positions, the dense
   attendability mask, the container-slot scatter, the static block
@@ -119,6 +119,9 @@ class CompressedBlockLayout:
     (previous-block) rows of these blocks are masked to zero weight.  The
     compressor contract: precomputed once per batch.  ``None`` for ratio-1
     plans."""
+
+    li_metadata: torch.Tensor | None = None
+    """Opaque ratio-4 LI metadata produced by the selected provider."""
 
     # ---- part 2: the dispatcher fields (CP only) ----
     exchange: "ExchangePlan | None" = None

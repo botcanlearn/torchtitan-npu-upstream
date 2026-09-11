@@ -14,6 +14,8 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
+from torchtitan_npu.models.common.metadata_extension import LightningIndexerKernelConfig
+
 from .metadata import CompressedKernelContract
 from .token_dispatcher import CPTokenDispatcher
 
@@ -272,3 +274,19 @@ class Indexer(Module):
         index_score = index_score.where(dense_mask.squeeze(1), float("-inf"))
         topk_scores, topk_indices = index_score.topk(k, dim=-1)
         return topk_indices.where(topk_scores.isfinite(), -1), index_score
+
+
+class LightningIndexer(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        index_topk: int
+        li_kernel_config: LightningIndexerKernelConfig = field(default_factory=LightningIndexerKernelConfig)
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.index_topk = config.index_topk
+        self.li_kernel_config = config.li_kernel_config
+
+    def forward(self, idx_q, idx_k, idx_w, *, attention_masks):
+        dense_mask = attention_masks.reference.ratios[4].dense_mask
+        return Indexer.select(idx_q, idx_k, idx_w, dense_mask, self.index_topk)[0]

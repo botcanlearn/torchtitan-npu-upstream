@@ -221,10 +221,19 @@ def _run_extension(dsv4, doc_lens, ratios, **shape):
     """The model-built metadata + the AscendC metadata extension."""
     from torchtitan_npu.override.deepseek_v4.sparse_attn.ascendc import (
         AscMetadataExtension,
+        AscLightningIndexerMetadata,
     )
 
     v = _build_varlen(doc_lens)
     md = dsv4.metadata.build_compressed_varlen_metadata(v, ratios)
+    md = AscLightningIndexerMetadata(
+        AscLightningIndexerMetadata.Config(
+            window_size=shape.get("window_size", 128),
+            index_n_heads=shape.get("index_n_heads", 8),
+            index_head_dim=shape.get("index_head_dim", 128),
+            index_topk=shape.get("index_topk", 512),
+        )
+    )(md)
     ext = AscMetadataExtension(
         AscMetadataExtension.Config(
             window_size=shape.get("window_size", 128),
@@ -743,8 +752,13 @@ def _assert_attn_matches_rounding_floor(dsv4, md, x, pos, ratio, topk):
         cmp = _pack_container(dsv4, build_compressor(dsv4, 128)(x, md), md.plans[128])
     core, golden = _build_attn_pair(dsv4, ratio, topk)
     with torch.no_grad():
-        out = core(q, swa_k, cmp, aq, ak, aw, attn_sink=sink, attention_masks=md)
-        gout = golden(q, swa_k, cmp, aq, ak, aw, attn_sink=sink, attention_masks=md)
+        sparse = None
+        if ratio == 4:
+            sparse = dsv4.compressor.Indexer.select(
+                aq, ak, aw, md.reference.ratios[4].dense_mask, topk
+            )[0]
+        out = core(q, swa_k, cmp, aq, ak, aw, attn_sink=sink, sparse_indices=sparse, attention_masks=md)
+        gout = golden(q, swa_k, cmp, aq, ak, aw, attn_sink=sink, sparse_indices=sparse, attention_masks=md)
     assert out.shape == (1, 64, 3, HD) and torch.isfinite(out).all()
     _assert_rounding_floor((out - gout).abs(), gout.abs().max().item())
 
@@ -789,6 +803,7 @@ def test_attention_numerics_ratio4_zero_blocks(dsv4):
             torch.randn(1, 2, 8),
             torch.randn(1, 8, 4),
             attn_sink=torch.randn(3),
+            sparse_indices=torch.zeros((1, 8, 4), dtype=torch.long),
             attention_masks=md_s,
         )
     assert out_s.shape == (1, 8, 3, HD) and torch.isfinite(out_s).all()

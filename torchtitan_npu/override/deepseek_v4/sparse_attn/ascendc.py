@@ -37,13 +37,19 @@ from cann_ops_transformer import (
 )
 from torchtitan.models.common.attention import VarlenMetadata
 
-from torchtitan_npu.models.common.metadata_extension import MetadataExtension
+from torchtitan_npu.models.common.metadata_extension import (
+    LightningIndexerKernelConfig,
+    LightningIndexerMetadata,
+    MetadataExtension,
+)
 from torchtitan_npu.models.deepseek_v4.attention import CompressedSparseInnerAttention
+from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
 from torchtitan_npu.models.deepseek_v4.metadata import (
     CompressedBlockLayout,
     CompressedVarlenMetadata,
     register_pytree_node_for_dataclass,
 )
+from torchtitan_npu.models.deepseek_v4.reference import ReferenceCompressedVarlenMetadata
 from torchtitan_npu.override import _IS_A5
 
 _LAYOUT = "TND"
@@ -134,6 +140,7 @@ def _fill_asc_metadata(
     index_head_dim: int,
     index_topk: int,
     window_size: int,
+    li_kernel_config: LightningIndexerKernelConfig,
     cu_seqlens_ori_kv: torch.Tensor | None = None,
 ) -> None:
     """Compute the ``*_metadata`` kernel outputs stored in ``record``.
@@ -172,22 +179,9 @@ def _fill_asc_metadata(
     grad_kwargs.pop("ori_topk_length")
     grad_kwargs.pop("cmp_topk_length")
     record.smla_grad_metadata = sparse_flash_mla_grad_metadata(num_heads, 1, head_dim, **grad_kwargs)
-    if ratio != 4:
+    if ratio != li_kernel_config.cmp_ratio:
         return
 
-    record.li_metadata = lightning_indexer_metadata(
-        index_n_heads,
-        1,
-        index_head_dim,
-        index_topk,
-        cu_seqlens_q=varlen.cu_seq_q,
-        cu_seqlens_k=plan.cu_seqlens_cmp_k,
-        cmp_residual_k=plan.block_remainder,
-        layout_q=_LAYOUT,
-        layout_k=_LAYOUT,
-        mask_mode=_CMP_MASK_MODE,
-        cmp_ratio=4,
-    )
     record.slig_metadata = sparse_lightning_indexer_kl_loss_grad_metadata(
         index_n_heads,
         1,
@@ -196,10 +190,10 @@ def _fill_asc_metadata(
         cu_seqlens_k=plan.cu_seqlens_cmp_k,
         cmp_residual_k=plan.block_remainder,
         topk=index_topk,
-        layout_q=_LAYOUT,
-        layout_k=_LAYOUT,
-        mask_mode=_CMP_MASK_MODE,
-        cmp_ratio=4,
+        layout_q=li_kernel_config.layout_q,
+        layout_k=li_kernel_config.layout_k,
+        mask_mode=li_kernel_config.mask_mode,
+        cmp_ratio=li_kernel_config.cmp_ratio,
     )
 
 
@@ -219,6 +213,7 @@ def _mark_dynamic(metadata: AscCompressedVarlenMetadata) -> None:
             "gather_indices",
             "block_positions",
             "first_indices",
+            "li_metadata",
             "compressed_rows",
             "cmp_k_global_gather_indices",
         ):
@@ -242,6 +237,43 @@ def _mark_dynamic(metadata: AscCompressedVarlenMetadata) -> None:
         # experiments/graph_trainer/dynamic_shapes.py); the underscore name is
         # deliberate and must stay off the codecheck protected-member list.
         setattr(tensor, "_dynamo_unbacked_indices", {0})  # noqa: B010
+
+
+class AscLightningIndexerMetadata(LightningIndexerMetadata):
+    @dataclass(kw_only=True, slots=True)
+    class Config(LightningIndexerMetadata.Config):
+        window_size: int  # pyrefly: ignore [bad-override]
+        index_n_heads: int  # pyrefly: ignore [bad-override]
+        index_head_dim: int  # pyrefly: ignore [bad-override]
+        index_topk: int  # pyrefly: ignore [bad-override]
+
+    def __call__(self, metadata) -> CompressedVarlenMetadata:
+        cfg = cast("AscLightningIndexerMetadata.Config", self.config)
+        for ratio, plan in metadata.plans.items():
+            if ratio > 1 and plan.gather_indices.numel() == 0:
+                raise ValueError(
+                    f"batch has no complete compression block for ratio={ratio}; "
+                    "doc-packed sequences must be long enough to produce at least "
+                    "one full block per sequence."
+                )
+        kernel = cfg.li_kernel_config
+        plan = metadata.plans.get(kernel.cmp_ratio)
+        if plan is None:
+            return metadata
+        plan.li_metadata = lightning_indexer_metadata(
+            cfg.index_n_heads,
+            1,
+            cfg.index_head_dim,
+            cfg.index_topk,
+            cu_seqlens_q=metadata.varlen.cu_seq_q,
+            cu_seqlens_k=plan.cu_seqlens_cmp_k,
+            cmp_residual_k=plan.block_remainder,
+            layout_q=kernel.layout_q,
+            layout_k=kernel.layout_k,
+            mask_mode=kernel.mask_mode,
+            cmp_ratio=kernel.cmp_ratio,
+        )
+        return metadata
 
 
 class AscMetadataExtension(MetadataExtension):
@@ -293,8 +325,12 @@ class AscMetadataExtension(MetadataExtension):
                 index_head_dim=cfg.index_head_dim,
                 index_topk=cfg.index_topk,
                 window_size=cfg.window_size,
+                li_kernel_config=cfg.li_kernel_config,
                 cu_seqlens_ori_kv=ori_cu,
             )
+            record.li_metadata = p.li_metadata
+            if ratio == cfg.li_kernel_config.cmp_ratio and record.li_metadata is None:
+                raise ValueError("LI metadata provider did not populate plan.li_metadata.")
             asc_plans[ratio] = record
         # ``plans[ratio]`` carries the full per-ratio plan: part 1 (the
         # unified compressor/kernel contract) and part 2 (the dispatcher
@@ -306,9 +342,48 @@ class AscMetadataExtension(MetadataExtension):
             plans=plans,
             window=window,
             asc_plans=asc_plans,
+            seq_len_host=metadata.seq_len_host,
         )
         _mark_dynamic(result)
         return result
+
+
+class AscLightningIndexer(LightningIndexer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(LightningIndexer.Config):
+        pass
+
+    def forward(self, idx_q, idx_k, idx_w, *, attention_masks):
+        if not isinstance(attention_masks, AscCompressedVarlenMetadata):
+            raise TypeError("AscLightningIndexer requires AscCompressedVarlenMetadata.")
+        plan = attention_masks.plans.get(4)
+        if plan is None or plan.cu_seqlens_cmp_k is None:
+            raise ValueError("AscLightningIndexer requires a ratio-4 plan.")
+        flat_k = idx_k.flatten(0, 1)
+        if plan.cmp_k_global_gather_indices is not None:
+            idx_k_tnd = flat_k[plan.cmp_k_global_gather_indices].unsqueeze(1).contiguous()
+        else:
+            idx_k_tnd = flat_k[: plan.n_cmp_blocks_host].unsqueeze(1).contiguous()
+        li_metadata = plan.li_metadata
+        if li_metadata is None:
+            raise ValueError("AscLightningIndexer requires plan.li_metadata.")
+        kernel_cfg = self.li_kernel_config
+        sparse_indices, _ = torch.ops.cann_ops_transformer.lightning_indexer(
+            idx_q.flatten(0, 1),
+            idx_k_tnd,
+            idx_w.flatten(0, 1).float(),
+            self.index_topk,
+            cu_seqlens_q=attention_masks.varlen.cu_seq_q,
+            cu_seqlens_k=plan.cu_seqlens_cmp_k,
+            cmp_residual_k=plan.block_remainder,
+            metadata=li_metadata,
+            layout_q=kernel_cfg.layout_q,
+            layout_k=kernel_cfg.layout_k,
+            mask_mode=kernel_cfg.mask_mode,
+            cmp_ratio=kernel_cfg.cmp_ratio,
+            return_value=1,
+        )
+        return sparse_indices.reshape(idx_q.shape[0], idx_q.shape[1], 1, -1)
 
 
 def _compute_li_loss(
@@ -628,10 +703,11 @@ class AscCompressedSparseInnerAttention(CompressedSparseInnerAttention):
         idx_q=None,
         idx_k=None,
         idx_w=None,
-        attn_sink: torch.Tensor | None = None,
         *,
-        attention_masks=None,
-    ):
+        attn_sink: torch.Tensor | None = None,
+        sparse_indices=None,
+        attention_masks: ReferenceCompressedVarlenMetadata | None = None,
+    ) -> torch.Tensor:
         hooks = self.hooks
         if not isinstance(attention_masks, AscCompressedVarlenMetadata):
             raise TypeError("asc requires AscCompressedVarlenMetadata attention masks.")
@@ -663,28 +739,15 @@ class AscCompressedSparseInnerAttention(CompressedSparseInnerAttention):
             # assembles the per-segment packed stream.
             cmp_k = self._assemble_tnd(cmp_k, plan)
 
-        cmp_sparse_indices = None
+        cmp_sparse_indices = None if sparse_indices is None else sparse_indices.flatten(0, 1)
         if self.compress_ratio == 4:
+            if cmp_sparse_indices is None:
+                raise ValueError("ratio-4 asc requires sparse_indices.")
             if idx_q is None or idx_k is None or idx_w is None:
-                raise ValueError("ratio-4 asc requires all LI projection tensors.")
+                raise ValueError("ratio-4 asc requires all LI projection tensors for backward.")
             idx_q = idx_q.flatten(0, 1)
             idx_k = self._assemble_tnd(idx_k, plan)
             idx_w = idx_w.flatten(0, 1)
-            cmp_sparse_indices, _ = hooks.lightning_indexer(
-                idx_q,
-                idx_k,
-                idx_w.float(),
-                self.index_topk,
-                cu_seqlens_q=metadata.varlen.cu_seq_q,
-                cu_seqlens_k=plan.cu_seqlens_cmp_k,
-                cmp_residual_k=plan.block_remainder,
-                metadata=npu.li_metadata,
-                layout_q=_LAYOUT,
-                layout_k=_LAYOUT,
-                mask_mode=_CMP_MASK_MODE,
-                cmp_ratio=4,
-                return_value=1,
-            )
 
         indexer_loss_coeff = float(self.indexer_loss_coeff) if self.training else 0.0
         indexer_loss_accumulator = self._indexer_loss_acc

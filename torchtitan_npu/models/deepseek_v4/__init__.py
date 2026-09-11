@@ -24,10 +24,11 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
+from torchtitan_npu.models.common.metadata_extension import LightningIndexerMetadata
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
-from .attention import Attention, CompressedSparseInnerAttention
-from .compressor import Compressor, Indexer
+from .attention import Attention, CompressedSparseAttention, CompressedSparseInnerAttention
+from .compressor import Compressor, Indexer, LightningIndexer
 from .mhc import HcHead, HcPost, HcPre
 from .model import (
     DeepSeekV4Model,
@@ -195,6 +196,7 @@ def _make_v4_attn_config(
     softmax_scale = head_dim**-0.5
     compressor_cfg = None
     indexer_cfg = None
+    lightning_indexer_cfg = None
 
     if compress_ratio == 4:
         coff = 2  # 1 + overlap (overlap=True when compress_ratio==4)
@@ -217,6 +219,7 @@ def _make_v4_attn_config(
             norm_eps=norm_eps,
             rope=rope,
         )
+        lightning_indexer_cfg = LightningIndexer.Config(index_topk=index_topk)
     elif compress_ratio > 1:
         coff = 1  # no overlap
         compressor_cfg = _make_compressor_config(
@@ -234,6 +237,10 @@ def _make_v4_attn_config(
         softmax_scale=softmax_scale,
         index_topk=index_topk,
     )
+    compressed_sparse_attention_cfg = CompressedSparseAttention.Config(
+        lightning_indexer=lightning_indexer_cfg,
+        inner_attention=inner_attention_cfg,
+    )
 
     return Attention.Config(
         n_heads=n_heads,
@@ -244,6 +251,7 @@ def _make_v4_attn_config(
         compress_ratio=compress_ratio,
         norm_eps=norm_eps,
         inner_attention=inner_attention_cfg,
+        compressed_sparse_attention=compressed_sparse_attention_cfg,
         rope=dataclasses.replace(rope),
         wq_a=Linear.Config(
             in_features=dim,
@@ -486,11 +494,10 @@ def _build_mtp_layers(
         attention.compress_ratio = 1
         attention.compressor = None
         attention.indexer = None
+        # MTP attention is dense; disable the prebuilt LI wrapper branch too.
+        attention.compressed_sparse_attention.lightning_indexer = None
         attention.rope = copy.deepcopy(rope)
-        inner_attention = cast(
-            "CompressedSparseInnerAttention.Config",
-            attention.inner_attention,
-        )
+        inner_attention = attention.compressed_sparse_attention.inner_attention
         inner_attention.compress_ratio = 1
 
         moe = copy.deepcopy(inner_cfg.moe)
@@ -660,6 +667,12 @@ def _make_v4_config(
             block_size=block_size,
             num_heads=n_heads,
             head_dim=head_dim,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+        ),
+        lightning_indexer_metadata=LightningIndexerMetadata.Config(
+            window_size=window_size,
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,

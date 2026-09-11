@@ -20,7 +20,10 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
-from torchtitan_npu.models.common.metadata_extension import MetadataExtension
+from torchtitan_npu.models.common.metadata_extension import (
+    LightningIndexerMetadata,
+    MetadataExtension,
+)
 
 from .metadata import CompressedVarlenMetadata, build_compressed_varlen_metadata
 from .mhc import HcPost, HcPre
@@ -84,6 +87,9 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
         window_size: int
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         metadata_extension: MetadataExtension.Config = field(default_factory=MetadataExtension.Config)
+        lightning_indexer_metadata: LightningIndexerMetadata.Config = field(
+            default_factory=LightningIndexerMetadata.Config
+        )
 
         def update_from_config(self, *, config, **kwargs):
             if hasattr(config, "training"):
@@ -140,7 +146,7 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
             for layers in (self.layers, self.mtp_layers):
                 for layer in layers:
                     attention = layer.attention
-                    inner_attention = attention.inner_attention
+                    inner_attention = attention.compressed_sparse_attention.inner_attention
                     num_flops_per_token += (
                         6 * attention.n_heads * (2 * attention.head_dim) * min(seq_len, inner_attention.window_size)
                     )
@@ -182,6 +188,7 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
         self.block_size = cfg.block_size
 
         self._metadata_extension = cfg.metadata_extension.build()
+        self._lightning_indexer_metadata = cfg.lightning_indexer_metadata.build()
 
     def build_attention_masks(
         self,
@@ -232,6 +239,8 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
             extra_kwargs["positions"] = positions
         if mtp_batch is not None:
             extra_kwargs["mtp_batch"] = mtp_batch
+        if self._lightning_indexer_metadata is not None:
+            common = self._lightning_indexer_metadata(common)
         if self._metadata_extension is not None:
             common = self._metadata_extension(common)
         extra_kwargs["attention_masks"] = common

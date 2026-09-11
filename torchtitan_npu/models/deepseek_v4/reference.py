@@ -263,5 +263,7 @@ class ReferenceMetadataExtension(MetadataExtension):
         return ReferenceCompressedVarlenMetadata(
             varlen=metadata.varlen,
             plans=metadata.plans,
+            window=metadata.window,
+            seq_len_host=metadata.seq_len_host,
             reference=reference,
         )

@@ -19,7 +19,7 @@ from torchtitan.protocols.module import Module
 
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
-from .compressor import Compressor, Indexer
+from .compressor import Compressor, Indexer, LightningIndexer
 from .metadata import CompressedVarlenMetadata
 from .reference import ReferenceCompressedVarlenMetadata
 from .token_dispatcher import CPTokenDispatcher
@@ -178,8 +178,9 @@ class CompressedSparseInnerAttention(FlexAttention):
         idx_q=None,
         idx_k=None,
         idx_w=None,
-        attn_sink: torch.Tensor | None = None,
         *,
+        attn_sink: torch.Tensor | None = None,
+        sparse_indices=None,
         attention_masks: ReferenceCompressedVarlenMetadata | None = None,
     ) -> torch.Tensor:
         if not isinstance(attention_masks, CompressedVarlenMetadata):
@@ -197,23 +198,15 @@ class CompressedSparseInnerAttention(FlexAttention):
 
         topk_indices = None
         if self.compress_ratio == 4:
-            if idx_q is None or idx_k is None or idx_w is None:
+            if sparse_indices is None:
+                raise ValueError("CompressedSparseInnerAttention requires sparse_indices when compress_ratio=4")
+            if sparse_indices.ndim == 4 and sparse_indices.shape[2] == 1:
+                sparse_indices = sparse_indices.squeeze(2)
+            if sparse_indices.ndim != 3:
                 raise ValueError(
-                    "CompressedSparseInnerAttention requires idx_q, idx_k, and idx_w when compress_ratio=4"
+                    "CompressedSparseInnerAttention expects sparse_indices with shape [B, L, K] or [B, L, 1, K]."
                 )
-            if metadata.plans.get(4) is None:
-                raise ValueError(
-                    "CompressedSparseInnerAttention requires the ratio-4 compression layout for indexer selection."
-                )
-            topk_indices, _ = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                metadata.reference.ratios[  # pyrefly: ignore [bad-argument-type]
-                    4
-                ].dense_mask,
-                self.index_topk,
-            )
+            topk_indices = sparse_indices
 
         kv = swa_k.unsqueeze(2)
         if cmp_k is not None:
@@ -238,6 +231,38 @@ class CompressedSparseInnerAttention(FlexAttention):
             score_mod=v4_sink_score_mod,
             scale=self.softmax_scale,
             enable_gqa=True,
+        )
+
+
+class CompressedSparseAttention(Module):
+    """Thin CP boundary containing LI and the sparse attention core."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        lightning_indexer: LightningIndexer.Config | None
+        inner_attention: CompressedSparseInnerAttention.Config
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.lightning_indexer = config.lightning_indexer.build() if config.lightning_indexer is not None else None
+        self.inner_attention = config.inner_attention.build()
+
+    def forward(
+        self, q, swa_k, cmp_k=None, *, idx_q=None, idx_k=None, idx_w=None, attn_sink=None, attention_masks=None
+    ):
+        sparse_indices = None
+        if self.lightning_indexer is not None:
+            sparse_indices = self.lightning_indexer(idx_q, idx_k, idx_w, attention_masks=attention_masks)
+        return self.inner_attention(
+            q,
+            swa_k,
+            cmp_k,
+            idx_q=idx_q,
+            idx_k=idx_k,
+            idx_w=idx_w,
+            sparse_indices=sparse_indices,
+            attn_sink=attn_sink,
+            attention_masks=attention_masks,
         )
 
 
@@ -268,6 +293,7 @@ class Attention(BaseAttention):
         # ratio-4 CSA layers); the registry passes ``None`` otherwise.
         compressor: Compressor.Config | None
         indexer: Indexer.Config | None
+        compressed_sparse_attention: CompressedSparseAttention.Config
 
         # The CP token dispatcher (the RoutedExperts mirror): a submodule of
         # the attention, wired once by ``Attention.parallelize``.
@@ -299,8 +325,7 @@ class Attention(BaseAttention):
 
         self.compressor = cfg.compressor.build() if cfg.compressor is not None else None
         self.indexer = cfg.indexer.build() if cfg.indexer is not None else None
-
-        self.inner_attention = cfg.inner_attention.build()
+        self.compressed_sparse_attention = cfg.compressed_sparse_attention.build()
 
     def parallelize(self, parallel_dims) -> None:
         """Parallelize the attention, then wire the CP mesh on the
@@ -320,8 +345,8 @@ class Attention(BaseAttention):
         ``swa_k`` rows (the window plan) into the packed ori stream, the
         compressors gather their own block rows internally, and ``select``
         packs the pooled streams into the padded containers.  The
-        containers' all-gather is declarative — the core's
-        ``ShardingConfig`` (``cp: S(1) -> R``) emits it at the core
+        containers' all-gather is declarative — the wrapper's
+        ``ShardingConfig`` (``cp: S(1) -> R``) emits it at the wrapper
         boundary.
         """
         window = attention_masks.window
@@ -372,13 +397,13 @@ class Attention(BaseAttention):
         # Inner-attention positional contract: absent components are None.
         #   sink + swa_k always; + cmp_k when compress_ratio > 1;
         #   + idx_q/idx_k/idx_w when compress_ratio == 4 (indexer layer).
-        o = self.inner_attention(
+        o = self.compressed_sparse_attention(
             q,
             swa_k,
             cmp_k,
-            idx_q,
-            idx_k,
-            idx_w,
+            idx_q=idx_q,
+            idx_k=idx_k,
+            idx_w=idx_w,
             attn_sink=self.attn_sink,
             attention_masks=attention_masks,
         )

@@ -54,7 +54,7 @@ def dense_token_ids_sequence_parallel_placement() -> SpmdLayout:
     )
 
 
-def set_compressed_sparse_attention_sharding(inner_attention_cfg) -> None:
+def set_compressed_sparse_attention_sharding(wrapper_cfg) -> None:
     q = dense_activation_placement(tp=spmd.S(2))
     replicated_activation = dense_activation_placement(tp=spmd.R)
 
@@ -84,9 +84,36 @@ def set_compressed_sparse_attention_sharding(inner_attention_cfg) -> None:
         _attn_sink_placement,
     ]
 
-    inner_attention_cfg.sharding_config = ShardingConfig(
+    wrapper_cfg.sharding_config = ShardingConfig(
         in_src_shardings=input_shardings,
         in_dst_shardings=output_shardings,
+        out_src_shardings=q,
+        out_dst_shardings=q,
+    )
+
+    # The core keeps only its private state placement and backward map.  The
+    # CP all-gather for LI/core inputs belongs exclusively to the wrapper.
+    wrapper_cfg.inner_attention.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "q": q,
+            "swa_k": replicated_activation,
+            "cmp_k": replicated_activation,
+            "idx_q": replicated_activation,
+            "idx_k": replicated_activation,
+            "idx_w": replicated_activation,
+            "attn_sink": _attn_sink_placement,
+        },
+        in_dst_shardings={
+            "q": q,
+            "swa_k": replicated_activation,
+            "cmp_k": replicated_activation,
+            "idx_q": replicated_activation,
+            "idx_k": replicated_activation,
+            "idx_w": replicated_activation,
+            "attn_sink": _attn_sink_placement,
+        },
+        # local_map requires the core output placement even though its input
+        # CP conversion is owned by the enclosing wrapper.
         out_src_shardings=q,
         out_dst_shardings=q,
         # The AscendC indexer-loss accumulator is a per-rank fp32 scalar buffer;
@@ -115,7 +142,8 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         state_shardings={"attn_sink": _attn_sink_placement},
     )
 
-    set_compressed_sparse_attention_sharding(at.inner_attention)
+    # The wrapper is the CP boundary for both LI and sparse attention.
+    set_compressed_sparse_attention_sharding(at.compressed_sparse_attention)
 
     # Attention submodule configs are explicit fields, so their parameter
     # layouts can be assigned before construction.
