@@ -111,12 +111,7 @@ class Compressor(Module):
         # aot_autograd recompute and its data-dependent guard trips make_fx.
         prev_idx = (torch.arange(n_blocks, device=state.device) - 1).clamp_min(0)
         state_a = state[prev_idx, :, :head_dim]
-        first_mask = torch.index_fill(
-            torch.zeros(n_blocks, dtype=torch.bool, device=state.device),
-            0,
-            first_indices,
-            True,
-        )
+        first_mask = torch.zeros(n_blocks, dtype=torch.bool, device=state.device).scatter(0, first_indices, True)
         state_a = torch.where(first_mask.view(-1, 1, 1), state.new_full((1,), value), state_a)
         state_b = state[:, :, head_dim:]
         return torch.cat([state_a, state_b], dim=1)
