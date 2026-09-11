@@ -6,13 +6,15 @@
 """DeepSeek-V4 MHC overrides (registry-facing module).
 
 The CANN fused implementations live in ``ascendc.py``, the hand-written
-Triton kernels in ``triton.py``, and the TileLang fused HcHead in
-``tilelang.py``; the registrations are defined here so the override paths stay
-``override.deepseek_v4.mhc.{asc_hc_pre, asc_hc_post, triton_hc_pre,
-triton_hc_post, triton_hc_head, tilelang_hc_head}``.  The HcHead entries
-(``triton_hc_head`` / ``tilelang_hc_head``) target the same ``HcHead.Config``
-node, so only one of them can be enabled at a time; the HcPre/HcPost entries
-target separate nodes and may coexist with a HcHead override.
+Triton kernels in ``triton.py``, and the TileLang HcHead/HcPost implementations
+in ``tilelang.py``; the registrations are defined here so the override paths
+stay ``override.deepseek_v4.mhc.{asc_hc_pre, asc_hc_post, triton_hc_pre,
+triton_hc_post, triton_hc_head, tilelang_hc_head, tilelang_hc_post}``.
+The HcHead entries (``triton_hc_head`` / ``tilelang_hc_head``) target the same
+``HcHead.Config`` node, while the HcPost entries (``asc_hc_post`` /
+``triton_hc_post`` / ``tilelang_hc_post``) target the same ``HcPost.Config``
+node. Only one entry from each family can be enabled at a time; HcPre, HcPost
+and HcHead overrides target separate nodes and may coexist across families.
 """
 
 from torchtitan.config import derive, override
@@ -20,7 +22,7 @@ from torchtitan.config import derive, override
 from torchtitan_npu.models.deepseek_v4.mhc import HcHead, HcPost, HcPre
 
 from .ascendc import AscHcPost, AscHcPre
-from .tilelang import TilelangHcHead
+from .tilelang import TilelangHcHead, TilelangHcPost
 from .triton import TritonHcHead, TritonHcPost, TritonHcPre
 
 
@@ -40,6 +42,15 @@ def asc_hc_pre(cfg: HcPre.Config) -> AscHcPre.Config:
 )
 def asc_hc_post(cfg: HcPost.Config) -> AscHcPost.Config:
     return derive(cfg, AscHcPost.Config)
+
+
+@override(
+    target=HcPost.Config,
+    exact=True,
+    description="DeepSeek-V4 HcPost backed by external TileKernels mhc_post",
+)
+def tilelang_hc_post(cfg: HcPost.Config) -> TilelangHcPost.Config:
+    return derive(cfg, TilelangHcPost.Config)
 
 
 @override(

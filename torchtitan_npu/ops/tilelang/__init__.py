@@ -11,6 +11,7 @@ composition over it lives in
 ``torchtitan_npu/override/deepseek_v4/mhc/tilelang.py``.
 """
 
-__all__ = ["mhc_head_compute_mix_tilelang"]
+__all__ = ["mhc_head_compute_mix_tilelang", "tilelang_mhc_post"]
 
 from .head_compute_mix import mhc_head_compute_mix_tilelang
+from .mhc_post import tilelang_mhc_post
