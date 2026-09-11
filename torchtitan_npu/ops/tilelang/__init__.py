@@ -5,14 +5,14 @@
 
 """TileLang fused DeepSeek-V4 kernels exposed as torch custom operators.
 
-The head-compute-mix kernel is registered via ``torch.library.custom_op``
-(with ``register_fake`` and ``register_autograd``); the differentiable
-composition over it lives in
-``torchtitan_npu/override/deepseek_v4/mhc/tilelang.py``.
+The kernels are registered via ``torch.library.custom_op``. Their fake
+implementations keep ``torch.compile``/AOT eager graph capture independent of
+the optional TileLang runtime package.
 """
 
-__all__ = ["mhc_head_compute_mix_tilelang", "tilelang_mhc_post", "tilelang_mhc_pre"]
+__all__ = ["mhc_head_compute_mix_tilelang", "tilelang_mhc_post", "tilelang_mhc_pre", "tilelang_swiglu"]
 
 from .head_compute_mix import mhc_head_compute_mix_tilelang
 from .mhc_post import tilelang_mhc_post
 from .mhc_pre import tilelang_mhc_pre
+from .swiglu import tilelang_swiglu
