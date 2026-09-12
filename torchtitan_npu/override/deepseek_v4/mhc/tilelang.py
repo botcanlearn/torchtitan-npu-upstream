@@ -15,9 +15,16 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor
+from torch.nn import functional as F
 
 from torchtitan_npu.models.deepseek_v4.mhc import HcHead, HcPost, HcPre
-from torchtitan_npu.ops.tilelang import mhc_head_compute_mix_tilelang, tilelang_mhc_post, tilelang_mhc_pre
+from torchtitan_npu.ops.tilelang import (
+    mhc_head_compute_mix_tilelang,
+    tilelang_mhc_head_compute_mix_a5,
+    tilelang_mhc_post,
+    tilelang_mhc_pre,
+)
+from torchtitan_npu.override import _IS_A5
 
 
 def _to_local_tensor(tensor: Tensor) -> Tensor:
@@ -36,8 +43,9 @@ class TilelangHcHead(HcHead):
         # ``HcHead`` only uses hc_mult to size its parameters and drops it; the
         # TileLang kernel needs it as ``num_stream``.
         self.hc_mult = config.hc_mult
+        self._use_a5_backend = _IS_A5
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _forward_tilelang(self, x: Tensor) -> Tensor:
         if isinstance(x, DTensor):
             raise ValueError(
                 "TilelangHcHead expects local tensor input; apply HcHeadParallelStyle with local TP input."
@@ -73,6 +81,35 @@ class TilelangHcHead(HcHead):
             y = y.squeeze(1)  # [T, 1, out_features] -> [T, out_features]
 
         return y
+
+    def _forward_a5(self, x: torch.Tensor) -> torch.Tensor:
+        if isinstance(x, DTensor) or any(
+            isinstance(parameter, DTensor) for parameter in (self.hc_fn, self.hc_base, self.hc_scale)
+        ):
+            raise ValueError("A5 TileLang HcHead does not support DTensor; use a local-tensor path")
+        if x.device.type != "npu":
+            raise ValueError(f"A5 TileLang HcHead requires NPU input, got {x.device}")
+        if x.ndim != 4:
+            raise ValueError(f"A5 TileLang HcHead expects [B,S,N,H], got {tuple(x.shape)}")
+        if self.hc_mult != 4 or x.shape[-2] != self.hc_mult:
+            raise ValueError("A5 TileLang HcHead currently supports hc_mult=4 and N=4")
+        if x.shape[-1] % 64 != 0:
+            raise ValueError("A5 TileLang HcHead requires hidden size divisible by 64")
+        if x.dtype != torch.bfloat16 or not x.is_contiguous():
+            raise ValueError("A5 TileLang HcHead requires contiguous BF16 input")
+
+        shape, dtype = x.size(), x.dtype
+        x = x.flatten(2).float()
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
+        mixes = tilelang_mhc_head_compute_mix_a5(
+            mixes.contiguous(), self.hc_scale.float(), self.hc_base.float(), self.eps
+        )
+        y = torch.sum(mixes.unsqueeze(-1) * x.reshape(shape), dim=2)
+        return y.to(dtype)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward_a5(x) if self._use_a5_backend else self._forward_tilelang(x)
 
 
 class TilelangHcPost(HcPost):

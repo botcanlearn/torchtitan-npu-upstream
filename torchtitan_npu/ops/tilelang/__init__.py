@@ -12,6 +12,7 @@ the optional TileLang runtime package.
 
 __all__ = [
     "mhc_head_compute_mix_tilelang",
+    "tilelang_mhc_head_compute_mix_a5",
     "tilelang_mhc_post",
     "tilelang_mhc_pre",
     "tilelang_swiglu",
@@ -19,6 +20,7 @@ __all__ = [
 ]
 
 from .head_compute_mix import mhc_head_compute_mix_tilelang
+from .head_compute_mix_a5 import tilelang_mhc_head_compute_mix_a5
 from .mhc_post import tilelang_mhc_post
 from .mhc_pre import tilelang_mhc_pre
 from .swiglu import tilelang_swiglu
