@@ -88,7 +88,7 @@ class OptimizerConfig(OptimizersContainer.Config):
                     "betas": (self.beta1, self.beta2),
                     "eps": self.eps,
                     "weight_decay": self.weight_decay,
-                    "fused": False,
+                    "fused": True,
                     "foreach": False,
                 },
             ),

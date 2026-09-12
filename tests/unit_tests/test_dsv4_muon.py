@@ -8,6 +8,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from torchtitan.distributed.flex_shard import BlockShard
+
+from torchtitan_npu.models.deepseek_v4 import model_registry
+from torchtitan_npu.models.deepseek_v4.config_registry import _dsv4_muon_profile
+
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -65,8 +70,7 @@ def test_dsv4_muon_profile_uses_validated_phase_one_policy():
     # The DSV4 profile is the single unified active Muon policy.
     assert "include_mtp_projections" in source
     assert 'f"mtp_layers.{layer_id}"' in source
-    assert "e_proj.weight" in source
-    assert "h_proj.weight" in source
+    assert 'mtp_projections = ("e_proj", "h_proj")' in source
     assert "compressor.ape" in source
     assert "deepseek_v4_flash_43layers_16experts_muon_indexer" not in file_source
     for experimental_recipe in (
@@ -96,10 +100,35 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
         "compressor",
         "routed_experts",
         "router",
-        "hc_attn_pre|hc_ffn_pre",
-        "e_proj|h_proj",
+        'hc_pre_modules = ("hc_attn_pre", "hc_ffn_pre")',
+        'mtp_projections = ("e_proj", "h_proj")',
     ):
         assert unified_muon_parameter in active_source
+
+
+def test_dsv4_muon_indexer_query_uses_per_head_block_sharding():
+    model_spec = model_registry("debugmodel")
+    profile = _dsv4_muon_profile(model_spec)
+    compute_shardings = profile.optimizer_factory_kwargs["DistMuon"][
+        "compute_sharding_by_fqn"
+    ]
+
+    main_query_layout = compute_shardings["layers.2.attention.wq_b.weight"]
+    indexer_query_layout = compute_shardings[
+        "layers.2.attention.indexer.wq_b.weight"
+    ]
+
+    main_dp_sharding = main_query_layout.shardings_by_mesh_axis["dp_shard"]
+    assert isinstance(main_dp_sharding, BlockShard)
+    assert main_dp_sharding.dim == 0
+    assert main_dp_sharding.block_size == model_spec.model.layers[2].attention.head_dim
+
+    indexer_dp_sharding = indexer_query_layout.shardings_by_mesh_axis["dp_shard"]
+    assert isinstance(indexer_dp_sharding, BlockShard)
+    assert indexer_dp_sharding.dim == 0
+    indexer = model_spec.model.layers[2].attention.indexer
+    assert indexer is not None
+    assert indexer_dp_sharding.block_size == indexer.index_head_dim
 
 
 def test_graph_trainer_conversion_strips_only_npu_top_level_extension():

@@ -1,27 +1,22 @@
 # DeepSeek-V4 Muon 优化器
 
-本文说明当前 `master` 分支中的 Muon 方案、使用方法和能力边界。
-实现以 TorchTitan 上游 `DistMuon`/FlexShard 为核心；上游 FlexShard 的
-`ComputeLayout`、`Owned`、`BlockShard`、bucket 和 storage-to-compute 语义，参见
-[TorchTitan FlexShard README](https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/flex_shard/README.md)。
+本文说明当前实现中的 Muon 方案、使用方法和能力边界。实现以 TorchTitan 上游
+`DistMuon`/FlexShard 为核心；上游的 `ComputeLayout`、`Owned`、`BlockShard`、bucket
+和 storage-to-compute 语义参见 [TorchTitan FlexShard README](https://github.com/pytorch/torchtitan/blob/main/torchtitan/distributed/flex_shard/README.md)。
 
 ## 当前方案
 
-DSV4 使用一个混合优化器容器：匹配 Muon 规则的矩阵参数交给
-`DistMuon`，其余参数交给 AdamW。配置入口是
-`torchtitan_npu/models/deepseek_v4/config_registry.py` 中的
-`_dsv4_muon_profile()`。该 profile 只承载模型参数匹配、FlexShard compute
-layout 和 bucket 元数据；所有可调优化器标量由 CLI schema 提供。
+DSV4 使用混合优化器容器：匹配 Muon 规则的二维矩阵参数交给 `DistMuon`，其余参数交给
+AdamW。`torchtitan_npu/models/deepseek_v4/config_registry.py` 中的
+`_dsv4_optimizer_config()` 提供常规 DSV4 optimizer schema；
+`_dsv4_muon_profile()` 提供参数匹配、FlexShard compute layout 和 bucket 元数据。
+`--optimizer.name Muon` 才 materialize 出 DistMuon 与 AdamW fallback 两组。
 
-Muon 参数主要包括：
+Muon 覆盖 attention 投影、compressor/indexer 投影、shared/routed experts、router、
+mHC 的 `hc_fn` 和全局 `hc_head.hc_fn`，以及对应的二维 `ape` 参数。embedding、输出头、
+归一化和其他 1D 参数落入 AdamW 组。
 
-- attention 投影、压缩器和 indexer 投影；
-- shared experts、routed experts 和 router；
-- mHC 的 `hc_fn` 以及全局 `hc_head.hc_fn`。
-- 主干 compressor 与 indexer compressor 的二维 `ape` 参数。
-
-未匹配的参数（例如 embedding、输出头、归一化参数和其他 1D 参数）落入 AdamW
-组。Muon 使用上游 Newton-Schulz 实现；DSV4 recipe 的默认 CLI 值为：
+DSV4 recipe 的默认 Muon 参数为：
 
 ```text
 momentum=0.95
@@ -31,20 +26,21 @@ adjust_lr_fn="match_rms_adamw"
 foreach=False
 ```
 
-`match_rms_adamw` 使 Muon 更新幅度与 AdamW 超参数处于相近尺度；当前实现没有在
-DSV4 配置中暴露独立的 `muon_lr` 或 `hybrid_ns` 开关。
+Muon 与 AdamW fallback 当前共用 `--optimizer.lr`，没有独立 `muon_lr` 字段；
+`--optimizer.muon_momentum`、`--optimizer.muon_ns_steps` 和
+`--optimizer.muon_adjust_lr_fn` 可以分别覆盖。
 
 ## 如何使用 Muon
 
-使用常规 DSV4 配方，并显式选择 Muon。例如 8 卡 DSV4 Flash（43 层、16
-experts）：
+使用常规 `deepseek_v4_flash_43layers_16experts` recipe，并显式选择 Muon。以下是单机
+8 卡的直接启动命令；swap override 也是显式列出，而非 recipe 隐式启用：
 
 ```bash
 MODULE=torchtitan_npu.models.deepseek_v4 \
 CONFIG=deepseek_v4_flash_43layers_16experts \
 NGPU=8 \
 bash scripts/run_train.sh \
-  --hf-assets-path tests/assets/deepseek_v3 \
+  --hf-assets-path /path/to/DeepSeekV4_tokenizer \
   --dataloader.dataset c4_test \
   --dataloader.dataset-path tests/assets/c4_test \
   --parallelism.spmd-backend spmd_types \
@@ -73,91 +69,65 @@ bash scripts/run_train.sh \
     torchtitan_npu.override.deepseek_v4.sparse_attn.asc_metadata \
     torchtitan_npu.override.deepseek_v4.sparse_attn.asc \
     torchtitan_npu.override.deepseek_v4.mhc.asc_hc_post \
-    torchtitan_npu.override.common.token_dispatcher.asc
+    torchtitan_npu.override.common.token_dispatcher.asc \
+    torchtitan_npu.override.common.optimizer.swap_optimizer
 ```
 
-`--optimizer.name` 默认为 `native`，保持常规 recipe 原有的 AdamW 行为；设为
-`Muon` 时才生成 DistMuon 与 AdamW fallback 两组。不存在 `_muon` 专用
-recipe。DSV4 Muon 当前要求：
+DeepSeek-V4 示例脚本默认使用 Muon，并固定同一组 Muon 与 swap 参数。
 
-- `tensor_parallel_degree=1`；
-- `pipeline_parallel_degree=1`；
-- optimizer 使用 `DistMuon` 的 FlexShard compute layout；
-- routed experts 的布局同时声明 DP shard、EFSDP 和 EP，以覆盖当前 EP=8/EP=1
-  的存储 mesh；
-- AdamW 组保持 `foreach=False`。Ascend 上 `foreach=True` 可能触发
-  `aclnnForeachLerpScalar` 不支持错误。
+当前只验证并支持 TP=1、PP=1；routed experts 的 layout 同时声明 DP shard、EFSDP 和
+EP，以兼容当前 EP=8/EP=1 的 storage mesh。
 
 ## 如何开启 swap
 
-swap 是显式 opt-in 的 override，不是当前 recipe 中的 `swap_optimizer=true` 字段。
-在同一条命令的 `--override.imports` 末尾增加：
+swap 是显式 opt-in override，不存在 `swap_optimizer=true` 配置字段。在同一条命令的
+`--override.imports` 末尾增加：
 
 ```text
-torchtitan_npu.override.common.muon_state_swap.muon_state_swap
-torchtitan_npu.override.common.muon_state_swap.muon_state_swap_checkpoint
+torchtitan_npu.override.common.optimizer.swap_optimizer
 ```
 
-完整示例（省略与上例相同的模型、数据和并行参数）：
+`swap_optimizer` 与
+`torchtitan_npu.override.common.optimizer.virtual`（Virtual Optimizer）都替换
+`OptimizersContainer.Config`，不能同时启用。使用 Muon state swap 时，
+`override.imports` 中不得包含 Virtual Optimizer；需要 Virtual Optimizer 时则移除
+`swap_optimizer`。
 
-```bash
---override.imports \
-  ... \
-  torchtitan_npu.override.common.muon_state_swap.muon_state_swap \
-  torchtitan_npu.override.common.muon_state_swap.muon_state_swap_checkpoint
-```
+swap 将 optimizer state 置于 NovaSwap 管理的 CPU/NPU 生命周期中。PyTorch 仍在首次梯度
+更新时懒创建 optimizer state；swap 不会在模型初始化阶段预分配完整 state storage。Muon
+和 AdamW 使用不同的唯一 swap name，因此多个 optimizer 实例不会互相覆盖 state。
 
-启用后：
+Muon 的 `momentum_buffer` 首次创建后注册为 NovaSwap tensor 并执行 D2H。后续 step 按
+FlexShard bucket 调度：
 
-- Muon 的 `momentum_buffer` 在首次创建后注册为 NovaSwap tensor 并换出；后续按
-  compute layout 在 `_prepare_local` 中执行 H2D 和等待，准备本地 state 后执行
-  D2H；
-- AdamW 的 `exp_avg` 和 `exp_avg_sq` 通过 optimizer step pre/post hook，在整个
-  step 前换入、step 后换出；
-- optimizer state 仍由 PyTorch optimizer 懒创建，swap 不会在模型初始化阶段提前
-  生成完整 state storage；
-- AdamW 和 Muon 使用不同的唯一 swap name，避免多个 optimizer 实例互相覆盖；
-- Muon 使用 FlexShard 的 compute layout 和 per-layer bucket，swap 只包裹 state
-  tensor 的生命周期，不改变参数 storage layout。
+1. FlexShard 准备执行一个 redistributed bucket 的 storage-to-compute enqueue 时，swap
+   在 prefetch stream 上为该 bucket 的 `redistributed_items` 和 `unredistributed_items`
+   提交 H2D。
+2. 每个 tensor 到达 `_prepare_local()` 时仍执行 `WAIT_DEVICE`，随后由上游更新 momentum。
+   H2D 提前提交不改变 tensor 的消费依赖。
+3. transfer stream 完成该 bucket 的 prepare、pack 和 inbound `all_to_all_single` 提交后，
+   swap 在同一 transfer stream 上提交该 bucket 已更新 redistributed momentum 的 D2H。
+   NovaSwap 的 offload stream 因而等待 transfer-stream event；D2H 不会抢在该 bucket 的
+   inbound A2A 前提交。
+4. caller stream 等待 `compute_input_ready` 后执行 Newton--Schulz。FlexShard 可以在
+   caller stream 计算前一个 bucket 时预取后一个 bucket 的 H2D 和 inbound A2A。
 
-推荐同时关闭 checkpoint：
+`unredistributed_items` 不进入 storage-to-compute A2A。它们在 caller stream 上执行
+`_prepare_local()`、Muon 计算和参数更新，随后沿现有单 tensor 路径提交 D2H。
 
-```bash
---checkpoint.no-enable
-```
 
-当前 `muon_state_swap_checkpoint` 会拒绝 checkpoint save/load，以及
-`checkpoint.initial_load_path`。因此当前 swap 方案不能用于带 optimizer state 的
-断点续训；需要 checkpoint 互操作时，应先关闭该 swap override 并使用普通 optimizer
-路径。
+AdamW 的 `exp_avg`、`exp_avg_sq`（AMSGrad 时还包括 `max_exp_avg_sq`）按 bucket 拼成连续
+flat state。每个 bucket 执行 H2D、`WAIT_DEVICE`、上游 AdamW 更新和 D2H，并在当前 bucket
+更新前提交下一个 bucket 的 H2D。
 
-## DSV4 与上游方案的差异
+启用 `swap_optimizer` 的 `OptimizerStateSwapContainer` 不支持 optimizer `state_dict()`、
+`load_state_dict()`、完整 optimizer checkpoint 保存或断点续训。需要 checkpoint 互操作时，
+移除该 override 并使用普通 optimizer 路径。
 
-上游 FlexShard README 描述的是通用 optimizer-compute 基础设施和 Kimi 集成：
-`ComputeLayout` 可以表达 `Owned`、`BlockShard`、多 mesh axis 的 storage-to-compute
-重分布，`BucketConfig` 用于打包通信并与 optimizer compute 重叠。当前 DSV4 复用这些
-上游 API，但配置和运行边界更窄：
-
-| 维度 | 上游 FlexShard / DistMuon | 当前 DSV4 适配 |
-|---|---|---|
-| 参数选择 | 由具体模型 registry 定义 | 固定 DSV4 attention、experts、router、mHC 参数正则 |
-| compute layout | 支持 `Owned`、`BlockShard`、per-head 等通用布局 | 主要使用 `Owned`，attention `wq_b/wo_a` 使用 per-head `Shard(0)`，routed experts 使用 DP/EFSDP/EP `Shard(0)` |
-| bucket | 通用 bucket API | 每层一个 bucket，`hc_head` 单独一个 bucket |
-| TP/PP | 由上游集成决定 | 当前明确拒绝 TP>1 或 PP>1 |
-| swap | 上游 FlexShard 不提供 NPU state offload | 由 `muon_state_swap` + `extension/novaswap` 额外提供，且暂不支持 optimizer checkpoint |
-| AdamW | 上游 Muon 集成通常只描述参数路由 | 当前同时对混合容器中的 AdamW moments 做 whole-step swap |
-| 迭代步数 | 由上游 recipe 决定 | DSV4 默认 `ns_steps=10`，可用 CLI 覆盖 |
 
 ## 能力边界
 
-当前方案适合 DSV4 单机 8 卡、TP/PP=1、EP/DP-shard 并行的实验和训练。以下能力
-尚未由当前实现证明：
+当前方案适合 DSV4 单机 8 卡、TP/PP=1、EP/DP-shard 并行的实验和训练。尚未证明：
 
 - TP>1 或 PP>1 的 DistMuon；
 - swap 开启时的 optimizer checkpoint 保存、加载和断点续训；
-- 长程收敛与无 swap 基线的数值等价；
-- all-rank profiling skew 和多机 HCCL 场景；
-- Muon 独立学习率或 bucket 合并策略。
-
-关闭 swap 时，仍可使用同一 DSV4 recipe 的 Muon CLI 选择，移除上述两个
-`muon_state_swap.*` override 即可。

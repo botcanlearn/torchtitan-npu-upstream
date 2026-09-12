@@ -38,6 +38,7 @@ def _build_case(
     extra_args: tuple[str, ...],
     use_golden: bool = True,
     check_loss: bool = True,
+    extra_override_imports: tuple[str, ...] = (),
 ) -> OverrideDefinitions:
     """Build one DeepSeek-V4 integration case.
 
@@ -48,7 +49,7 @@ def _build_case(
     """
     recipe = GOLDEN_OVERRIDES if use_golden else NPU_OVERRIDES
     return OverrideDefinitions(
-        override_args=[recipe + extra_args],
+        override_args=[recipe + extra_override_imports + extra_args],
         test_descr=test_descr,
         test_name=test_name,
         ngpu=ngpu,
@@ -112,6 +113,23 @@ def build_deepseek_v4_test_list() -> list[OverrideDefinitions]:
             ),
             use_golden=True,
             check_loss=True,
+        ),
+        _build_case(
+            test_name="dsv4_muon_swap_ep2_fsdp2",
+            test_descr="DeepSeek-V4 fused ops DistMuon and AdamW NovaSwap ep2 fsdp2",
+            ngpu=2,
+            extra_args=(
+                "--training.steps=2",
+                "--parallelism.expert-parallel-degree=2",
+                "--hf-assets-path=tests/assets/deepseek_v3",
+                "--training.global-batch-size=2",
+                "--optimizer.name=Muon",
+            ),
+            extra_override_imports=(
+                "torchtitan_npu.override.common.optimizer.swap_optimizer",
+            ),
+            use_golden=False,
+            check_loss=False,
         ),
         _build_case(
             test_name="dsv4_smla_1rank_aot_eager",

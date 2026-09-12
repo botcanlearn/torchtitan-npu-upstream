@@ -50,6 +50,9 @@ Hook 只处理已有 gradient 且 state 尚未初始化的参数，不会覆盖�
 
 Virtual Optimizer 通过 TorchTitan 的配置级 override 启用，不增加 `virtual_optimizer_size`、`swap_optimizer_times` 等配置字段。
 
+Virtual Optimizer 与 `torchtitan_npu.override.common.optimizer.swap_optimizer` 都替换
+`OptimizersContainer.Config`，不能同时出现在 `override.imports` 中。
+
 ### 命令行示例
 
 ```bash

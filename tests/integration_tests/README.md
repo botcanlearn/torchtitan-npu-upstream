@@ -11,6 +11,7 @@ torchtitan 迁移而来。
 |---|---|---|---|---:|---|---|
 | `dsv4_golden_1rank` | DeepSeek-V4 | 1 Rank 参考配置 | 1 | - | 是 | - |
 | `dsv4_golden_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2 | 2 | - | 是 | - |
+| `dsv4_muon_swap_ep2_fsdp2` | DeepSeek-V4 | NPU 融合算子 + DistMuon/AdamW NovaSwap、EP2 + FSDP2、2 steps | 2 | - | 否 | 两步训练 smoke；未生成 swap 数值 golden，也未单独断言 swap action |
 | `dsv4_checkpoint_resume_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2，step 2 恢复到 step 4 | 2 | - | 是，含 grad_norm | 与本次连续训练的 step 3、4 精确比较 |
 | `dsv4_smla_1rank_aot_eager` | DeepSeek-V4 | 1 Rank | 1 | `aot_eager` | 否 | SMLA 暂不支持 `--debug.deterministic` |
 | `dsv4_smla_ep2_fsdp2` | DeepSeek-V4 | EP2 + FSDP2 | 2 | `aot_eager` | 否 | SMLA 暂不支持 `--debug.deterministic` |
@@ -54,6 +55,12 @@ MTP+CP 场景下的实际构图、编译和训练执行路径；单卡、EP2 和
 `aot_eager`，并默认覆盖 fused MoE token dispatcher。MTP+CP 用例固定使用
 `deepseek_v4_debugmodel`、CP2 和 headtail，在 C4 packed sequence 上执行完整的
 MTP forward、chunked loss 和 backward。
+
+`dsv4_muon_swap_ep2_fsdp2` 使用 NPU 融合算子：Ascend RMSNorm、complex RoPE、sparse
+attention、MHC 和 MoE token dispatcher；两卡 EP2/FSDP2，并追加 `--optimizer.name=Muon`
+和 `swap_optimizer` override。它运行两步，覆盖 DistMuon 与 AdamW fallback 在融合训练路径中
+的 swap smoke。该 case 不读取 golden loss，不启用 deterministic，也不单独断言 H2D/D2H
+action；因此不声称与未 swap 或 AdamW 路径数值等价。
 
 这里的 integration recipe 聚焦 sparse-attention / MHC 回归边界。端到端 example 脚本
 额外启用 Virtual Optimizer；checkpoint 保存兼容由 extension `CheckpointManager` 提供。

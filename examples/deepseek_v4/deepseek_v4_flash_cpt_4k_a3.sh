@@ -116,21 +116,21 @@ COMM_ARGS="
     --comm.train-timeout-seconds 600
 "
 
-# Optimizer & LR scheduler
+# Optimizer
 OPTIMIZER_ARGS="
-    --optimizer.implementation fused
-    --optimizer.param-groups.0.optimizer-name AdamW
-    --optimizer.param-groups.0.optimizer-kwargs.lr 1.0e-5
-    --optimizer.param-groups.0.optimizer-kwargs.betas 0.9 0.95
-    --optimizer.param-groups.0.optimizer-kwargs.eps 1.0e-6
-    --optimizer.param-groups.0.optimizer-kwargs.weight-decay 1.0e-1
-    --lr-scheduler.warmup-steps 25
-    --lr-scheduler.decay-type cosine
-    --lr-scheduler.decay-ratio 1.0
-    --lr-scheduler.min-lr-factor 1.0e-2
+    --optimizer.name Muon
+    --optimizer.lr 1.0e-5
+    --optimizer.beta1 0.9
+    --optimizer.beta2 0.95
+    --optimizer.eps 1.0e-8
+    --optimizer.weight_decay 1.0e-1
+    --optimizer.muon_momentum 0.95
+    --optimizer.muon_enable_nesterov
+    --optimizer.muon_ns_steps 10
+    --optimizer.muon_adjust_lr_fn match_rms_adamw
 "
 OPTIMIZER_OVERRIDES="
-    torchtitan_npu.override.common.optimizer.virtual
+    torchtitan_npu.override.common.optimizer.swap_optimizer
 "
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then

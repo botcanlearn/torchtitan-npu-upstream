@@ -1,4 +1,4 @@
-# Pending upstream issue: https://github.com/pytorch/torchtitan/issues/2183
+# Pending upstream issue: https://github.com/pytorch/torchtitan/issues/4405
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 

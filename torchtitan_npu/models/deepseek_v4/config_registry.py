@@ -57,7 +57,14 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
     )
     attention_shardings = {"wq_a": owned, "wkv": owned, "wo_b": owned}
+    attention_per_head_projections = ("wq_b", "wo_a")
+    attention_projections = tuple(attention_shardings) + attention_per_head_projections
     expert_projections = ("w1", "w2", "w3")
+    routed_expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    compressor_projections = ("wkv", "wgate")
+    indexer_projections = ("wq_b", "weights_proj")
+    hc_pre_modules = ("hc_attn_pre", "hc_ffn_pre")
+    mtp_projections = ("e_proj", "h_proj")
 
     def compute_shardings_for_transformer_layer(
         prefix: str,
@@ -98,20 +105,28 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
                 MeshAxisName.EP.value: Shard(0),
             }
         )
-        for projection in ("w1_EFD", "w2_EDF", "w3_EFD"):
+        for projection in routed_expert_projections:
             shardings[f"{prefix}.moe.routed_experts.inner_experts.{projection}"] = expert_sharding
         shardings[f"{prefix}.moe.router.gate.weight"] = owned
-        for module in ("hc_attn_pre", "hc_ffn_pre"):
+        for module in hc_pre_modules:
             shardings[f"{prefix}.{module}.hc_fn"] = owned
-        if getattr(layer_config.attention, "indexer", None) is not None:
-            for projection in ("wq_b", "weights_proj"):
-                shardings[f"{prefix}.attention.indexer.{projection}.weight"] = owned
-            for projection in ("wkv", "wgate"):
+        indexer = layer_config.attention.indexer
+        if indexer is not None:
+            shardings[f"{prefix}.attention.indexer.wq_b.weight"] = ComputeLayout(
+                shardings_by_mesh_axis={
+                    MeshAxisName.DP_SHARD.value: BlockShard(
+                        dim=0,
+                        block_size=indexer.index_head_dim,
+                    ),
+                },
+            )
+            shardings[f"{prefix}.attention.indexer.weights_proj.weight"] = owned
+            for projection in compressor_projections:
                 shardings[f"{prefix}.attention.indexer.compressor.{projection}.weight"] = owned
             shardings[f"{prefix}.attention.indexer.compressor.ape"] = owned
         if include_mtp_projections:
-            shardings[f"{prefix}.e_proj.weight"] = owned
-            shardings[f"{prefix}.h_proj.weight"] = owned
+            for projection in mtp_projections:
+                shardings[f"{prefix}.{projection}.weight"] = owned
             shardings[f"{prefix}.hc_head.hc_fn"] = owned
         return shardings
 
@@ -147,18 +162,17 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     # hc_head is global rather than layer-scoped, so it needs its own bucket.
     bucket_configs += (BucketConfig(name="hc_head", patterns=("hc_head.hc_fn",)),)
     muon_pattern = (
-        r"^(?:"
-        r"(?:layers|mtp_layers)\.\d+\.attention\.(?:wq_a|wkv|wo_b|wq_b|wo_a)\.weight"
-        r"|(?:layers|mtp_layers)\.\d+\.attention\.indexer\.(?:wq_b|weights_proj)\.weight"
-        r"|(?:layers|mtp_layers)\.\d+\.attention\.(?:compressor|indexer\.compressor)\.(?:wkv|wgate)\.weight"
-        r"|layers\.\d+\.attention\.(?:compressor|indexer\.compressor)\.ape"
-        r"|(?:layers|mtp_layers)\.\d+\.moe\.shared_experts\.w[123]\.weight"
-        r"|(?:layers|mtp_layers)\.\d+\.moe\.routed_experts\.inner_experts\.w[123]_[EFD]+"
-        r"|(?:layers|mtp_layers)\.\d+\.moe\.router\.gate\.weight"
-        r"|(?:layers|mtp_layers)\.\d+\.(?:hc_attn_pre|hc_ffn_pre)\.hc_fn"
-        r"|mtp_layers\.\d+\.(?:e_proj|h_proj)\.weight"
-        r"|mtp_layers\.\d+\.hc_head\.hc_fn"
-        r"|hc_head\.hc_fn"
+        r"(?:"
+        rf"attention\.(?:{'|'.join(attention_projections)})\.weight|"
+        rf"attention\.indexer\.(?:{'|'.join(indexer_projections)})\.weight|"
+        rf"attention\.(?:compressor|indexer\.compressor)\.(?:{'|'.join(compressor_projections)})\.weight|"
+        r"attention\.(?:compressor|indexer\.compressor)\.ape|"
+        rf"moe\.shared_experts\.(?:{'|'.join(expert_projections)})\.weight|"
+        rf"moe\.routed_experts\.inner_experts\.(?:{'|'.join(routed_expert_projections)})|"
+        r"moe\.router\.gate\.weight|"
+        rf"(?:{'|'.join(hc_pre_modules)})\.hc_fn|"
+        rf"(?:{'|'.join(mtp_projections)})\.weight|"
+        r"hc_head\.hc_fn"
         r")$"
     )
     return MuonOptimizerProfile(

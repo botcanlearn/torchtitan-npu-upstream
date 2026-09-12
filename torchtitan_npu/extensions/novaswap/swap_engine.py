@@ -27,7 +27,8 @@ class _AsyncReleaseWorker:
 
     _STOP = object()
 
-    def __init__(self) -> None:
+    def __init__(self, device_index: int) -> None:
+        self._device_index = device_index
         self._queue: queue.Queue[object] = queue.Queue()
         self._condition = threading.Condition()
         self._entries: dict[int, tuple[str, SwapHandle, str, str]] = {}
@@ -110,6 +111,7 @@ class _AsyncReleaseWorker:
         self._thread.join(timeout=1.0)
 
     def _run(self) -> None:
+        torch_npu.npu.set_device(self._device_index)
         while True:
             item = self._queue.get()
             try:
@@ -190,9 +192,10 @@ class SwapEngine:
     def _init(cls) -> None:
         if cls._ready:
             return
-        cls._offload_stream = torch_npu.npu.Stream(device=torch_npu.npu.current_device())
-        cls._prefetch_stream = torch_npu.npu.Stream(device=torch_npu.npu.current_device())
-        cls._release_worker = _AsyncReleaseWorker()
+        device_index = torch_npu.npu.current_device()
+        cls._offload_stream = torch_npu.npu.Stream(device=device_index)
+        cls._prefetch_stream = torch_npu.npu.Stream(device=device_index)
+        cls._release_worker = _AsyncReleaseWorker(device_index)
         cls._handles = {}
         cls._ready = True
 
