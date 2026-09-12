@@ -179,6 +179,10 @@ jobs:
       -
         name: CodeCheck
         run: |
+          if [[ "${{ vars.PRECOMMIT_BLOCK }}" == "true" ]]; then
+              echo "precommit block, no need to run codecheck"
+              exit 0
+          fi
           set +e
           cd ${{ steps.process_checkout.outputs.path }} || exit 1
           cd CI/scripts || exit 1
