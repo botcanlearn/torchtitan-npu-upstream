@@ -95,6 +95,9 @@ class HashRouter(TokenChoiceTopKRouter):
                     device=buffer_device,
                 )
 
+    def _select_experts(self, scores_for_choice: torch.Tensor) -> torch.Tensor:
+        return scores_for_choice.topk(self.top_k, dim=-1, sorted=False)[1]
+
     def forward(self, x_BLD, expert_bias_E=None, *, input_ids=None):
         # Compute gate in float32 to help stability of expert load balancing
         # (torchtitan TokenChoiceTopKRouter pattern).
@@ -121,7 +124,7 @@ class HashRouter(TokenChoiceTopKRouter):
             # Apply node-limited routing if configured (upstream behavior).
             if self.num_expert_groups is not None:
                 scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
-            selected_experts_indices = scores_for_choice.topk(self.top_k, dim=-1, sorted=False)[1]
+            selected_experts_indices = self._select_experts(scores_for_choice)
 
         top_scores = scores.gather(dim=-1, index=selected_experts_indices)
 

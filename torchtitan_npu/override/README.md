@@ -308,6 +308,7 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 | `mhc.tilelang_hc_head` | `HcHead.Config` | `TilelangHcHead.Config` | 使用 `mhc_head_compute_mix_tilelang` (TileLang 融合 kernel) |
 | `moe.tilelang_swiglu_grouped` | `GroupedExperts.Config` | `TilelangGroupedExperts.Config` | 使用外部 `tile_kernels` SwiGLU forward/backward |
 | `moe.tilelang_swiglu_shared` | `FeedForward.Config` | `TilelangFeedForward.Config` | 使用外部 `tile_kernels` SwiGLU forward/backward |
+| `moe_router.tilelang` | `HashRouter.Config`（精确匹配） | `TilelangHashRouter.Config` | 非 hash 层使用 TileKernels `topk_gate`；hash 层保持原逻辑 |
 
 `sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 还支持可选的 `indexer_loss_coeff`，默认值为 `0.0`。
 MHC 的 `asc_hc_pre` / `asc_hc_post` 与 `triton_hc_pre` / `triton_hc_post` / `triton_hc_head` / `tilelang_hc_head` 是可选入口（`deepseek_v4/__init__.py`
