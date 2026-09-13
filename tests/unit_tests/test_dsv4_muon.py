@@ -9,6 +9,7 @@ import ast
 from pathlib import Path
 
 from torchtitan.distributed.flex_shard import BlockShard
+from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan_npu.models.deepseek_v4 import model_registry
 from torchtitan_npu.models.deepseek_v4.config_registry import _dsv4_muon_profile
@@ -93,8 +94,21 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
     assert "_distributed_paper_parameter_muon_optimizer" not in source
     assert "deepseek_v4_debugmodel_paper_muon" not in source
     assert "BlockShard(dim=0" in source
-    assert "MeshAxisName.DP_SHARD.value: Shard(0)" in source
     assert "MeshAxisName.EFSDP.value: Shard(0)" in source
+
+    profile = _dsv4_muon_profile(model_registry("debugmodel"))
+    compute_shardings = profile.optimizer_factory_kwargs["DistMuon"][
+        "compute_sharding_by_fqn"
+    ]
+    expert_layout = compute_shardings[
+        "layers.2.moe.routed_experts.inner_experts.w1_EFD"
+    ]
+    assert set(expert_layout.shardings_by_mesh_axis) >= {
+        MeshAxisName.DP_SHARD.value,
+        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+        MeshAxisName.EFSDP.value,
+        MeshAxisName.EP.value,
+    }
     for unified_muon_parameter in (
         "indexer",
         "compressor",

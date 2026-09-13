@@ -53,8 +53,16 @@ from .parallelize import parallelize_graph_trainer_deepseek_v4
 def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     """Build the DSV4-owned parameter and FlexShard policy for Muon."""
     model_config = cast("DeepSeekV4Model.Config", model_spec.model)
+    # FSDP folds the (dp_shard, cp) storage mesh into the single
+    # ``dp_shard_cp`` axis when context parallelism is enabled.  ComputeLayout
+    # resolution filters declarations by the parameter's actual storage mesh,
+    # so keep both axis names to cover CP and non-CP runs.
+    dense_dp_axes = (
+        MeshAxisName.DP_SHARD.value,
+        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+    )
     owned = ComputeLayout(
-        shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
+        shardings_by_mesh_axis={axis: Owned() for axis in dense_dp_axes},
     )
     attention_shardings = {"wq_a": owned, "wkv": owned, "wo_b": owned}
     attention_per_head_projections = ("wq_b", "wo_a")
@@ -85,13 +93,11 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         # [o_lora_rank, per_group_in] matrix per group flattened likewise.
         # BlockShard computes Muon on each per-head/per-group matrix.
         shardings[f"{prefix}.attention.wq_b.weight"] = ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_size=attention.head_dim),
-            },
+            shardings_by_mesh_axis={axis: BlockShard(dim=0, block_size=attention.head_dim) for axis in dense_dp_axes},
         )
         shardings[f"{prefix}.attention.wo_a.weight"] = ComputeLayout(
             shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_size=attention.wo_a.out_features),
+                axis: BlockShard(dim=0, block_size=attention.wo_a.out_features) for axis in dense_dp_axes
             },
         )
         if getattr(layer_config.attention, "compressor", None) is not None:
@@ -100,7 +106,7 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
             shardings[f"{prefix}.attention.compressor.ape"] = owned
         expert_sharding = ComputeLayout(
             shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
+                **{axis: Shard(0) for axis in dense_dp_axes},
                 MeshAxisName.EFSDP.value: Shard(0),
                 MeshAxisName.EP.value: Shard(0),
             }
@@ -114,10 +120,11 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         if indexer is not None:
             shardings[f"{prefix}.attention.indexer.wq_b.weight"] = ComputeLayout(
                 shardings_by_mesh_axis={
-                    MeshAxisName.DP_SHARD.value: BlockShard(
+                    axis: BlockShard(
                         dim=0,
                         block_size=indexer.index_head_dim,
-                    ),
+                    )
+                    for axis in dense_dp_axes
                 },
             )
             shardings[f"{prefix}.attention.indexer.weights_proj.weight"] = owned
