@@ -21,6 +21,10 @@ export HCCL_ASYNC_ERROR_HANDLING="${HCCL_ASYNC_ERROR_HANDLING:-0}"
 # Override this for the host topology reported by `npu-smi info -t topo`.
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
 
+export COMPILE_BACKEND="${COMPILE_BACKEND:-inductor}"
+export TORCHTITAN_NPU_PATTERN_IMPORTS="${TORCHTITAN_NPU_PATTERN_IMPORTS:-torchtitan_npu.compile.patterns.deepseek_v4.inplace_partial_rope}"
+export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.workaround}"
+
 NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, \
                       xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"
 NGPU="${NGPU:-8}"
@@ -33,4 +37,7 @@ QUANTIZATION_ARGS=(
     --extension.quantization.recipe all_block_fp8
 )
 
-exec bash "${SCRIPT_DIR}/deepseek_v4_flash_cpt_4k_a3.sh" "${QUANTIZATION_ARGS[@]}" "$@"
+exec bash "${SCRIPT_DIR}/deepseek_v4_flash_cpt_4k_a3.sh" \
+    "${QUANTIZATION_ARGS[@]}" \
+    "$@" \
+    activation-checkpoint:selective

@@ -115,13 +115,11 @@ CHECKPOINT_ARGS="
 # Profiler
 PROFILER_ARGS="
     --profiler.no-enable-profiling
-    --profiler.profile-freq 1
-    --profiler.profiler-warmup 0
-    --profiler.profiler-active 1
-    --profiler.profiler-repeat 1
-    --profiler.profiler-skip-first 4
-    --profiler.extension.profile-ranks 0
+    --profiler.save-traces-folder profiling_path
     --profiler.extension.no-enable-online-parse
+    --profiler.extension.profiler-start 6
+    --profiler.extension.profiler-end 7
+    --profiler.extension.profile-ranks 0
 "
 
 # Communication

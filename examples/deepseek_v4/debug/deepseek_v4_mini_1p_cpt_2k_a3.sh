@@ -42,6 +42,9 @@ STEPS=100
 
 # Debug
 USE_GOLDEN="${USE_GOLDEN:-0}"
+DEBUG_ARGS="
+    --debug.print-config
+"
 
 # HF assets
 HF_ASSETS_ARGS="
@@ -87,9 +90,10 @@ CHECKPOINT_ARGS="
 # Profiler
 PROFILER_ARGS="
     --profiler.no-enable-profiling
-    --profiler.profile-freq 10
-    --profiler.profiler-warmup 3
-    --profiler.profiler-active 1
+    --profiler.save-traces-folder profiling_path
+    --profiler.extension.no-enable-online-parse
+    --profiler.extension.profiler-start 6
+    --profiler.extension.profiler-end 7
     --profiler.extension.profile-ranks 0
 "
 
@@ -149,6 +153,7 @@ bash scripts/run_train.sh \
     $DATALOADER_ARGS \
     $PARALLELISM_ARGS \
     $TRAINING_ARGS \
+    $DEBUG_ARGS \
     $OPTIMIZER_ARGS \
     $PROFILER_ARGS \
     $COMM_ARGS \

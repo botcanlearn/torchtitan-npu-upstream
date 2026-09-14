@@ -227,7 +227,7 @@ def _make_trainer_config(
     *,
     local_batch_size: int,
     seq_len: int,
-    num_mtp_layers: int = 1,
+    num_mtp_layers: int = 0,
 ) -> Trainer.Config:
     model_spec = model_registry(flavor, num_mtp_layers=num_mtp_layers)
     if num_mtp_layers > 0:
@@ -279,7 +279,7 @@ def _make_trainer_config(
     )
 
 
-def deepseek_v4_debugmodel(*, num_mtp_layers: int = 1) -> Trainer.Config:
+def deepseek_v4_debugmodel(*, num_mtp_layers: int = 0) -> Trainer.Config:
     return _make_trainer_config(
         "debugmodel",
         local_batch_size=1,
@@ -288,7 +288,7 @@ def deepseek_v4_debugmodel(*, num_mtp_layers: int = 1) -> Trainer.Config:
     )
 
 
-def deepseek_v4_flash(*, num_mtp_layers: int = 1) -> Trainer.Config:
+def deepseek_v4_flash(*, num_mtp_layers: int = 0) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_flash",
         local_batch_size=1,
@@ -299,7 +299,7 @@ def deepseek_v4_flash(*, num_mtp_layers: int = 1) -> Trainer.Config:
 
 def deepseek_v4_flash_43layers_16experts(
     *,
-    num_mtp_layers: int = 1,
+    num_mtp_layers: int = 0,
 ) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_flash_43layers_16experts",
@@ -309,7 +309,7 @@ def deepseek_v4_flash_43layers_16experts(
     )
 
 
-def deepseek_v4_pro(*, num_mtp_layers: int = 1) -> Trainer.Config:
+def deepseek_v4_pro(*, num_mtp_layers: int = 0) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_pro",
         local_batch_size=1,
@@ -320,7 +320,7 @@ def deepseek_v4_pro(*, num_mtp_layers: int = 1) -> Trainer.Config:
 
 def deepseek_v4_pro_61layers_32experts(
     *,
-    num_mtp_layers: int = 1,
+    num_mtp_layers: int = 0,
 ) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_pro_61layers_32experts",

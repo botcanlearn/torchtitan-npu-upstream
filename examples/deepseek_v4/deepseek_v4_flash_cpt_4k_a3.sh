@@ -103,11 +103,11 @@ CHECKPOINT_ARGS="
 # Profiler
 PROFILER_ARGS="
     --profiler.no-enable-profiling
-    --profiler.profile-freq 10
-    --profiler.profiler-warmup 3
-    --profiler.profiler-active 1
-    --profiler.extension.profile-ranks 0
+    --profiler.save-traces-folder profiling_path
     --profiler.extension.no-enable-online-parse
+    --profiler.extension.profiler-start 6
+    --profiler.extension.profiler-end 7
+    --profiler.extension.profile-ranks 0
 "
 
 # Communication
@@ -139,10 +139,10 @@ if [[ "${USE_GOLDEN}" == "1" ]]; then
         torchtitan_npu.override.deepseek_v4.sparse_attn.golden
     )
 else
+    DEFAULT_CLI_OVERRIDES="torchtitan_npu.override.common.rope.asc_complex"
     NPU_OPS_OVERRIDES=(
         # Attention / DSA
         torchtitan_npu.override.common.rms_norm.asc
-        torchtitan_npu.override.common.rope.asc_complex
 
         torchtitan_npu.override.deepseek_v4.sparse_attn.asc_li_metadata
         torchtitan_npu.override.deepseek_v4.sparse_attn.asc_li
@@ -156,6 +156,9 @@ else
         torchtitan_npu.override.common.token_dispatcher.asc
     )
 fi
+
+# Wrapper defaults extend override.imports after the base targets.
+CLI_OVERRIDES="${CLI_OVERRIDES:-${DEFAULT_CLI_OVERRIDES}}"
 
 MODULE="${MODULE}" \
 CONFIG="${CONFIG}" \
@@ -173,4 +176,5 @@ bash scripts/run_train_multinodes.sh \
     $COMM_ARGS \
     $CHECKPOINT_ARGS \
     --override.imports "${NPU_OPS_OVERRIDES[@]}" $OPTIMIZER_OVERRIDES \
+    $CLI_OVERRIDES \
     "$@"
