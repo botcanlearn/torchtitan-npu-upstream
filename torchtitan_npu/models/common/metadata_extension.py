@@ -18,21 +18,12 @@ from torchtitan.config.configurable import Configurable
 
 @dataclass(kw_only=True, slots=True)
 class LightningIndexerKernelConfig:
-    """DSV4 LI contract shared by metadata and kernel callers.
-
-    The current DSV4 implementation supports only the ratio-4 TND contract.
-    """
+    """LI kernel contract shared by metadata and kernel callers."""
 
     layout_q: str = "TND"
     layout_k: str = "TND"
     mask_mode: int = 3
     cmp_ratio: int = 4
-
-    def __post_init__(self) -> None:
-        if (self.layout_q, self.layout_k, self.mask_mode, self.cmp_ratio) != ("TND", "TND", 3, 4):
-            raise ValueError(
-                "DeepSeek-V4 LightningIndexer supports only layout_q='TND', layout_k='TND', mask_mode=3, cmp_ratio=4"
-            )
 
 
 class MetadataExtension(Configurable):

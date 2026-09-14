@@ -15,6 +15,7 @@ from torchtitan.config import TrainingConfig as _BaseTrainingConfig
 from torchtitan.tools.profiler import Profiler as _BaseProfiler
 
 QuantizationRecipe = Literal["all_mxfp8", "mix", "all_block_fp8"]
+LIQuantization = Literal["mxfp4", "mxfp8", "fp8", "hif8"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +111,17 @@ class QuantizationExtensionConfig:
     enable_quantized_training: bool = False
     recipe: QuantizationRecipe = "mix"
     enable_mxfp4_qat: bool = False
+    li_quantization: LIQuantization | None = None
+    """LI Q/K format.
+
+    MXFP4/MXFP8 use MX block scales, FP8 uses per-token-head scales, and HiF8
+    uses per-tensor scales.
+    """
     dst_type_max: float = 0.0
+
+    def validate(self) -> None:
+        if self.li_quantization not in (None, "mxfp4", "mxfp8", "fp8", "hif8"):
+            raise ValueError("li_quantization must be None or one of: mxfp4, mxfp8, fp8, hif8")
 
 
 @dataclass(kw_only=True, slots=True)

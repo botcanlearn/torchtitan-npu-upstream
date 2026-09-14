@@ -13,6 +13,7 @@ import warnings
 from dataclasses import dataclass, field
 
 import torch
+import torch_npu
 from torchao.quantization.qat.fake_quantize_config import FakeQuantizeConfigBase
 
 from torchao_npu.quantization import _NPU_DTYPE_DICT
@@ -22,6 +23,7 @@ NPU_SUPPORTED_ELEM_DTYPES = [
     torch.float8_e5m2,
     torch.float4_e2m1fn_x2,
 ]
+_DYNAMIC_QUANT_MODES = frozenset(("pertoken", "pertensor", "perchannel"))
 
 
 @dataclass
@@ -87,6 +89,41 @@ class MXQuantizeConfig(FakeQuantizeConfigBase):
             assert self.scale_alg in (0, 2), (
                 f"{type(self).__name__} only supports scale_alg=0 or 2 for FP4, got {self.scale_alg}"
             )
+
+
+@dataclass
+class FP8QuantizeConfig(FakeQuantizeConfigBase):
+    """E4M3FN dynamic quantization configuration."""
+
+    elem_dtype: torch.dtype = torch.float8_e4m3fn
+    quant_mode: str = "pertoken"
+
+    @property
+    def npu_elem_dtype(self) -> int:
+        return _NPU_DTYPE_DICT[self.elem_dtype]
+
+    def __post_init__(self):
+        if self.elem_dtype is not torch.float8_e4m3fn:
+            raise ValueError("FP8QuantizeConfig only supports torch.float8_e4m3fn")
+        if self.quant_mode not in _DYNAMIC_QUANT_MODES:
+            raise ValueError(f"FP8QuantizeConfig quant_mode must be one of {_DYNAMIC_QUANT_MODES}")
+
+
+@dataclass
+class HiF8QuantizeConfig(FakeQuantizeConfigBase):
+    """HiFloat8 dynamic quantization configuration."""
+
+    elem_dtype: object = torch_npu.hifloat8
+    dst_type_max: float = 0.0
+    quant_mode: str = "pertensor"
+
+    def __post_init__(self):
+        if self.elem_dtype != torch_npu.hifloat8:
+            raise ValueError("HiF8QuantizeConfig requires torch_npu.hifloat8")
+        if self.quant_mode not in _DYNAMIC_QUANT_MODES:
+            raise ValueError(f"HiF8QuantizeConfig quant_mode must be one of {_DYNAMIC_QUANT_MODES}")
+        if self.dst_type_max not in (0.0, 15.0, 56.0, 224.0, 32768.0):
+            raise ValueError("HiF8QuantizeConfig dst_type_max must be one of 0, 15, 56, 224, or 32768")
 
 
 @dataclass
@@ -159,4 +196,4 @@ class BlockMXQuantizeConfig(MXQuantizeConfig):
 
 
 # Safe-unpickling allowlist: DCP loads checkpoints with torch.load(weights_only=True).
-torch.serialization.add_safe_globals([MXQuantizeConfig, BlockMXQuantizeConfig])
+torch.serialization.add_safe_globals([MXQuantizeConfig, BlockMXQuantizeConfig, HiF8QuantizeConfig, FP8QuantizeConfig])

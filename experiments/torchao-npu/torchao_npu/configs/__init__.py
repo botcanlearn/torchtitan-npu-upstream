@@ -5,8 +5,13 @@
 
 """Public quantization configurations for torchao-npu."""
 
+from torchao_npu.configs.module_swap import ModuleSwapConfig
+from torchao_npu.configs.module_swap_configs import QuantLightningIndexerConfig, quant_mode_for_config
 from torchao_npu.configs.param_swap import ParamSwapConfig
 
 __all__ = [
+    "ModuleSwapConfig",
     "ParamSwapConfig",
+    "QuantLightningIndexerConfig",
+    "quant_mode_for_config",
 ]

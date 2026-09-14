@@ -145,12 +145,29 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 | `mix`（默认） | MXFP8 | Block FP8 |
 | `all_block_fp8` | Block FP8 | Block FP8 |
 
+LI Q/K 量化可通过以下参数单独选择，必须同时启用低精度训练：
+
+```bash
+--extension.quantization.enable-quantized-training \
+--extension.quantization.li-quantization mxfp4
+```
+
+支持的 LI 量化类型及对应 CANN `quant_mode` 为：
+
+| `li-quantization` | CANN `quant_mode` | Q/K 量化方式 |
+| --- | ---: | --- |
+| `fp8` | 1 | FP8 per-token-head |
+| `mxfp8` | 3 | MXFP8 |
+| `mxfp4` | 5 | MXFP4 |
+| `hif8` | 4 | HiFloat8 per-tensor |
+
 量化相关 CLI 参数：
 
 - `--extension.quantization.enable-quantized-training` 与 `--extension.quantization.no-enable-quantized-training`：选择低精度或高精度通路；默认使用高精度，只有显式传入 enable 开关才启用低精度。
 - `--extension.quantization.recipe`：选择 `all_mxfp8`、`mix` 或 `all_block_fp8`，默认使用 `mix`。
 - `--extension.quantization.enable-mxfp4-qat` 与 `--extension.quantization.no-enable-mxfp4-qat`：控制 routed expert 的 Block FP8 weight 是否增加 MXFP4 QAT fake quant 数值约束，默认关闭，仅对包含 Block FP8 的 recipe 生效。该选项不是持久化 4-bit 参数训练，也不会把算子替换为原生 A8W4 GEMM。
-- `--extension.quantization.dst-type-max`：MXFP4 fake quant 的目标数据类型最大值，默认 `0.0`，由数据类型自动推导。
+- `--extension.quantization.li-quantization`：选择 LI Q/K 量化类型，可选 `mxfp4`、`mxfp8`、`fp8` 或 `hif8`；需要同时启用 `enable-quantized-training`。
+- `--extension.quantization.dst-type-max`：量化目标数据类型最大值，用于 MXFP4 fake quant 和 HiF8 LI 量化时，默认值为 `0.0`；HiF8 支持 `0`、`15`、`56`、`224` 和 `32768`。
 - `--profiler.enable-profiling`：启用性能分析。
 - `USE_GOLDEN`：设为 `1` 时选择 golden attention override；默认使用 Ascend 融合算子路径。
 
