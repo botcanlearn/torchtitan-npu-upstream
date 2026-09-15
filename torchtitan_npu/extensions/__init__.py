@@ -7,6 +7,7 @@
 
 from . import (
     ep_process_group,  # noqa: F401
+    graph_trainer,  # noqa: F401
     trainer,  # noqa: F401
 )
 from .components import metrics  # noqa: F401

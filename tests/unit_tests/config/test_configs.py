@@ -26,6 +26,7 @@ from torchtitan_npu.config import TrainingConfig as NPUTrainingConfig
 from torchtitan_npu.config import manager as config_manager
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed import utils as distributed_utils
+from torchtitan_npu.extensions.graph_trainer import GraphTrainerEx
 from torchtitan_npu.extensions.profiler import CANNProfiler
 from torchtitan_npu.extensions.trainer import TrainerEx
 
@@ -360,6 +361,43 @@ def test_config_manager_preserves_specialized_trainer_config(
     assert isinstance(trainer, SpecializedTrainer)
     assert len(built_configs) == 1
     assert isinstance(built_configs[0], SpecializedTrainer.Config)
+
+
+def test_config_manager_builds_graph_trainer_ex_and_applies_hf32(monkeypatch, tmp_path):
+    # Import after torchtitan_npu applies its Trainer patches.
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+    module_name = "_torchtitan_npu_graph_trainer_config_registry"
+    applied_hf32 = []
+
+    def test_config() -> GraphTrainer.Config:
+        return GraphTrainer.Config(
+            hf_assets_path=str(tmp_path),
+            compile=GraphTrainerCompileConfig(enable=True),
+            training=UpstreamTrainingConfig(steps=23),
+        )
+
+    _install_config_registry(monkeypatch, module_name, test_config)
+
+    def initialize_graph_trainer(trainer, config):
+        trainer.model_parts = []
+        trainer.gradient_accumulation_steps = 1
+
+    monkeypatch.setattr(trainer_module, "set_allow_hf32", applied_hf32.append)
+    monkeypatch.setattr(GraphTrainer, "__init__", initialize_graph_trainer)
+
+    config = ConfigManager().parse_args(["--module", module_name, "--config", "test_config"])
+    trainer = config.build()
+
+    assert isinstance(config, GraphTrainerEx.Config)
+    assert isinstance(config.compile, GraphTrainerCompileConfig)
+    assert config.compile.enable is True
+    assert isinstance(config.training, NPUTrainingConfig)
+    assert config.training.steps == 23
+    assert config.training.extension.allow_hf32 is True
+    assert isinstance(trainer, GraphTrainerEx)
+    assert applied_hf32 == [True]
 
 
 def test_trainer_ex_applies_enabled_quantization_before_base_initialization(monkeypatch):
