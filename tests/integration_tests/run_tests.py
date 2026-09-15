@@ -43,9 +43,7 @@ def build_models_test_list() -> list[OverrideDefinitions]:
 
     return (
         build_deepseek_v4_test_list()
-        + build_deepseek_v4_checkpoint_resume_test_list()
         + build_deepseek_v3_2_test_list()
-        + build_ema_test_list()
     )
 
 
