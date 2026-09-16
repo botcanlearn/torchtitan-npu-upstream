@@ -118,6 +118,7 @@ class QuantizationExtensionConfig:
     uses per-tensor scales.
     """
     dst_type_max: float = 0.0
+    fsdp_prequantize: bool = False
 
     def validate(self) -> None:
         if self.li_quantization not in (None, "mxfp4", "mxfp8", "fp8", "hif8"):

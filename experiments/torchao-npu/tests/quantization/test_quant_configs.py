@@ -168,3 +168,17 @@ def test_block_mx_config_accepts_only_fp4_nested_fake_quantization():
 
     with pytest.raises(AssertionError, match="must be FP4"):
         BlockMXQuantizeConfig(mxfp4_fake_quantize_config=MXQuantizeConfig())
+
+
+def test_block_mx_config_fsdp_prequantize_defaults_to_false():
+    """fsdp_prequantize defaults to False (on-the-fly quantization baseline)."""
+    config = BlockMXQuantizeConfig()
+    assert config.fsdp_prequantize is False
+
+
+def test_block_mx_config_fsdp_prequantize_can_be_enabled():
+    """fsdp_prequantize can be enabled and is excluded from equality comparison."""
+    config = BlockMXQuantizeConfig(fsdp_prequantize=True)
+    assert config.fsdp_prequantize is True
+    # compare=False: two configs differing only in fsdp_prequantize are equal.
+    assert BlockMXQuantizeConfig(fsdp_prequantize=True) == BlockMXQuantizeConfig(fsdp_prequantize=False)

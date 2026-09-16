@@ -168,6 +168,7 @@ LI Q/K 量化可通过以下参数单独选择，必须同时启用低精度训�
 - `--extension.quantization.enable-mxfp4-qat` 与 `--extension.quantization.no-enable-mxfp4-qat`：控制 routed expert 的 Block FP8 weight 是否增加 MXFP4 QAT fake quant 数值约束，默认关闭，仅对包含 Block FP8 的 recipe 生效。该选项不是持久化 4-bit 参数训练，也不会把算子替换为原生 A8W4 GEMM。
 - `--extension.quantization.li-quantization`：选择 LI Q/K 量化类型，可选 `mxfp4`、`mxfp8`、`fp8` 或 `hif8`；需要同时启用 `enable-quantized-training`。
 - `--extension.quantization.dst-type-max`：量化目标数据类型最大值，用于 MXFP4 fake quant 和 HiF8 LI 量化时，默认值为 `0.0`；HiF8 支持 `0`、`15`、`56`、`224` 和 `32768`。
+- `--extension.quantization.fsdp-prequantize`：将 Block FP8 权重的量化提前到 FSDP all-gather 之前，默认关闭。开启后权重在 `fsdp_pre_all_gather` 中量化为 block MX，all-gather 传输量化后的 FP8 权重与 scale，前向和反向复用该数据，减少通信量和重复量化计算；用 `--extension.quantization.no-fsdp-prequantize` 可显式关闭。该选项只对 recipe 中包含 Block FP8 的部分生效（`mix` 的 routed expert 与 `all_block_fp8`），对 `all_mxfp8` 无效果；需要同时启用 `enable-quantized-training`。当分片未按 32 对齐或不存在 FSDP 分片（如 EFSDP=1 的 MoE）时，自动回退为高精度通信加运行时量化。
 - `--profiler.enable-profiling`：启用性能分析。
 - `USE_GOLDEN`：设为 `1` 时选择 golden attention override；默认使用 Ascend 融合算子路径。
 

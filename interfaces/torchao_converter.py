@@ -370,6 +370,7 @@ def _block_fp8_param_swap(
     *,
     enable_mxfp4_qat: bool = False,
     dst_type_max: float = 0.0,
+    fsdp_prequantize: bool = False,
 ) -> ParamSwapConfig:
     mxfp4_config = None
     if enable_mxfp4_qat:
@@ -380,6 +381,7 @@ def _block_fp8_param_swap(
     return ParamSwapConfig(
         weight_config=BlockMXQuantizeConfig(
             mxfp4_fake_quantize_config=mxfp4_config,
+            fsdp_prequantize=fsdp_prequantize,
         ),
         activation_config=MXQuantizeConfig(),
     )
@@ -407,6 +409,7 @@ def _recipe_converters(
     *,
     enable_mxfp4_qat: bool,
     dst_type_max: float,
+    fsdp_prequantize: bool,
     model_compile_enabled: bool,
     li_quantization: LIQuantization | None = None,
     li_kernel_config: LightningIndexerKernelConfig | None = None,
@@ -427,11 +430,12 @@ def _recipe_converters(
         routed_config = _block_fp8_param_swap(
             enable_mxfp4_qat=enable_mxfp4_qat,
             dst_type_max=dst_type_max,
+            fsdp_prequantize=fsdp_prequantize,
         )
         if recipe == "mix":
             dense_config = _mxfp8_param_swap()
         elif recipe == "all_block_fp8":
-            dense_config = _block_fp8_param_swap()
+            dense_config = _block_fp8_param_swap(fsdp_prequantize=fsdp_prequantize)
         else:
             raise ValueError(f"recipe must be one of {_SUPPORTED_RECIPES}, got {recipe!r}")
 
@@ -523,6 +527,7 @@ def apply_quantization_converter(
         quantization_config.recipe,
         enable_mxfp4_qat=quantization_config.enable_mxfp4_qat,
         dst_type_max=quantization_config.dst_type_max,
+        fsdp_prequantize=quantization_config.fsdp_prequantize,
         model_compile_enabled=model_compile_enabled,
         li_quantization=quantization_config.li_quantization,
         li_kernel_config=li_kernel_config,
@@ -534,11 +539,12 @@ def apply_quantization_converter(
         model_config = converter_config.build().convert(model_config)
 
     logger.info(
-        "Applied TorchAO-NPU recipe=%s, mxfp4_qat=%s, li_quantization=%s, dst_type_max=%s",
+        "Applied TorchAO-NPU recipe=%s, mxfp4_qat=%s, li_quantization=%s, dst_type_max=%s, fsdp_prequantize=%s",
         quantization_config.recipe,
         quantization_config.enable_mxfp4_qat,
         quantization_config.li_quantization,
         quantization_config.dst_type_max,
+        quantization_config.fsdp_prequantize,
     )
     return replace(model_spec, model=model_config)
 

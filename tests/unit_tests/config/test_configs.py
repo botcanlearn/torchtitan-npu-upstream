@@ -235,6 +235,7 @@ def test_config_manager_parses_quantization_extension(
     assert quantization.recipe == "all_block_fp8"
     assert quantization.enable_mxfp4_qat is True
     assert quantization.dst_type_max == 7.0
+    assert quantization.fsdp_prequantize is False
 
 
 def test_config_manager_materializes_muon_from_cli(monkeypatch, tmp_path):
@@ -414,6 +415,7 @@ def test_trainer_ex_applies_enabled_quantization_before_base_initialization(monk
                 quantization_config.recipe,
                 quantization_config.enable_mxfp4_qat,
                 quantization_config.dst_type_max,
+                quantization_config.fsdp_prequantize,
                 model_compile_enabled,
             )
         )
@@ -440,6 +442,7 @@ def test_trainer_ex_applies_enabled_quantization_before_base_initialization(monk
                 recipe="all_block_fp8",
                 enable_mxfp4_qat=True,
                 dst_type_max=7.0,
+                fsdp_prequantize=False,
             ),
         ),
     )
@@ -448,7 +451,7 @@ def test_trainer_ex_applies_enabled_quantization_before_base_initialization(monk
 
     assert isinstance(trainer, TrainerEx)
     assert events == [
-        ("quantize", source_model_spec, "all_block_fp8", True, 7.0, False),
+        ("quantize", source_model_spec, "all_block_fp8", True, 7.0, False, False),
         ("apply_hf32", True),
         ("initialize_base", quantized_model_spec),
     ]
