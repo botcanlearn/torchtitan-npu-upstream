@@ -10,7 +10,7 @@ import torch
 import torch_npu  # noqa: F401
 
 
-def _fake_mhc_sinkhorn_backward(grad_y, norm, sum_out):
+def _fake_mhc_sinkhorn_backward(grad_y, norm, sum_out, *_):
     return torch.empty_like(grad_y)
 
 
@@ -28,6 +28,10 @@ def _fake_mhc_pre_backward(
     gamma=None,
     hc_eps=1e-6,
     grad_x_post=None,
+    # Absorb optional args appended by newer op-plugin schemas (e.g.
+    # inner_precise, op-plugin#5836): torch_npu's autograd passes every schema
+    # argument positionally, and none of them affect the meta outputs.
+    *_,
 ):
     return (
         torch.empty_like(x),
