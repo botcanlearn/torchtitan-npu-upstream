@@ -18,10 +18,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # NPU cards for configuration.
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
 
-# A5 defaults to Inductor with the DeepSeek-V4 pre-AOT pattern.
+# A5 defaults to Inductor; partial RoPE fuses through the asc_partial override.
 export COMPILE_BACKEND="${COMPILE_BACKEND:-inductor}"
-export TORCHTITAN_NPU_PATTERN_IMPORTS="${TORCHTITAN_NPU_PATTERN_IMPORTS:-torchtitan_npu.compile.patterns.deepseek_v4.inplace_partial_rope}"
-export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.workaround}"
+export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial}"
 
 # A5 defaults to block-FP8 quantized training. Append
 # --extension.quantization.no-enable-quantized-training for BF16 training.

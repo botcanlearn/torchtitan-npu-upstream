@@ -40,3 +40,27 @@ def test_debugmodel_uses_cann_profiler_extension():
 
     assert isinstance(config.profiler, CANNProfiler.Config)
     assert isinstance(config.profiler.build(), CANNProfiler)
+
+
+def test_flash_rope_configs_pin_split_per_site():
+    """Every rope site's config carries the split matching its tensor width."""
+    from torchtitan_npu.models.deepseek_v4 import model_registry
+
+    model_config = model_registry("deepseek_v4_flash", num_mtp_layers=0).model
+    rd = 64
+
+    for layer in model_config.layers:
+        attn = layer.attention
+        # Attention q/kv/o rotate the tail of a head_dim-wide (512) tensor.
+        assert attn.rope.dim == rd
+        assert attn.rope.split == attn.head_dim - rd
+        if attn.compress_ratio > 1:
+            assert attn.compressor.rope.split == attn.compressor.head_dim - rd
+        if attn.compress_ratio == 4:
+            # Indexer q is index_head_dim-wide (128): a different split even
+            # though it reuses the same base rope flavor.
+            indexer = attn.indexer
+            assert indexer.rope.dim == rd
+            assert indexer.rope.split == indexer.index_head_dim - rd
+            return
+    raise AssertionError("flash spec must contain compress_ratio == 4 layers")

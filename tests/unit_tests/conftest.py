@@ -46,11 +46,6 @@ _FAKE_FUNCTIONS = (
     "sparse_lightning_indexer_kl_loss_grad_metadata",
 )
 
-# Imported via ``cann_ops_transformer.ops`` (the compile-pattern module).
-_OPS_SUBMODULE_FUNCTIONS = (
-    "inplace_partial_rotary_mul",
-    *_FAKE_FUNCTIONS,
-)
 
 # Resolved at import time via ``torch.ops.cann_ops_transformer.*`` (the
 # ``_ASC_SPARSEATTN_HOOK`` bundle); they are never invoked on CPU.
@@ -59,6 +54,24 @@ _TORCH_OPS_FUNCTIONS = (
     "sparse_flash_mla",
     "sparse_flash_mla_grad",
     "sparse_lightning_indexer_kl_loss_grad",
+)
+
+# The two partial-RoPE mutator ops: unlike the recorder functions above they
+# carry ``(Tensor(a!)) -> ()`` schemas and really run on CPU during the rope
+# tests (the test module registers CPU kernels emulating the CANN math), so
+# the mock must define them with the exact native signatures whenever the
+# real package did not.
+_TORCH_OPS_MUTATOR_SCHEMAS = (
+    (
+        "inplace_partial_rotary_mul",
+        "inplace_partial_rotary_mul(Tensor(a!) x, Tensor r1, Tensor r2, *, "
+        'str rotary_mode="interleave", int[2] partial_slice=[0, 0]) -> ()',
+    ),
+    (
+        "inplace_partial_rotary_mul_backward",
+        "inplace_partial_rotary_mul_backward(Tensor(a!) grad_output, Tensor r1, Tensor r2, *, "
+        'str rotary_mode="interleave", int[2] partial_slice=[0, 0]) -> ()',
+    ),
 )
 
 
@@ -80,15 +93,14 @@ def _fake_cann_ops():
         setattr(ct, fn_name, _make(fn_name))
 
     ct.ops = types.ModuleType("cann_ops_transformer.ops")
-    for fn_name in _OPS_SUBMODULE_FUNCTIONS:
+    for fn_name in _FAKE_FUNCTIONS:
         setattr(ct.ops, fn_name, _make(fn_name))
 
+    # Registration submodule for the fused partial-RoPE mutator: the ops
+    # module imports ``cann_ops_transformer.ops.inplace_partial_rotary_mul``
+    # at module level, so a bare importable module keeps the CPU suite green.
     ct.inplace_partial_rotary_mul_module = types.ModuleType("cann_ops_transformer.ops.inplace_partial_rotary_mul")
     ct.inplace_partial_rotary_mul_module.__path__ = []
-    ct.inplace_partial_rotary_mul_impl_module = types.ModuleType(
-        "cann_ops_transformer.ops.inplace_partial_rotary_mul.inplace_partial_rotary_mul"
-    )
-    ct.inplace_partial_rotary_mul_impl_module.InplacePartialRotaryMulFn = torch.autograd.Function
     return ct
 
 
@@ -113,13 +125,20 @@ def install():
     sys.modules["cann_ops_transformer"] = recorder
     sys.modules["cann_ops_transformer.ops"] = recorder.ops
     sys.modules["cann_ops_transformer.ops.inplace_partial_rotary_mul"] = recorder.inplace_partial_rotary_mul_module
-    sys.modules["cann_ops_transformer.ops.inplace_partial_rotary_mul.inplace_partial_rotary_mul"] = (
-        recorder.inplace_partial_rotary_mul_impl_module
-    )
     ns = torch.ops.cann_ops_transformer
     for fn_name in _TORCH_OPS_FUNCTIONS:
         if not hasattr(ns, fn_name):
             setattr(ns, fn_name, getattr(recorder, fn_name))
+    # Define the partial-RoPE mutator ops (real signatures) when the real
+    # package has not registered them; keep the library handle alive on the
+    # recorder so the schemas stay registered for the process lifetime.
+    missing = [name for name, _ in _TORCH_OPS_MUTATOR_SCHEMAS if not hasattr(ns, name)]
+    if missing:
+        lib = torch.library.Library("cann_ops_transformer", "FRAGMENT")
+        for name, schema in _TORCH_OPS_MUTATOR_SCHEMAS:
+            if name in missing:
+                lib.define(schema)
+        recorder._fragment_lib = lib
 
 
 def _requested_only_tooling(config):

@@ -9,11 +9,9 @@
 | --- | --- | --- | --- |
 | 融合算子对应完整可配置组件 | `override` + `ops` | 整体替换组件；已有设备算子可由 replacement 直接调用 | [`torch_npu.npu_rms_norm`](../../torchtitan_npu/override/common/rms_norm.py) |
 | 融合算子是可配置组件的一部分 | `override` + `ops` | 只替换组件中的对应逻辑，其余逻辑沿用上游实现 | [`npu_moe_token_unpermute`](../../torchtitan_npu/ops/ascendc/moe_token_unpermute.py)（接入：[`torchtitan_npu.override.common.token_dispatcher.asc`](../../torchtitan_npu/override/common/token_dispatcher.py)） |
-| 融合算子是一段可被 `torch.compile` 捕获的连续计算 | pre-AOT pattern | 在 `compile/patterns/` 中替换编译图中的片段 | [`inplace_partial_rotary_mul`](../../torchtitan_npu/compile/patterns/deepseek_v4/inplace_partial_rope.py) |
 
-`torch.library.custom_op` 只是 `ops` 实现需要进入 `torch.compile` 图时的兼容封装，不改变上述两种
-组件替换方式。仅替换编译图片段时，使用 pre-AOT pattern。
-片段融合的完整示例见[片段融合算子接入](../graph_pattern_fusion.md)。
+`torch.library.custom_op` 只是 `ops` 实现需要进入 `torch.compile` 图时的兼容封装，
+不改变上述两种组件替换方式。
 
 ## 目录与命名
 
@@ -70,8 +68,7 @@ torchtitan_npu/override/<scope>/<target>/
 - 算子支持的设备代际、CANN 版本、dtype、shape 和并行范围。
 
 选择最小且稳定的组件边界。融合算子覆盖组件全部计算时，整体替换 Module；只覆盖组件部分计算时，
-继承并重写对应方法；仅替换编译图连续片段时，改用 pre-AOT pattern。模型专属 target 不要放入
-`common/`。
+继承并重写对应方法。模型专属 target 不要放入 `common/`。
 
 ### 2. 实现算子层
 
@@ -222,4 +219,6 @@ python -m torchtitan_npu.train \
 - [`deepseek_v4/sparse_attn`](../../torchtitan_npu/override/deepseek_v4/sparse_attn)：AscendC、PyPTO 与 golden DSA。
 - [`deepseek_v4/mhc`](../../torchtitan_npu/override/deepseek_v4/mhc)：AscendC 与 Triton 多后端替换。
 - [`torchtitan_npu/override/common/token_dispatcher.py`](../../torchtitan_npu/override/common/token_dispatcher.py)：`token_dispatcher.asc` 在 `AllToAllTokenDispatcher` 中替换局部 dispatch/combine 计算。
+- [`torchtitan_npu/override/common/rope.py`](../../torchtitan_npu/override/common/rope.py)：`rope.asc_partial` 整体替换 partial-RoPE 站点，含可选 CANN 依赖的惰性加载。
+- [`torchtitan_npu/ops/ascendc/inplace_partial_rotary_mul.py`](../../torchtitan_npu/ops/ascendc/inplace_partial_rotary_mul.py)：原生 mutator 算子的 functional autograd 包装（clone + 前向/反向原地旋转）。
 - [`ops/ascendc/moe_token_unpermute.py`](../../torchtitan_npu/ops/ascendc/moe_token_unpermute.py)：custom op、Fake 和 Autograd 注册示例。

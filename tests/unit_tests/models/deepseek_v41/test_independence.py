@@ -34,13 +34,39 @@ def test_v41_package_has_no_v4_references():
                         assert not V4_MODULE.search(f"{node.module}.{alias.name}"), path
 
 
+# The isolated subprocess must be self-contained without a CANN stack:
+# ``override.common.rope`` loads the fused partial-RoPE wrapper lazily on
+# first call, so the model packages import with ``cann_ops_transformer``
+# entirely absent.  A blocker hook in each subprocess *rejects* that import
+# (no fake package), proving the boundary instead of merely running on a
+# machine that happens to lack CANN.
+_ISOLATED_PRELUDE = """\
+import sys
+
+
+class _NoCannOps:
+    def find_spec(self, name, path=None, target=None):
+        if name == "cann_ops_transformer" or name.startswith("cann_ops_transformer."):
+            raise ImportError(f"cann_ops_transformer must not be imported by the model packages: {name}")
+        return None
+
+
+sys.meta_path.insert(0, _NoCannOps())
+"""
+
+
 def _run_isolated(code):
+    # Pass a torchtitan source checkout through explicitly when the host uses
+    # one (the pytest conftest would otherwise do it); never import the
+    # product conftest here — it installs the fake CANN recorder.
+    torchtitan_dir = os.environ.get("TORCHTITAN_DIR", "")
+    pythonpath = os.pathsep.join(part for part in (str(REPO), torchtitan_dir) if part)
     result = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", _ISOLATED_PRELUDE + code],
         cwd=REPO,
         capture_output=True,
         text=True,
-        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0", "OMP_NUM_THREADS": "1", "PYTHONPATH": str(REPO)},
+        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0", "OMP_NUM_THREADS": "1", "PYTHONPATH": pythonpath},
         timeout=180,
     )
     assert result.returncode == 0, f"subprocess failed:\n{result.stdout}\n{result.stderr}"
@@ -111,3 +137,26 @@ v41.model_registry("deepseek_v41_debugmodel")
 assert identities() == before
 assert config_contract() == config_before
 """)
+
+
+def test_common_rope_imports_without_cann():
+    """``override.common`` stays importable (and constructible) with the CANN
+    op package rejected: the fused partial-RoPE wrapper loads its CANN
+    dependency lazily, so only *calling* the asc_partial variant requires the
+    package — and that failure is loud, never a silent math fallback."""
+    _run_isolated(
+        "import torch\n"
+        "from torchtitan_npu.override.common.rope import (\n"
+        "    AscPartialComplexRoPE, WorkaroundComplexRoPE,\n"
+        ")\n"
+        "workaround = WorkaroundComplexRoPE(WorkaroundComplexRoPE.Config(dim=8, max_seq_len=16))\n"
+        "assert workaround.cache.shape == (2, 16, 8)\n"
+        "fused = AscPartialComplexRoPE(AscPartialComplexRoPE.Config(dim=8, max_seq_len=16, split=4))\n"
+        "assert fused.cache.shape == (2, 16, 8)\n"
+        "try:\n"
+        "    fused(torch.randn(1, 3, 2, 12), positions=torch.arange(3).unsqueeze(0))\n"
+        "except ImportError as error:\n"
+        "    assert 'cann_ops_transformer' in str(error), error\n"
+        "else:\n"
+        "    raise AssertionError('asc_partial forward must fail without the CANN package')\n"
+    )

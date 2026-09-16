@@ -7,7 +7,9 @@
 """Override: provide torch-compatible and AscendC fused rotary embeddings.
 
 The workaround variant uses pre-expanded cosine/sine caches; the AscendC fused
-variants call ``torch_npu.npu_rotary_mul``. Select one per RoPE config.
+variants call ``torch_npu.npu_rotary_mul``. The fused partial-RoPE wrapper is
+imported lazily on first call, so this module stays importable without an NPU
+stack. Select one variant per RoPE config.
 """
 
 import weakref
@@ -21,6 +23,11 @@ from torchtitan.models.common.rope import (
     CosSinRoPE,
     _maybe_wrap_positions,
     _reshape_for_broadcast,
+)
+
+from torchtitan_npu.patches.torchtitan.models.common.rope import (
+    SplitComplexRoPEConfig,
+    SplitCosSinRoPEConfig,
 )
 
 _ROPE_CACHE_FIELDS = (
@@ -115,7 +122,7 @@ class WorkaroundComplexRoPE(  # pyrefly: ignore [inconsistent-inheritance]
     _InterleavedCacheMixin, ComplexRoPE
 ):
     @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
+    class Config(SplitComplexRoPEConfig):
         pass
 
     @staticmethod
@@ -194,7 +201,7 @@ class AscComplexRoPE(
 
 class AscCosSinRoPE(_FirstRowPositionsMixin, CosSinRoPE):
     @dataclass(kw_only=True, slots=True)
-    class Config(CosSinRoPE.Config):
+    class Config(SplitCosSinRoPEConfig):
         pass
 
     @staticmethod
@@ -232,3 +239,75 @@ def asc_complex(cfg: ComplexRoPE.Config) -> AscComplexRoPE.Config:
 )
 def asc_cossin(cfg: CosSinRoPE.Config) -> AscCosSinRoPE.Config:
     return derive(cfg, AscCosSinRoPE.Config)
+
+
+class AscPartialComplexRoPE(WorkaroundComplexRoPE):
+    """Partial RoPE fused into one ``inplace_partial_rotary_mul`` per site.
+
+    ``forward`` takes the full-width tensor; the wrapper clones it and the
+    kernel rotates only the ``partial_slice`` span, so no slice/cat is
+    materialized. Eager and ``torch.compile`` share the same path.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(SplitComplexRoPEConfig):  # pyrefly: ignore [bad-override]
+        def __post_init__(self) -> None:
+            if self.split < 0:
+                raise ValueError(f"split must be non-negative, got {self.split}.")
+            if self.dim <= 0 or self.dim % 2:
+                raise ValueError(f"rotary dim must be a positive even width, got {self.dim}.")
+
+    def forward(  # pyrefly: ignore [bad-override]
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Lazy CANN import: keeps this module importable without an NPU stack.
+        from torchtitan_npu.ops.ascendc.inplace_partial_rotary_mul import (
+            inplace_partial_rotary_mul,
+        )
+
+        split = self.config.split  # pyrefly: ignore [missing-attribute]
+        expected = split + self.config.dim
+        if query.shape[-1] != expected:
+            raise ValueError(
+                f"{type(self).__name__} tail-RoPE contract violated: query width "
+                f"{query.shape[-1]} != split {split} + rotary dim {self.config.dim}."
+            )
+        if key is not None and key.shape[-1] != expected:
+            raise ValueError(
+                f"{type(self).__name__} tail-RoPE contract violated: key width "
+                f"{key.shape[-1]} != split {split} + rotary dim {self.config.dim}."
+            )
+        cos, sin = self._reshape_cache(query[..., split:], positions)
+        if inverse:
+            sin = -sin
+        out_q = inplace_partial_rotary_mul(
+            query,
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[split, split + self.config.dim],
+        )
+        if key is None:
+            return out_q
+        out_k = inplace_partial_rotary_mul(
+            key,
+            cos,
+            sin,
+            rotary_mode="interleave",
+            partial_slice=[split, split + self.config.dim],
+        )
+        return out_q, out_k
+
+
+@override(
+    target=SplitComplexRoPEConfig,
+    exact=True,
+    description=("AscendC fused partial RoPE: one CANN inplace_partial_rotary_mul per site"),
+)
+def asc_partial(cfg: SplitComplexRoPEConfig) -> AscPartialComplexRoPE.Config:
+    return derive(cfg, AscPartialComplexRoPE.Config)

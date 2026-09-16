@@ -351,27 +351,24 @@ class Attention(BaseAttention):
         """
         window = attention_masks.window
         bsz, seqlen, _ = x.size()
-        rd = self.rope_head_dim
 
         qr = self.q_norm(self.wq_a(x))
         q = self.wq_b(qr)
         q = q.view(bsz, seqlen, -1, self.head_dim)
         q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
-        q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.rope(q_rope, positions=positions)
-        q = torch.cat([q_nope, q_rope], dim=-1)
+        # RoPE owns the [nope | rope] split: it receives the full-width
+        # tensor and rotates only the trailing rope_head_dim channels.
+        q = self.rope(q, positions=positions)
 
         # The swa projection + RoPE run on the local rows (the sender's own
         # doc-relative positions — the attention's positions convention
         # resets per document); the window gather exchanges the post-RoPE
         # rows into the packed ori stream.
         swa_k = self.kv_norm(self.wkv(x))
-        kv_nope, kv_rope = torch.split(swa_k, [self.head_dim - rd, rd], dim=-1)
-        kv_rope = self.rope(
-            kv_rope.unsqueeze(2),
+        swa_k = self.rope(
+            swa_k.unsqueeze(2),
             positions=positions.reshape(1, -1),
         ).squeeze(2)
-        swa_k = torch.cat([kv_nope, kv_rope], dim=-1)
         swa_k = self.token_dispatcher.gather(swa_k, window)
 
         cmp_k = None
@@ -408,9 +405,7 @@ class Attention(BaseAttention):
             attention_masks=attention_masks,
         )
 
-        o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, positions=positions, inverse=True)
-        o = torch.cat([o_nope, o_rope], dim=-1)
+        o = self.rope(o, positions=positions, inverse=True)
 
         # ``wo_a`` is a BatchedLinear over the head groups; group the heads
         # before the per-group matmul.

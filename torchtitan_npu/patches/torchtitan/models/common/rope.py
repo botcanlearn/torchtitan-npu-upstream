@@ -1,73 +1,77 @@
-# Pending upstream PR: https://github.com/pytorch/torchtitan/pull/3634
+# Backports the split-aware partial-RoPE API: the rotary split as a config
+# field and the tail-rotation forward come from sdmyzlp/torchtitan branch
+# br_dpsk_v4_1, commit 24dd1a1 ("rope: make the rotary split a config field",
+# https://github.com/sdmyzlp/torchtitan/commit/24dd1a1); the query/key
+# optional-key + inverse forward surface follows the API shipped upstream by
+# https://github.com/pytorch/torchtitan/pull/3634 (merged as 0ff2464).
+# Remove this module once the TorchTitan dependency pinned by this project
+# natively carries an equivalent split config and forward semantics and the
+# compatibility tests pass — keep whichever key/inverse backport pieces the
+# pinned version still lacks.
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Backport the unified single-tensor RoPE API and TorchTitan's YaRN policy
-from PR #3634.
+"""Backport the split-aware partial RoPE API onto the installed rope module."""
 
-``RoPE.forward`` accepts ``key=None`` (rotate a single tensor, returning it
-directly) and ``inverse`` (conjugate rotation, for backward passes); the
-YaRN correction in ``ComplexRoPE._precompute_cache`` is applied when
-``scaling == "yarn"`` and ``rope_factor > 1.0``, matching TorchTitan's
-configuration semantics.  The previous ``end > original_seq_len``
-context-extension gate silently disabled YaRN for models whose max_seq_len
-does not exceed their original_seq_len.  ``original_seq_len`` remains a
-parameter of the correction itself.
-
-The previous ``SingleComplexRoPE`` backport is superseded by this unified API.
-
-Remove this module after the TorchTitan dependency includes the PR.
-"""
-
-import math
+import dataclasses
 
 import torch
 import torchtitan.models.common.rope
 
+__all__ = [
+    "SplitComplexRoPEConfig",
+    "SplitCosSinRoPEConfig",
+]
 
-def _yarn_precompute_cache(self) -> torch.Tensor:
-    """Compute the RoPE cache using TorchTitan's YaRN policy."""
-    cfg = self.config
-    dim = cfg.dim
-    end = cfg.max_seq_len
-    theta = cfg.theta
 
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+@dataclasses.dataclass(kw_only=True, slots=True)
+class SplitComplexRoPEConfig(torchtitan.models.common.rope.ComplexRoPE.Config):
+    """``ComplexRoPE.Config`` plus the ``split`` prefix-channel width.
 
-    if cfg.scaling == "llama":
-        scaling_factor = cfg.scaling_factor
-        low_freq_factor = cfg.low_freq_factor
-        high_freq_factor = cfg.high_freq_factor
-        original_max_position_embeddings = cfg.original_max_position_embeddings
-        wavelen = 2 * math.pi / freqs
-        high_freq_wavelen = original_max_position_embeddings / high_freq_factor
-        low_freq_wavelen = original_max_position_embeddings / low_freq_factor
-        freqs = torch.where(wavelen > low_freq_wavelen, freqs / scaling_factor, freqs)
-        smooth_factor = (original_max_position_embeddings / wavelen - low_freq_factor) / (
-            high_freq_factor - low_freq_factor
-        )
-        smoothed_freqs = (1 - smooth_factor) * freqs / scaling_factor + smooth_factor * freqs
-        is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(wavelen > low_freq_wavelen)
-        freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-    elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
-        # YaRN correction is enabled only for an actual scaling factor.
-        freqs = torchtitan.models.common.rope._yarn_inv_freq(
-            dim,
-            theta,
-            cfg.rope_factor,
-            cfg.beta_fast,
-            cfg.beta_slow,
-            cfg.original_seq_len,
-            cfg.truncate,
-        )
+    ``build()`` still constructs the upstream ``ComplexRoPE``; instances of
+    this config carry ``split`` so the patched forward can slice the rotary
+    span out of full-width inputs.
+    """
 
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+    split: int = 0
+
+
+@dataclasses.dataclass(kw_only=True, slots=True)
+class SplitCosSinRoPEConfig(torchtitan.models.common.rope.CosSinRoPE.Config):
+    """``CosSinRoPE.Config`` plus the ``split`` prefix-channel width."""
+
+    split: int = 0
+
+
+_ORIG_ROPE_INIT = torchtitan.models.common.rope.RoPE.__init__
+
+
+def _rope_init(self, config) -> None:
+    """Upstream ``__init__`` plus ``self.split`` (br_dpsk_v4_1 keeps the
+    split in the module, not just the config)."""
+    _ORIG_ROPE_INIT(self, config)
+    self.split = getattr(config, "split", 0)
+
+
+def _split(self, x: torch.Tensor | None) -> torch.Tensor | None:
+    """Return the channels of ``x`` to rotate: everything after the ``split`` prefix.
+
+    A ``None`` tensor (an absent key) and an unset ``split`` pass through
+    unchanged, so query and key can be handed over unconditionally.
+    """
+    if x is None or not self.split:
+        return x
+    return x[..., self.split :]
+
+
+def _unsplit(self, rotated: torch.Tensor, x: torch.Tensor | None) -> torch.Tensor:
+    """Put the untouched prefix of ``x`` back in front of its ``rotated`` channels."""
+    if x is None or not self.split:
+        return rotated
+    return torch.cat([x[..., : self.split], rotated], dim=-1)
 
 
 def _rope_forward(
@@ -78,9 +82,19 @@ def _rope_forward(
     *,
     inverse: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Apply rotary embeddings to query and optional key tensors."""
-    reshaped_cache = self._reshape_cache(query, positions)
-    return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+    """Apply rotary embeddings to query and optional key tensors.
+
+    With a non-zero ``split`` the leading ``split`` channels are left
+    untouched: the trailing ``dim`` channels are rotated and the prefix is
+    concatenated back, so ``apply_rotary_emb`` only ever sees the rotated
+    slice.
+    """
+    rope_cache = self._reshape_cache(query, positions)
+    rotated = self.apply_rotary_emb(self._split(query), self._split(key), rope_cache, inverse=inverse)
+    if key is None:
+        return self._unsplit(rotated, query)
+    rotated_query, rotated_key = rotated
+    return self._unsplit(rotated_query, query), self._unsplit(rotated_key, key)
 
 
 def _complex_apply_rotary_emb(
@@ -127,16 +141,30 @@ def _cossin_apply_rotary_emb(
 
 
 def apply() -> None:
-    """Monkey-patch the upstream rope module to PR #3634's final state."""
+    """Monkey-patch the upstream rope module to the br_dpsk_v4_1 API."""
 
+    if getattr(torchtitan.models.common.rope.RoPE, "_npu_split_rope", False):
+        return
+
+    torchtitan.models.common.rope.RoPE.__init__ = _rope_init  # pyrefly: ignore [bad-assignment]
+    torchtitan.models.common.rope.RoPE._split = _split  # pyrefly: ignore [bad-assignment]
+    torchtitan.models.common.rope.RoPE._unsplit = _unsplit  # pyrefly: ignore [bad-assignment]
     torchtitan.models.common.rope.RoPE.forward = _rope_forward  # pyrefly: ignore [bad-assignment]
-    torchtitan.models.common.rope.ComplexRoPE._precompute_cache = _yarn_precompute_cache
     torchtitan.models.common.rope.ComplexRoPE.apply_rotary_emb = staticmethod(  # pyrefly: ignore [bad-assignment]
         _complex_apply_rotary_emb
     )
     torchtitan.models.common.rope.CosSinRoPE.apply_rotary_emb = staticmethod(  # pyrefly: ignore [bad-assignment]
         _cossin_apply_rotary_emb
     )
+    # Configs gain the ``split`` field; ``_owner`` is inherited, so ``build()``
+    # keeps constructing the upstream modules with the split-bearing config.
+    torchtitan.models.common.rope.ComplexRoPE.Config = (  # pyrefly: ignore [read-only]
+        SplitComplexRoPEConfig
+    )
+    torchtitan.models.common.rope.CosSinRoPE.Config = (  # pyrefly: ignore [read-only]
+        SplitCosSinRoPEConfig
+    )
+    torchtitan.models.common.rope.RoPE._npu_split_rope = True
 
 
 apply()

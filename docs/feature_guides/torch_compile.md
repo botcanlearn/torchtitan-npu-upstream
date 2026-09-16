@@ -17,7 +17,6 @@ Host 下发和中间 Tensor 读写。`torch.compile` 使用 TorchDynamo 捕获�
 
 - 复用 TorchTitan 配置选择需要编译的训练组件；
 - 选择 `torch_npu` 内置的 AscendC Inductor 后端；
-- 提供可选的 pre-AOT graph pattern；
 - 在包导入阶段安装当前软件栈需要的 NPU 兼容 patch。
 
 相关机制的边界如下：
@@ -26,11 +25,10 @@ Host 下发和中间 Tensor 读写。`torch.compile` 使用 TorchDynamo 捕获�
 | --- | --- | --- |
 | TorchTitan compile 配置 | 训练组件构建与并行化 | 选择模型或 loss 是否进入 `torch.compile` |
 | AscendC AutoFuse | Inductor lowering 与 Codegen | 自动融合受支持的 Inductor 子图并生成 AscendC Kernel |
-| pre-AOT pattern | Dynamo 成图后、AOTAutograd 生成反向前 | 将稳定连续片段替换为专用融合实现 |
 | override 与 custom op | 模型构建或明确算子边界 | 替换完整组件，或封装已有 CANN/Triton/PyPTO 算子 |
 
-普通 ATen 图优先交给 AutoFuse；完整组件使用 override；只有稳定且无法由通用融合表达的局部片段才使用
-pre-AOT pattern。这样可以保持模型代码与 NPU 后端解耦，避免为同一目标维护多套 wrapper。
+普通 ATen 图优先交给 AutoFuse；完整组件使用 override。这样可以保持模型代码与 NPU 后端解耦，
+避免为同一目标维护多套 wrapper。
 
 ## 2. 用户使用场景与对外接口
 
@@ -71,8 +69,7 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 ```
 
 该 wrapper 最终调用 `scripts/run_train_multinodes.sh`；同一节点上的 `torchrun` 子进程会继承启动 shell
-的环境变量。需要启用 pre-AOT pattern 时，再增加 `PATTERN_IMPORTS`；如果脚本无法自动识别本机地址，设置
-对应的 `LOCAL_HOST`。
+的环境变量。如果脚本无法自动识别本机地址，设置对应的 `LOCAL_HOST`。
 
 ### 2.2 使用 `aot_eager` 检查编译兼容性
 
@@ -88,21 +85,7 @@ AutoFuse。当前 DeepSeek-V4 示例默认使用 `aot_eager`；验证 AutoFuse �
 含 FlexAttention 的模型在 `aot_eager` 下可能由上游 regional Inductor 单独编译 FlexAttention 区域。
 这仍不等同于完整 TransformerBlock 使用 `inductor` 编译。
 
-### 2.3 注册特定图 pattern
-
-当融合目标是 Module 内的一段稳定连续计算时，可以在进程启动前导入 pattern 模块：
-
-```bash
-PATTERN_IMPORTS=torchtitan_npu.compile.patterns.deepseek_v4.inplace_partial_rope \
-TORCHINDUCTOR_NPU_BACKEND=ascendc \
-COMPILE_BACKEND=inductor \
-bash scripts/run_train.sh <训练参数>
-```
-
-多个模块使用逗号分隔。pattern 修改编译图，`override.imports` 修改配置树和组件，两者是独立入口。
-pattern 的开发与验证方法见[片段融合算子接入](../graph_pattern_fusion.md)。
-
-### 2.4 配置和环境变量
+### 2.3 配置和环境变量
 
 本仓直接复用上游 `torchtitan.config.CompileConfig`：
 
@@ -123,8 +106,6 @@ pattern 的开发与验证方法见[片段融合算子接入](../graph_pattern_f
 | --- | --- |
 | `COMPILE_BACKEND` | 非空时，启动脚本追加 model compile CLI |
 | `TORCHINDUCTOR_NPU_BACKEND` | 选择 Inductor 内部的 NPU Codegen |
-| `PATTERN_IMPORTS` | `TORCHTITAN_NPU_PATTERN_IMPORTS` 的脚本便捷别名 |
-| `TORCHTITAN_NPU_PATTERN_IMPORTS` | 导入并注册以逗号分隔的 pattern 模块 |
 | `ASCEND_SET_ENV_PATH` | 指定 CANN `set_env.sh`，未设置时按标准安装路径查找 |
 
 ## 3. 特殊背景及限制
@@ -143,7 +124,7 @@ torch.compile backend: inductor
 再修改环境变量，不能可靠切换已经初始化的 Codegen。
 
 `scripts/run_train.sh` 在启动 Python 前默认设置 AscendC。当前 `scripts/run_train_multinodes.sh` 不补充该默认值，
-多机任务必须在所有节点启动前显式导出同一变量，并确保所有 rank 使用相同 backend 和 pattern 集合。
+多机任务必须在所有节点启动前显式导出同一变量，并确保所有 rank 使用相同 backend。
 
 ### 3.2 当前主线使用 `torch_npu` 内置后端
 
@@ -186,7 +167,7 @@ Codegen、C++ wrapper 和 AscendC Kernel 编译，不能用于稳态性能结论
 
 AscendC 融合 Kernel 默认缓存到 `/tmp/.npu_kernels_<user>`，也可通过
 `TORCHINDUCTOR_NPU_EXT_CACHE_DIR` 指定。缓存目录依赖文件锁，不能放到无法保证锁语义的跨 OS 共享目录。
-切换软件版本、SoC、backend、模型图、shape 关键配置、pattern 或 custom op 后，应使用隔离缓存或定向失效相关
+切换软件版本、SoC、backend、模型图、shape 关键配置或 custom op 后，应使用隔离缓存或定向失效相关
 产物；不建议每次训练前无条件清空整个 `/tmp`。
 
 下列调试选项会改变编译或执行行为，不能直接用于正式性能结论：
@@ -212,7 +193,6 @@ flowchart TB
 
     subgraph PLUGIN[torchtitan-npu 接入层]
         PATCH[NPU compatibility patches]
-        PATTERN[可选 pre-AOT patterns]
         EXT[TrainerEx 与 override/custom op]
     end
 
@@ -223,7 +203,6 @@ flowchart TB
 
     subgraph PYTORCH[PyTorch 编译层]
         DYNAMO[TorchDynamo]
-        PREAOT[pre-AOT graph pass]
         AOT[AOTAutograd]
         INDUCTOR[TorchInductor]
         FALLBACK[fallback / extern kernel]
@@ -238,11 +217,9 @@ flowchart TB
 
     USER --> LAUNCH --> ENTRY
     ENTRY --> PATCH
-    ENTRY --> PATTERN
     ENTRY --> EXT
     ENTRY --> CONFIG --> MODEL --> DYNAMO
-    PATTERN --> PREAOT
-    DYNAMO --> PREAOT --> AOT --> INDUCTOR --> BACKEND
+    DYNAMO --> AOT --> INDUCTOR --> BACKEND
     BACKEND -->|满足 lowering 条件| AUTOFUSE --> CACHE --> KERNEL
     BACKEND -->|不满足条件| FALLBACK
 ```
@@ -264,8 +241,7 @@ flowchart TB
 patches → compile → config → extensions → ops
 ```
 
-该顺序是运行时契约。NPU patch 必须在模型构建和首次编译前生效；AscendC backend 的自有 graph pass 先注册，
-仓内 pattern 再追加到已有 pass 链。新增初始化逻辑不能随意调整此顺序。
+该顺序是运行时契约。NPU patch 必须在模型构建和首次编译前生效。新增初始化逻辑不能随意调整此顺序。
 
 ### 5.2 模型和 loss 编译
 
@@ -285,20 +261,7 @@ SimpleFSDP 顺序，不适用上述标准路径。
 loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用同一个 `compile.backend`。模型编译与 loss
 编译互不隐含。
 
-### 5.3 pre-AOT pattern
-
-`torchtitan_npu.compile` 在首次导入时读取 `TORCHTITAN_NPU_PATTERN_IMPORTS`。目标模块调用
-`register_pre_aot_patterns`，将具名 `PatternReplacement` 追加到共享 `_PreAOTPatternPass`：
-
-- 保留已经存在的 Inductor custom pass；
-- 共享 pass 只安装一次；
-- pattern 未命中时保留原图；
-- pattern 名称、字面量策略、源码和 closure 参数参与 cache identity。
-
-模型已经编译后再注册 pattern，不会追溯修改已生成的 compiled callable。DeepSeek-V4 partial RoPE 是当前参考
-实现，详细的 search/replacement、alias 和梯度约束不在本文重复展开。
-
-### 5.4 AscendC AutoFuse 与 fallback
+### 5.3 AscendC AutoFuse 与 fallback
 
 选择 `ascendc` 后，`torch_npu` 向 Inductor 注册 NPU scheduling、wrapper Codegen、lowering、decomposition
 和图优化。后端根据 op、SoC、dtype、shape、stride、layout、数据依赖和 mutation/alias 判断节点能否 lowering
@@ -308,7 +271,7 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 不满足条件的节点保留为 fallback/extern kernel。这部分实现位于 `torch_npu` 和 CANN，本仓只负责选择、接入和
 兼容。
 
-### 5.5 NPU 兼容 patch
+### 5.4 NPU 兼容 patch
 
 | Patch | 解决的问题 | 设计边界 |
 | --- | --- | --- |
@@ -317,7 +280,7 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 
 两个 patch 都依赖包导入时机。CPU-only import 能验证模块可加载，但不能证明 NPU 条件分支已经生效。
 
-### 5.6 与其他组件的交互
+### 5.5 与其他组件的交互
 
 | 组件 | 交互约束 |
 | --- | --- |
@@ -325,7 +288,7 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 | 量化训练 | `TrainerEx` 在模型构建前执行编译感知的量化配置转换；量化不会自动启用 compile |
 | TP/EP/FSDP | 并行化顺序决定编译边界；标准 CompileConfig 不等于 GraphTrainer 的图内通信调度 |
 | Async TP | 要求 compile 已启用、`components` 包含 `model` 且存在 TP mesh |
-| 多机训练 | 所有节点必须使用相同软件版本、Codegen backend 和 pattern imports |
+| 多机训练 | 所有节点必须使用相同软件版本和 Codegen backend |
 
 ## 6. 验证、支持边界与关键文件索引
 
@@ -334,12 +297,11 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 不能仅以「训练成功」判断融合生效。建议按以下顺序验证：
 
 1. 确认日志出现 `Compiling each TransformerBlock with torch.compile` 或 loss 编译日志；
-2. 启用 pattern 时，确认出现 `Pre-AOT pattern ... replaced N subgraph(s)`；
-3. 使用 `TORCH_COMPILE_DEBUG=1` 检查 lowered/fallback summary 和编译产物；
-4. 用真实输入验证正向、反向、输出和梯度；
-5. 通过 profiling 确认真实 `autofused_*` device Kernel 及原生小算子变化；
-6. 使用相同 checkpoint、输入、并行配置和随机性比较 loss 与 grad norm；
-7. 关闭额外调试开关，在 warmup 后的稳定 step 测量性能。
+2. 使用 `TORCH_COMPILE_DEBUG=1` 检查 lowered/fallback summary 和编译产物；
+3. 用真实输入验证正向、反向、输出和梯度；
+4. 通过 profiling 确认真实 `autofused_*` device Kernel 及原生小算子变化；
+5. 使用相同 checkpoint、输入、并行配置和随机性比较 loss 与 grad norm；
+6. 关闭额外调试开关，在 warmup 后的稳定 step 测量性能。
 
 融合可能改变中间结果物化位置和浮点运算分组。数值验收应区分 bit-wise 一致、容差一致和收敛一致，不能只用
 训练是否出现 NaN 作为标准。
@@ -352,7 +314,6 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 | loss 编译 | `components` 包含 `loss` | 独立于模型编译；收益取决于 loss 图规模和 fallback |
 | AscendC AutoFuse | `backend=inductor` 且 NPU backend 为 `ascendc` | 实际融合范围由 `torch_npu`、CANN、SoC、dtype、shape 和 layout 决定 |
 | `aot_eager` 检查 | `backend=aot_eager` | 可验证成图和正反向，不证明 AutoFuse 性能 |
-| pre-AOT pattern | 显式导入 pattern 模块 | 当前提供 DeepSeek-V4 partial RoPE 示例；真实 Kernel 需在配套算子环境验证 |
 | GraphTrainer | 选择 `graph_trainer_*` 配置 | 独立特性，不属于本文标准 CompileConfig 路径 |
 
 源码存在某条路径不表示全部设备和并行组合均已验证。发布验证应记录模型、SoC、dtype、序列布局、并行策略和
@@ -362,12 +323,10 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 
 | 归属 | 文件或模块 | 作用 |
 | --- | --- | --- |
-| 本仓 | `scripts/run_train.sh` | 单机启动、AscendC 默认 Codegen、compile 和 pattern 参数 |
+| 本仓 | `scripts/run_train.sh` | 单机启动与 AscendC 默认 Codegen |
 | 本仓 | `scripts/run_train_multinodes.sh` | 多机启动和 compile 参数；NPU backend 需在各节点显式统一 |
 | 本仓 | `torchtitan_npu/train.py` | 复用上游训练入口并触发插件初始化 |
 | 本仓 | `torchtitan_npu/__init__.py` | 固定 patches、compile、config、extensions 和 ops 的加载顺序 |
-| 本仓 | `torchtitan_npu/compile/__init__.py` | 读取并导入 `TORCHTITAN_NPU_PATTERN_IMPORTS` 指定的 pattern 模块 |
-| 本仓 | `torchtitan_npu/compile/pattern_replacement.py` | 共享 pre-AOT pass、注册和 cache identity |
 | 本仓 | `torchtitan_npu/patches/workaround/device_copy.py` | NPU 异步 D2H 和 `device_put` 兼容 |
 | 本仓 | `torchtitan_npu/patches/torch_npu/inductor_runtime_estimation.py` | NPU runtime estimation 和 standalone compile 兼容 |
 | 本仓 | `torchtitan_npu/extensions/trainer.py` | 编译感知的 NPU Trainer 与量化转换 |
@@ -376,6 +335,5 @@ loss 由上游 `BaseLoss._maybe_compile` 独立检查 `components`，并使用�
 
 ### 6.4 相关文档
 
-- [片段融合算子接入](../graph_pattern_fusion.md)
 - [融合算子接入指南](./fused_ops.md)
 - [软件安装](../user-guides/installation.md)

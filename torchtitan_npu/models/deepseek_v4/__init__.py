@@ -107,7 +107,8 @@ def _make_compressor_config(
     rope: RoPE.Config,
 ) -> Compressor.Config:
     return Compressor.Config(
-        rope=dataclasses.replace(rope),
+        # RoPE receives the full-width kv and owns the [nope | rope] split.
+        rope=dataclasses.replace(rope, split=head_dim - rope_head_dim),
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
@@ -145,7 +146,7 @@ def _make_indexer_config(
 ) -> Indexer.Config:
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
-        rope=dataclasses.replace(rope),
+        rope=dataclasses.replace(rope, split=index_head_dim - rope_head_dim),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         rope_head_dim=rope_head_dim,
@@ -252,7 +253,9 @@ def _make_v4_attn_config(
         norm_eps=norm_eps,
         inner_attention=inner_attention_cfg,
         compressed_sparse_attention=compressed_sparse_attention_cfg,
-        rope=dataclasses.replace(rope),
+        # Attention sites are head_dim wide; the base rope may be reused by
+        # the indexer (index_head_dim wide), so split is pinned per site.
+        rope=dataclasses.replace(rope, split=head_dim - rope_head_dim),
         wq_a=Linear.Config(
             in_features=dim,
             out_features=q_lora_rank,
@@ -496,7 +499,10 @@ def _build_mtp_layers(
         attention.indexer = None
         # MTP attention is dense; disable the prebuilt LI wrapper branch too.
         attention.compressed_sparse_attention.lightning_indexer = None
-        attention.rope = copy.deepcopy(rope)
+        # Swap the plain rope in (the main layer may carry the compress-theta
+        # variant) while keeping the per-site split pin: rope receives the
+        # full-width head_dim tensor and rotates only its trailing channels.
+        attention.rope = copy.deepcopy(dataclasses.replace(rope, split=attention.head_dim - attention.rope_head_dim))
         inner_attention = attention.compressed_sparse_attention.inner_attention
         inner_attention.compress_ratio = 1
 

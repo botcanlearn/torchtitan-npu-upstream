@@ -40,6 +40,9 @@ from torchtitan_npu.config import (
 )
 from torchtitan_npu.extensions.profiler import CANNProfiler
 from torchtitan_npu.extensions.trainer import TrainerEx
+from torchtitan_npu.patches.torchtitan.graph_trainer import (
+    functionalize_recompute_mutations as _functionalize_mutations,
+)
 
 from . import (
     memory_policy,  # noqa: F401
@@ -374,6 +377,9 @@ def _graph_trainer_compile_config() -> GraphTrainerCompileConfig:
         enable=True,
         mode="aot_fx_trace",
         memory_policy="full",
+        # Keeps recomputed forward mutations (fused partial RoPE) faithful;
+        # see the functionalize_recompute_mutations patch module.
+        pass_pipeline=_functionalize_mutations.PASS_PIPELINE_NAME,
         disable_passes=[
             "cudagraph_pass",
         ],
@@ -391,6 +397,7 @@ def graph_trainer_deepseek_v4_debugmodel() -> GraphTrainer.Config:
         mode="aot_fx_trace",
         memory_policy="full",
         enable_passes=True,
+        pass_pipeline=_functionalize_mutations.PASS_PIPELINE_NAME,
         disable_passes=[
             "cudagraph_pass",
         ],

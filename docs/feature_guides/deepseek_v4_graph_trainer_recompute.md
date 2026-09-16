@@ -26,6 +26,7 @@ DSV4 GraphTrainer 工厂默认配置如下：
 enable = true
 mode = "aot_fx_trace"
 memory_policy = "full"
+pass_pipeline = "mutation-functionalization"
 disable_passes = ["cudagraph_pass"]
 ```
 
@@ -125,8 +126,22 @@ flowchart TD
 
 
 
+### 4.4 前向变异算子的重算保真
+
+原生 SAR 按数据流回放重算节点，无数据输出的前向变异算子（如 partial-RoPE 对
+clone 的原地旋转）不会进入回放链，反向会读到未旋转的值（上游 issue
+[#4688](https://github.com/pytorch/torchtitan/issues/4688)）。DSV4 GraphTrainer 默认
+启用上游 PR [#4708](https://github.com/pytorch/torchtitan/pull/4708) 的
+`functionalize_recompute_mutations_pass`（见 2.1）：在 memory-policy 打标之后、
+CPU offload 与 SAR 之前把变异写入显式化为数据流，原生 SAR 随之自然重算；对无可
+重算变异的图是 no-op。已验证 A3（CANN w0902，backward 走临时 shim）2p/8p 精度
+对齐；A5 原生反向未验证。固定 TorchTitan 依赖自带等价 pass 后，删除本 backport
+与 `pass_pipeline` 设置即可。
+
 ## 5. 支持边界与风险
 - `dsv4-mhc` 依赖 FQN、FX target 和 occurrence，模型或编译器升级后必须检查规则命中数。
+- 变异算子重算保真依赖上游 #4708 的 functionalization 语义与原生 SAR 的交互；升级
+  PyTorch 或 TorchTitan 后需重跑 `test_rope_recompute_integration.py` 的正/负对照。
 - 重计算链路依赖 FX tracer、AOTAutograd、Dynamo dynamic annotation 和 Inductor 私有 API，升级 PyTorch、torch-npu 或 TorchTitan 后需重新回归。
 
 ## 6. 关键文件
@@ -140,8 +155,8 @@ flowchart TD
 | FX tracer/replay | `torchtitan/experiments/graph_trainer/make_fx_tracer.py`、`torchtitan/experiments/graph_trainer/trainer.py` |
 | SimpleFSDP | `torchtitan/experiments/graph_trainer/simple_fsdp.py` |
 | 函数式 compressor | `torchtitan_npu/models/deepseek_v4/compressor.py` |
-| RoPE compiler pattern | `torchtitan_npu/compile/patterns/deepseek_v4/inplace_partial_rope.py` |
-| 重算单测 | `tests/unit_tests/compile/patterns/deepseek_v4/test_recompute_policy.py` |
+| 变异重算保真（functionalization backport） | `torchtitan_npu/patches/torchtitan/graph_trainer/functionalize_recompute_mutations.py` |
+| 重算单测 | `tests/unit_tests/compile/test_recompute_policy.py` |
 
 ## 7. 结论
 

@@ -244,10 +244,14 @@ Optimizer writer 的同步、本地 native DCP 限制。异步保存只有在 DC
 | `rope.workaround` | `ComplexRoPE.Config` | `WorkaroundComplexRoPE.Config` | 预展开 cos/sin cache，并使用 PyTorch 小算子计算 interleaved RoPE；仅精确匹配 `ComplexRoPE.Config` |
 | `rope.asc_complex` | `ComplexRoPE.Config` | `AscComplexRoPE.Config` | 使用 interleave 模式的 `torch_npu.npu_rotary_mul`；仅精确匹配 |
 | `rope.asc_cossin` | `CosSinRoPE.Config` | `AscCosSinRoPE.Config` | 使用 half 模式的 `torch_npu.npu_rotary_mul` |
+| `rope.asc_partial` | `SplitComplexRoPEConfig`（精确匹配） | `AscPartialComplexRoPE.Config` | 整宽（prefix + rotary）partial-RoPE 站点的 query/key 各收敛为一次 `cann_ops_transformer` 融合原地旋转；CANN 依赖在首次调用时惰性加载 |
 | `token_dispatcher.asc` | `AllToAllTokenDispatcher.Config` | `AscAllToAllTokenDispatcher.Config` | 使用 `torch_npu.npu_moe_token_permute` `npu_moe_token_unpermute` 融合 MoE dispatch/combine |
 | `token_dispatcher.asc_deepep` | `DeepEPTokenDispatcher.Config` | `AscDeepEPTokenDispatcher.Config` | 使用 `cann_ops_transformer.ElasticBuffer` 实现训练路径的 MoE DeepEP dispatch/combine；当前要求 `expert_parallel_degree > 1` |
 
 `rope.workaround` 与 `rope.asc_complex` 会声明同一 target，不能同时启用。
+`rope.asc_partial` 精确匹配 split-aware 的 `SplitComplexRoPEConfig`，与其他 rope
+入口作用于同一组件，同一站点只能启用其一；其 `cann_ops_transformer` 依赖在首次调用时
+惰性加载，导入 `override.common` 或构造 RoPE 模块不需要 NPU 算子包。
 `AscComplexRoPE` 和 `AscCosSinRoPE` 当前都要求同一 batch 内各行的位置布局一致，
 并使用第一行位置构造 batch 共享的 cosine/sine 表。
 

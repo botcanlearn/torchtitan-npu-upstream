@@ -160,27 +160,23 @@ class Compressor(Module):
         assert first_indices is not None and block_positions is not None, (
             "the compressor contract requires first_indices and block_positions"
         )
-        rd = self.rope_head_dim
-        nope_dim = self.head_dim - rd
 
         # -- overlap (ratio=4 only) --
         if self.overlap:
             score = self._overlap_transform(score, first_indices, value=float("-inf"))
             kv = self._overlap_transform(kv, first_indices, value=0.0)
 
-        # -- softmax pool + norm + RoPE --
+        # -- softmax pool + norm + RoPE (RoPE owns the [nope | rope] split) --
         kv = (kv * score.softmax(dim=1)).sum(dim=1)
         kv = self.norm(kv.to(x.dtype))
-        kv_nope, kv_rope = torch.split(kv, [nope_dim, rd], dim=-1)
-        kv_rope = (
+        return (
             self.rope(
-                kv_rope.unsqueeze(0).unsqueeze(2),
+                kv.unsqueeze(0).unsqueeze(2),
                 positions=block_positions.unsqueeze(0),
             )
             .squeeze(0)
             .squeeze(1)
         )
-        return torch.cat([kv_nope, kv_rope], dim=-1)
 
 
 class Indexer(Module):
@@ -230,12 +226,9 @@ class Indexer(Module):
                 (the local rows).
         """
         bsz, seqlen, _ = qr.size()
-        rd = self.rope_head_dim
         idx_q = self.wq_b(qr)
         idx_q = idx_q.view(bsz, seqlen, self.num_index_heads, self.head_dim)
-        q_nope, q_rope = torch.split(idx_q, [self.head_dim - rd, rd], dim=-1)
-        q_rope = self.rope(q_rope, positions=positions)
-        idx_q = torch.cat([q_nope, q_rope], dim=-1)
+        idx_q = self.rope(idx_q, positions=positions)
         idx_q = self._rotate_activation(idx_q)
         idx_k = self.compressor(x, attention_masks)
         idx_k = self._rotate_activation(idx_k)
