@@ -35,6 +35,7 @@ export NODE_IPS NGPU
 QUANTIZATION_ARGS=(
     --extension.quantization.enable-quantized-training
     --extension.quantization.recipe all_block_fp8
+    --extension.quantization.li-quantization fp8
 )
 
 exec bash "${SCRIPT_DIR}/deepseek_v4_flash_cpt_4k_a3.sh" \
