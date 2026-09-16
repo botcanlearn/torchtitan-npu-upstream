@@ -8,7 +8,7 @@
 # override arguments belong in an example under examples/; extra command-line
 # arguments are passed through unchanged.
 #
-#   COMPILE_BACKEND=inductor ./scripts/run_train.sh
+#   ./scripts/run_train.sh --compile.enable --compile.components model --compile.backend inductor
 
 set -euo pipefail
 
@@ -33,22 +33,11 @@ TRAIN_FILE=${TRAIN_FILE:-torchtitan_npu.train}
 COMM_MODE=${COMM_MODE:-}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-}
 
-ARGS=()
-
-if [ -n "${COMPILE_BACKEND:-}" ]; then
-    ARGS+=(
-        --compile.enable
-        --compile.components model
-        --compile.backend "${COMPILE_BACKEND}"
-    )
-fi
-ARGS+=("$@")
-
 if [[ -n "${COMM_MODE}" ]]; then
     echo "Running with comm_mode=${COMM_MODE}"
     NGPU="${NGPU}" LOCAL_RANK=0 python3 -m "${TRAIN_FILE}" \
         --module "${MODULE}" --config "${CONFIG}" \
-        --comm.mode="${COMM_MODE}" "${ARGS[@]}"
+        --comm.mode="${COMM_MODE}" "$@"
 else
     PYTORCH_NPU_ALLOC_CONF="expandable_segments:True" \
     CUDA_DEVICE_MAX_CONNECTIONS=1 \
@@ -61,5 +50,5 @@ else
     torchrun --nproc_per_node="${NGPU}" --rdzv_backend c10d \
     --rdzv_endpoint="localhost:0" \
     --local-ranks-filter "${LOG_RANK}" --role rank --tee 3 \
-    -m "${TRAIN_FILE}" --module "${MODULE}" --config "${CONFIG}" "${ARGS[@]}"
+    -m "${TRAIN_FILE}" --module "${MODULE}" --config "${CONFIG}" "$@"
 fi

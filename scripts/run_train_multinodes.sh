@@ -68,16 +68,6 @@ time=$(date +%Y%m%d%H%M)
 logfile=${LOG_PREFIX:-${CONFIG}}_${time}_node${NODE_RANK}_${LOCAL_HOST//./_}.log
 mkdir -p logs
 
-ARGS=()
-
-if [ -n "${COMPILE_BACKEND:-}" ]; then
-    ARGS+=(
-        --compile.enable
-        --compile.components model
-        --compile.backend "${COMPILE_BACKEND}"
-    )
-fi
-
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
 torchrun \
@@ -92,4 +82,4 @@ torchrun \
     -m "${TRAIN_FILE}" \
     --module "${MODULE}" \
     --config "${CONFIG}" \
-    "${ARGS[@]}" "$@" 2>&1 | tee -a logs/${logfile}
+    "$@" 2>&1 | tee -a logs/${logfile}

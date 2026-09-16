@@ -34,22 +34,13 @@ Host 下发和中间 Tensor 读写。`torch.compile` 使用 TorchDynamo 捕获�
 
 ### 2.1 启用 AscendC AutoFuse
 
-仓库脚本提供最短启用方式：
+使用 TorchTitan 原生 CLI 配置编译：
 
 ```bash
 TORCHINDUCTOR_NPU_BACKEND=ascendc \
-COMPILE_BACKEND=inductor \
-bash scripts/run_train.sh <训练参数>
-```
-
-也可以直接使用 TorchTitan CLI：
-
-```bash
-export TORCHINDUCTOR_NPU_BACKEND=ascendc
-
 bash scripts/run_train.sh \
   --compile.enable \
-  --compile.components model,loss \
+  --compile.components model \
   --compile.backend inductor \
   <训练参数>
 ```
@@ -62,9 +53,9 @@ export TORCHINDUCTOR_NPU_BACKEND=ascendc
 
 NODE_IPS=192.168.1.10,192.168.1.11 \
 NGPU=16 \
-COMPILE_BACKEND=inductor \
 bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
-  --compile.components model,loss \
+  --compile.backend inductor \
+  --compile.components model loss \
   --training.steps 5
 ```
 
@@ -74,13 +65,16 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 ### 2.2 使用 `aot_eager` 检查编译兼容性
 
 ```bash
-COMPILE_BACKEND=aot_eager \
-bash scripts/run_train.sh <训练参数>
+bash scripts/run_train.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend aot_eager \
+  <训练参数>
 ```
 
 `aot_eager` 可检查 Dynamo、AOTAutograd、FakeTensor 和训练反向是否可用，但不会把完整模型交给 AscendC
-AutoFuse。当前 DeepSeek-V4 示例默认使用 `aot_eager`；验证 AutoFuse 功能或性能时，需要显式设置
-`COMPILE_BACKEND=inductor`。
+AutoFuse。DeepSeek-V4 Flash A3/A5 示例默认使用 `inductor`；可在命令末尾追加
+`--compile.backend aot_eager` 检查编译兼容性。
 
 含 FlexAttention 的模型在 `aot_eager` 下可能由上游 regional Inductor 单独编译 FlexAttention 区域。
 这仍不等同于完整 TransformerBlock 使用 `inductor` 编译。
@@ -97,14 +91,14 @@ AutoFuse。当前 DeepSeek-V4 示例默认使用 `aot_eager`；验证 AutoFuse �
 | `enable_async_tensor_parallel` | `False` | 是否启用 Inductor Async TP |
 
 当前固定的上游基线实际消费 `model` 和 `loss`。配置中写入其他名称，不代表对应组件已经编译。
-`COMPILE_BACKEND` 便捷入口会显式选择 `model`；需要同时编译 loss 时，在脚本末尾追加
-`--compile.components model,loss` 覆盖该默认值。
+通用启动脚本直接透传 CLI，不自动启用编译。Flash 示例通过 CLI 默认启用 `model` 编译；
+需要同时编译 loss 时，追加 `--compile.components model loss`；关闭编译使用 `--compile.no-enable`。
+仅设置 `--compile.backend` 不会自动启用编译，通用入口还需传入 `--compile.enable`。
 
 仓库相关环境变量如下：
 
 | 环境变量 | 作用 |
 | --- | --- |
-| `COMPILE_BACKEND` | 非空时，启动脚本追加 model compile CLI |
 | `TORCHINDUCTOR_NPU_BACKEND` | 选择 Inductor 内部的 NPU Codegen |
 | `ASCEND_SET_ENV_PATH` | 指定 CANN `set_env.sh`，未设置时按标准安装路径查找 |
 

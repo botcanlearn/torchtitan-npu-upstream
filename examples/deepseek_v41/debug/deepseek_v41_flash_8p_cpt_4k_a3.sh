@@ -13,9 +13,6 @@
 
 set -euo pipefail
 
-# V4.1 currently supports eager execution only; keep compile disabled.
-export COMPILE_BACKEND=""
-
 NGPU="${NGPU:-8}"
 WORLD_SIZE="${NGPU}"
 
@@ -87,6 +84,11 @@ PARALLELISM_ARGS="
     --parallelism.context-parallel-load-balancer None
 "
 
+# Compile
+COMPILE_ARGS="
+    --compile.no-enable
+"
+
 # Training
 TRAINING_ARGS="
     --training.local-batch-size ${MBS}
@@ -148,6 +150,7 @@ MODULE="${MODULE}" \
 CONFIG="${CONFIG}" \
 NGPU="${NGPU}" \
 bash scripts/run_train.sh \
+    $COMPILE_ARGS \
     $HF_ASSETS_ARGS \
     $DATALOADER_ARGS \
     $PARALLELISM_ARGS \

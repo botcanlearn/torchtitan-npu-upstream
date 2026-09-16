@@ -12,10 +12,16 @@ deepseek_v4_flash_cpt_4k_a3.sh
     └── deepseek_v4_flash_cpt_1024k_a5.sh
 ```
 
-- `deepseek_v4_flash_cpt_4k_a3.sh`：公共训练参数、override、checkpoint、optimizer 等基线配置，默认启用 `COMPILE_BACKEND=aot_eager`。
-- `deepseek_v4_flash_cpt_4k_a5.sh`：只增加 A5 运行环境和默认 block-FP8 量化，其他配置复用 A3 基线。
+- `deepseek_v4_flash_cpt_4k_a3.sh`：公共训练参数、override、checkpoint、optimizer 等基线配置，默认通过 CLI 启用 model 编译，backend 为 `inductor`。
+- `deepseek_v4_flash_cpt_4k_a5.sh`：增加 A5 运行环境和默认 block-FP8 量化，其他配置复用 A3 基线。
 - `deepseek_v4_flash_cpt_1024k_a5.sh`：继续复用 A5 4K 入口，只通过 CLI 覆盖 1M 所需的 CP、DP、序列长度和 global batch size，量化默认随 A5 4K 入口继承。
-- 用户传入的 `"$@"` 始终位于最后，因此可以覆盖脚本中的默认 CLI 参数，包括使用 `--extension.quantization.no-enable-quantized-training` 切换到 BF16。
+- 用户普通 CLI 参数位于默认选项之后，因此可以覆盖默认值（A5 的 activation-checkpoint 子命令仍在末尾），包括使用 `--extension.quantization.no-enable-quantized-training` 切换到 BF16。
+
+## 编译配置
+
+编译通过 CLI 配置。Flash A3/A5 默认使用 `inductor`，只编译 `model`。在示例命令末尾追加
+`--compile.backend inductor` 可显式指定 backend，追加 `--compile.no-enable` 可关闭编译。
+独立入口若未默认启用编译，需同时传入 `--compile.enable --compile.components model`。
 
 ## 常用环境变量
 
@@ -62,8 +68,10 @@ Pro 32-expert 是独立的裁剪模型 debug/performance 入口，不与 8P Flas
 
 ```sh
 NODE_IPS="${NODE_IPS}" \
-COMPILE_BACKEND=aot_eager \
 bash examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend inductor \
   --debug.moe-force-load-balance \
   --training.steps 20
 ```
@@ -72,8 +80,10 @@ bash examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh \
 
 ```sh
 NODE_IPS="${NODE_IPS}" \
-COMPILE_BACKEND=aot_eager \
 bash examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend inductor \
   --parallelism.context-parallel-degree 32 \
   --parallelism.data-parallel-shard-degree 1 \
   --parallelism.data-parallel-replicate-degree 1 \
@@ -127,8 +137,10 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 
 ```sh
 NODE_IPS="${NODE_IPS}" \
-COMPILE_BACKEND=aot_eager \
 bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a5.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend inductor \
   --debug.moe-force-load-balance \
   --training.steps 20
 ```
@@ -139,8 +151,10 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a5.sh \
 
 ```sh
 NODE_IPS="${NODE_IPS}" \
-COMPILE_BACKEND=aot_eager \
 bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a5.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend inductor \
   --parallelism.context-parallel-degree 8 \
   --parallelism.data-parallel-shard-degree 16 \
   --parallelism.data-parallel-replicate-degree 1 \
@@ -156,8 +170,10 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a5.sh \
 
 ```sh
 NODE_IPS="${NODE_IPS}" \
-COMPILE_BACKEND=aot_eager \
 bash examples/deepseek_v4/deepseek_v4_flash_cpt_1024k_a5.sh \
+  --compile.enable \
+  --compile.components model \
+  --compile.backend inductor \
   --debug.moe-force-load-balance \
   --training.steps 20
 ```

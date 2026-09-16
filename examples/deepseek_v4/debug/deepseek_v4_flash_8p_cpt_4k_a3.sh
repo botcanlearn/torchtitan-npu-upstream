@@ -12,9 +12,6 @@
 
 set -euo pipefail
 
-# Enable model compilation by default; callers can override the backend.
-export COMPILE_BACKEND="${COMPILE_BACKEND:-aot_eager}"
-
 NGPU="${NGPU:-8}"
 WORLD_SIZE="${NGPU}"
 
@@ -70,6 +67,13 @@ PARALLELISM_ARGS="
     --parallelism.tensor-parallel-degree ${TP}
     --parallelism.context-parallel-degree ${CP}
     --parallelism.pipeline-parallel-degree ${PP}
+"
+
+# Compile
+COMPILE_ARGS="
+    --compile.enable
+    --compile.components model
+    --compile.backend inductor
 "
 
 # Training
@@ -156,6 +160,7 @@ CONFIG="${CONFIG}" \
 NGPU="${NGPU}" \
 LOG_PREFIX="${LOG_PREFIX:-${CONFIG}}" \
 bash scripts/run_train.sh \
+    $COMPILE_ARGS \
     $HF_ASSETS_ARGS \
     $DATALOADER_ARGS \
     $PARALLELISM_ARGS \

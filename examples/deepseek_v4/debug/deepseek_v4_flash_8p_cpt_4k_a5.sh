@@ -19,7 +19,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
 
 # A5 defaults to Inductor; partial RoPE fuses through the asc_partial override.
-export COMPILE_BACKEND="${COMPILE_BACKEND:-inductor}"
 export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial}"
 
 # A5 defaults to block-FP8 quantized training. Append

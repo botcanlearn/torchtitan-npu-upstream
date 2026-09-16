@@ -14,9 +14,6 @@
 
 set -euo pipefail
 
-# Enable model compilation by default; callers can override the backend.
-export COMPILE_BACKEND="${COMPILE_BACKEND:-aot_eager}"
-
 NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, \
                       xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"
 NGPU="${NGPU:-16}"
@@ -76,6 +73,13 @@ PARALLELISM_ARGS="
     --parallelism.tensor-parallel-degree ${TP}
     --parallelism.context-parallel-degree ${CP}
     --parallelism.pipeline-parallel-degree ${PP}
+"
+
+# Compile
+COMPILE_ARGS="
+    --compile.enable
+    --compile.components model
+    --compile.backend inductor
 "
 
 # Training
@@ -166,6 +170,7 @@ NODE_IPS="${NODE_IPS}" \
 NGPU="${NGPU}" \
 LOG_PREFIX="${LOG_PREFIX:-${CONFIG}}" \
 bash scripts/run_train_multinodes.sh \
+    $COMPILE_ARGS \
     $HF_ASSETS_ARGS \
     $DATALOADER_ARGS \
     $PARALLELISM_ARGS \
