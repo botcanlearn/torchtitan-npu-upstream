@@ -22,7 +22,7 @@ from torchtitan.experiments.graph_trainer.registry import (
     register_memory_policy,
 )
 
-from torchtitan_npu.patches.torchtitan.graph_trainer import memory_policy
+from torchtitan_npu.patches.torchtitan.experiments.graph_trainer import memory_policy
 
 if TYPE_CHECKING:
     import torch

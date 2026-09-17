@@ -85,9 +85,10 @@ torchrun --nproc_per_node=8 -m torchtitan.train \
 | 并行组合 | FSDP（含 degree 1）、EP 已验证；TP 要求 `seq_len` 整除 `seq_len_divisor` |
 | `spmd_types` backend | 不支持（simple_fsdp 依赖 raw DTensor 操作） |
 | Context Parallel | 不支持（DSV4 稀疏注意力编译路径未适配 CP） |
-| EP overlap（上游实验性 pass） | 未验证 |
+| EP overlap（上游实验性 pass） | 已通过patch适配；见 [`graph_trainer_ep_overlap.md`](graph_trainer_ep_overlap.md) |
 
 ## 相关文档
 
 - 上游 GraphTrainer 说明与 EP overlap 用法：[`torchtitan/experiments/graph_trainer/README.md`](https://github.com/pytorch/torchtitan/blob/main/torchtitan/experiments/graph_trainer/README.md)
+- EP overlap 适配：[`graph_trainer_ep_overlap.md`](graph_trainer_ep_overlap.md)
 - DSV4 稀疏注意力与 TND 融合路径：[`deepseek_v4_tnd.md`](deepseek_v4_tnd.md)

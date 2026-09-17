@@ -91,7 +91,7 @@ torchtitan/experiments/graph_trainer/memory_policy.py
 ### 4.2 NPU 策略框架
 
 ```text
-torchtitan_npu/patches/torchtitan/graph_trainer/memory_policy.py
+torchtitan_npu/patches/torchtitan/experiments/graph_trainer/memory_policy.py
 ```
 
 NPU 扩展使用 `NodePolicyKey` 按 FX target、模块 FQN 和 occurrence 定位节点，并提供 layer boundary、`MUST_SAVE`、反向节点跳过、`lm_head/loss` 跳过和 SymInt 保存等规则。
@@ -150,12 +150,12 @@ CPU offload 与 SAR 之前把变异写入显式化为数据流，原生 SAR 随�
 | --- | --- |
 | DSV4 GraphTrainer 配置 | `torchtitan_npu/models/deepseek_v4/config_registry.py` |
 | 通用 full policy | `torchtitan/experiments/graph_trainer/memory_policy.py` |
-| NPU policy 框架 | `torchtitan_npu/patches/torchtitan/graph_trainer/memory_policy.py` |
+| NPU policy 框架 | `torchtitan_npu/patches/torchtitan/experiments/graph_trainer/memory_policy.py` |
 | `dsv4-mhc` 策略 | `torchtitan_npu/models/deepseek_v4/memory_policy.py` |
 | FX tracer/replay | `torchtitan/experiments/graph_trainer/make_fx_tracer.py`、`torchtitan/experiments/graph_trainer/trainer.py` |
 | SimpleFSDP | `torchtitan/experiments/graph_trainer/simple_fsdp.py` |
 | 函数式 compressor | `torchtitan_npu/models/deepseek_v4/compressor.py` |
-| 变异重算保真（functionalization backport） | `torchtitan_npu/patches/torchtitan/graph_trainer/functionalize_recompute_mutations.py` |
+| 变异重算保真（functionalization backport） | `torchtitan_npu/patches/torchtitan/experiments/graph_trainer/functionalize_recompute_mutations.py` |
 | 重算单测 | `tests/unit_tests/compile/test_recompute_policy.py` |
 
 ## 7. 结论

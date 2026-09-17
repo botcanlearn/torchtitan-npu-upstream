@@ -40,7 +40,7 @@ from torchtitan_npu.config import (
 )
 from torchtitan_npu.extensions.profiler import CANNProfiler
 from torchtitan_npu.extensions.trainer import TrainerEx
-from torchtitan_npu.patches.torchtitan.graph_trainer import (
+from torchtitan_npu.patches.torchtitan.experiments.graph_trainer import (
     functionalize_recompute_mutations as _functionalize_mutations,
 )
 

@@ -5,6 +5,8 @@
 - https://github.com/pytorch/torchtitan/pull/3864
 - https://github.com/pytorch/torchtitan/pull/4474
 - https://github.com/pytorch/torchtitan/pull/3985
+- https://github.com/pytorch/torchtitan/pull/4650
+- https://github.com/pytorch/torchtitan/pull/4651
 -->
 
 # TorchTitan 临时补丁
@@ -36,5 +38,12 @@ grep -L "Pending upstream PR: https://github.com/pytorch/torchtitan/pull/" \
 | [#3864](https://github.com/pytorch/torchtitan/pull/3864) | 为 torchtitan 补充 LoggedAuxLoss 辅助损失框架 |
 | [#4474](https://github.com/pytorch/torchtitan/pull/4474) | 补齐部分初始化的 optimizer state，支持完整 checkpoint 恢复 |
 | [#3985](https://github.com/pytorch/torchtitan/pull/3985) | 为 Trainer 补充 EMA 权重维护及 checkpoint 集成 |
+| [#4529](https://github.com/pytorch/torchtitan/pull/4529) | 限定 EP chunk 具体化使用的符号 hint 范围，对应 `ep_chunk_concretization` |
+| [#4650](https://github.com/pytorch/torchtitan/pull/4650) | 修正 EP overlap 对 shape query 通信标注的校验，对应 `ep_overlap_shape_queries` |
+| [#4516](https://github.com/pytorch/torchtitan/pull/4516) | 去重跨 chunk 共享的 EP ready node，对应 `ep_ready_nodes_dedup` |
+| [#4651](https://github.com/pytorch/torchtitan/pull/4651) | 将同一 root 的 AllToAll dim-0 shape query 保留在 chunk 内，对应 `ep_shape_live_out` |
+
+四个 EP overlap 补丁的作用、启用方式与排查手段见
+[`docs/feature_guides/graph_trainer_ep_overlap.md`](../../../docs/feature_guides/graph_trainer_ep_overlap.md)。
 
 对应 PR 合入且 TorchTitan 依赖更新后，应删除相关补丁及导入；全部补丁清理完成后，删除本目录。

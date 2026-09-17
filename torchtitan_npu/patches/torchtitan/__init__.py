@@ -8,4 +8,10 @@ from . import trainer  # noqa: F401
 from .components import metrics, optimizer, validate  # noqa: F401
 from .distributed import context_parallel, full_dtensor, parallel_dims  # noqa: F401
 from .distributed.flex_shard import dist_muon  # noqa: F401
+from .experiments.graph_trainer import (  # noqa: F401
+    ep_chunk_concretization,
+    ep_overlap_shape_queries,
+    ep_ready_nodes_dedup,
+    ep_shape_live_out,
+)
 from .models.common import decoder, moe, rope, token_dispatcher  # noqa: F401

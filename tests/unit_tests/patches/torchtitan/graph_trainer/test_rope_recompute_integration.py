@@ -40,7 +40,7 @@ from tests.unit_tests.rope_test_utils import (
     split_workaround_reference,
 )
 from torchtitan_npu.override.common.rope import AscPartialComplexRoPE
-from torchtitan_npu.patches.torchtitan.graph_trainer.functionalize_recompute_mutations import (
+from torchtitan_npu.patches.torchtitan.experiments.graph_trainer.functionalize_recompute_mutations import (
     functionalize_recompute_mutations_pass,
 )
 
