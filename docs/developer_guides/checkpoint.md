@@ -49,7 +49,7 @@ Hugging Face 权重通常包含 `model.safetensors` 或
 
 ## 常用配置项
 
-配置类型来自上游 `torchtitan.config.Checkpoint`，Python 配置使用下划线命名，命令行
+配置类型来自上游 `torchtitan.components.checkpointer.base`，Python 配置使用下划线命名，命令行
 使用 tyro 的连字符命名：
 
 | 配置项 | 作用 |

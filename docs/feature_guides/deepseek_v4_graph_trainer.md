@@ -18,7 +18,7 @@ GraphTrainer 是 torchtitan 上游 `experiments/graph_trainer/` 中的编译式�
 
 ### 配置入口
 
-`torchtitan_npu/models/deepseek_v4/config_registry.py` 新增 4 个配置工厂，均复用对应 eager 配置，经 `to_graph_trainer_config` 包装为 `GraphTrainer.Config`：
+`torchtitan_npu/models/deepseek_v4/config_registry.py` 新增 5 个配置工厂，均复用对应 eager 配置，经 `to_graph_trainer_config` 包装为 `GraphTrainer.Config`：
 
 | 配置名 | 对应 eager 配置 |
 | --- | --- |
@@ -26,6 +26,7 @@ GraphTrainer 是 torchtitan 上游 `experiments/graph_trainer/` 中的编译式�
 | `graph_trainer_deepseek_v4_flash` | `deepseek_v4_flash` |
 | `graph_trainer_deepseek_v4_flash_43layers_16experts` | `deepseek_v4_flash_43layers_16experts` |
 | `graph_trainer_deepseek_v4_pro` | `deepseek_v4_pro` |
+| `graph_trainer_deepseek_v4_pro_61layers_32experts` | `deepseek_v4_pro_61layers_32experts` |
 
 编译配置统一为 `mode="aot_fx_trace"`、`memory_policy="full"`、`disable_passes=["cudagraph_pass"]`。模型通过 `_graph_trainer_model_registry` 包装为 `GraphTrainerDeepSeekV4Model.Config`，并行化函数指向 `parallelize_graph_trainer_deepseek_v4`。
 
@@ -42,7 +43,7 @@ GraphTrainer 是 torchtitan 上游 `experiments/graph_trainer/` 中的编译式�
 3. 无条件应用 `apply_simple_fsdp`：fsdp mesh 在 degree 1 时也存在（`ParallelDims._mesh_exist`），因此单卡下 MixedPrecisionPolicy 的 param_dtype cast 仍然生效。
 4. 按模式应用 `apply_graph_trainer_compile`。
 
-入口处有两条硬约束：`spmd_types` backend 不支持（simple_fsdp 构建于 raw DTensor 操作之上，该 backend 会报错）；TP 启用时 `seq_len` 必须整除 `parallel_dims.seq_len_divisor`（TP degree × 2·CP degree，`use_local_output=True` 使用 plain tensor）。
+入口处有两条硬约束：`spmd_types` backend 不支持（simple_fsdp 构建于 raw DTensor 操作之上，该 backend 会报错）；TP 启用时 `seq_len` 必须整除 `parallel_dims.seq_len_divisor`（TP degree × 2 x CP degree，`use_local_output=True` 使用 plain tensor）。
 
 ### Graph-safe 改造
 
