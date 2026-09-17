@@ -57,12 +57,15 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     """Build the DSV4-owned parameter and FlexShard policy for Muon."""
     model_config = cast("DeepSeekV4Model.Config", model_spec.model)
     # FSDP folds the (dp_shard, cp) storage mesh into the single
-    # ``dp_shard_cp`` axis when context parallelism is enabled.  ComputeLayout
-    # resolution filters declarations by the parameter's actual storage mesh,
-    # so keep both axis names to cover CP and non-CP runs.
+    # ``dp_shard_cp`` axis when context parallelism is enabled, and the
+    # GraphTrainer path (simple_fsdp + partial_dtensor) stores dense
+    # parameters on the ``fsdp`` axis.  ComputeLayout resolution filters
+    # declarations by the parameter's actual storage mesh, so keep every
+    # axis name to cover CP/non-CP, eager and GraphTrainer runs.
     dense_dp_axes = (
         MeshAxisName.DP_SHARD.value,
         f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+        MeshAxisName.FSDP.value,
     )
     owned = ComputeLayout(
         shardings_by_mesh_axis={axis: Owned() for axis in dense_dp_axes},
