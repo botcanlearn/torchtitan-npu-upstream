@@ -317,3 +317,82 @@ def test_mx_quantize_dual_axis_quant_matmul_matches_raw_op(elem_dtype, case_a, c
 
     assert y.shape == y_ref.shape
     assert torch.equal(y, y_ref), "npu_quant_matmul result differs between mx_quantize_dual_axis and raw op"
+
+
+# =========================================================================
+# Tests for mx_fake_quantize (quantize then dequantize round trip)
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    "tensor, axis",
+    [
+        # 1. Dense (is_contiguous() True) -> if branch, the ops see the tensor as-is.
+        (torch.randn(256, 128, device="npu", dtype=torch.bfloat16), -1),
+        # 2. Quant axis strided (stride(axis) != 1): a transposed 2D tensor, which
+        #    no view can undo, so the ops see the tensor as-is.
+        (torch.randn(128, 256, device="npu", dtype=torch.bfloat16).transpose(0, 1), 1),
+        # 3. Pure perm view with innermost-contiguous quant axis (like wo_a): the
+        #    permuting branch, where FP4 packs a different dim than the raw ops' call.
+        (torch.randn(4, 128, 256, device="npu", dtype=torch.bfloat16).transpose(1, 2), 1),
+        # 4. Non-pure strided view, stride(axis) == 1 but no permutation makes it
+        #    dense, so the permuting branch's permutation is the identity and the
+        #    op copies internally. The quant dim is a whole number of blocks, which
+        #    the dequantize helper the reference uses requires.
+        (torch.as_strided(torch.randn(2, 65, device="npu", dtype=torch.bfloat16), (2, 64), (65, 1)), 1),
+    ],
+    ids=["dense", "strided_axis", "perm_view", "non_pure"],
+)
+@pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float8_e5m2, torch.float4_e2m1fn_x2])
+def test_mx_fake_quantize_matches_quantize_then_dequantize_for_all_layouts(tensor, axis, elem_dtype):
+    """mx_fake_quantize reproduces quantize-then-dequantize on all four layouts.
+
+    The reference quantizes with the raw ``npu_dynamic_mx_quant`` and dequantizes
+    with ``mxfp8_dequantize``/``mxfp4_dequantize``, the helpers training's fake
+    quantization has used so far (``MXFP4FakeQuantize.forward``). The raw
+    ``npu_anti_mx_quant`` cannot serve as the reference: it only consumes quantized
+    data whose quant axis is trailing, which the ``perm_view`` layout breaks.
+
+    These are value-equivalence checks: they verify correctness, not that a real
+    transpose was avoided (that would require profiling). The point is each of the
+    four branch inputs must dequantize to what the raw ops produce for the original
+    tensor. Values are compared rather than quantized bytes: for FP4 the two calls
+    may pack different dims (two values per byte), which does not change what each
+    value dequantizes to.
+
+    The result is then fake quantized a second time: the dequantized tensor's layout
+    need not match the original's (``non_pure`` comes back dense), so the second call
+    may take the other branch, and it must still reproduce the values exactly.
+    """
+    from torchao_npu.ops.mx_ops import mxfp4_dequantize, mxfp8_dequantize
+    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
+
+    config = MXQuantizeConfig(elem_dtype=elem_dtype)
+
+    y = mx_fake_quantize(tensor, axis, config)
+    y_q, scale = torch_npu.npu_dynamic_mx_quant(
+        tensor,
+        axis=axis,
+        dst_type=config.npu_elem_dtype,
+        block_size=config.block_size,
+        round_mode=config.round_mode,
+        scale_alg=config.scale_alg,
+        dst_type_max=config.dst_type_max,
+    )
+    dequantize = mxfp4_dequantize if elem_dtype is torch.float4_e2m1fn_x2 else mxfp8_dequantize
+    y_ref = dequantize(
+        y_q,
+        scale,
+        axis=axis,
+        block_size=config.block_size,
+        output_shape=tensor.shape,
+        output_dtype=tensor.dtype,
+    )
+
+    assert y.shape == tensor.shape, f"shape mismatch: {y.shape} vs {tensor.shape}"
+    assert y.dtype == tensor.dtype, f"dtype mismatch: {y.dtype} vs {tensor.dtype}"
+    assert torch.equal(y, y_ref), "fake quantized values differ from the reference dequantize"
+
+    # Idempotency: quantize -> dequantize -> quantize -> dequantize is a no-op.
+    y2 = mx_fake_quantize(y, axis, config)
+    assert torch.equal(y, y2), "fake quantization is not idempotent"

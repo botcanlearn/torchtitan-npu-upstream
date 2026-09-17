@@ -129,6 +129,70 @@ def mx_quantize(
         return y, scale
 
 
+def mx_fake_quantize(
+    tensor: torch.Tensor,
+    axis: int,
+    config: MXQuantizeConfig,
+) -> torch.Tensor:
+    """MX fake-quantize ``tensor`` along ``axis``.
+
+    Quantizes with ``npu_dynamic_mx_quant`` and immediately dequantizes the result
+    with ``npu_anti_mx_quant``, so the values are those of a real MX
+    quantization/dequantization round trip while the returned tensor keeps
+    ``tensor.dtype``.
+
+    Unlike :func:`mx_quantize`, the quant axis is always permuted to -1 first,
+    because ``npu_anti_mx_quant`` only consumes quantized data whose quant axis is
+    trailing. The permutation is a view, so it introduces no copy of its own: for a
+    tensor whose quant axis is already trailing it is the identity, and otherwise
+    the quant op copies internally when it cannot consume the permuted layout as-is.
+
+    Args:
+        tensor: Tensor to quantize, shape ``(..., K, ...)``.
+        axis: Dimension to quantize along.
+        config: MX quantization parameters.
+
+    Returns:
+        The fake-quantized tensor, with the same shape and dtype as ``tensor``.
+    """
+
+    axis = normalize_dim(axis, tensor.ndim)
+
+    perm_indices = sorted(
+        (d for d in range(tensor.ndim) if d != axis),
+        key=lambda d: tensor.stride(d),
+        reverse=True,
+    )
+    perm_indices.append(axis)
+    tensor_p = tensor.permute(perm_indices)
+
+    y_p, scale_p = torch_npu.npu_dynamic_mx_quant(
+        tensor_p,
+        axis=-1,
+        dst_type=config.npu_elem_dtype,
+        block_size=config.block_size,
+        round_mode=config.round_mode,
+        scale_alg=config.scale_alg,
+        dst_type_max=config.dst_type_max,
+    )
+
+    y_fake_p = torch_npu.npu_anti_mx_quant(
+        y_p,
+        scale_p,
+        axis=-1,
+        dst_type=tensor_p.dtype,
+        src_type=config.npu_elem_dtype,
+    )
+
+    # Inverse permutation: y_p dim j corresponds to tensor dim perm_indices[j].
+    perm_back_indices = [0] * tensor.ndim
+    for j, p in enumerate(perm_indices):
+        perm_back_indices[p] = j
+    y_fake = y_fake_p.permute(perm_back_indices)
+
+    return y_fake
+
+
 def mx_quantize_dual_axis(
     tensor: torch.Tensor,
     config: MXQuantizeConfig,
