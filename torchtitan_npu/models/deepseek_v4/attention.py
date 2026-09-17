@@ -365,9 +365,12 @@ class Attention(BaseAttention):
         # resets per document); the window gather exchanges the post-RoPE
         # rows into the packed ori stream.
         swa_k = self.kv_norm(self.wkv(x))
+        # Flatten only for a singleton batch; otherwise preserve per-batch
+        # positions so the RoPE cache matches the query's sequence length.
+        rope_positions = positions.reshape(1, -1) if positions is not None and bsz == 1 else positions
         swa_k = self.rope(
             swa_k.unsqueeze(2),
-            positions=positions.reshape(1, -1),
+            positions=rope_positions,
         ).squeeze(2)
         swa_k = self.token_dispatcher.gather(swa_k, window)
 

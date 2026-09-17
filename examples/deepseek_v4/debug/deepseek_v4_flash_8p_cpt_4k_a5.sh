@@ -26,6 +26,8 @@ export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_p
 QUANTIZATION_ARGS=(
     --extension.quantization.enable-quantized-training
     --extension.quantization.recipe all_block_fp8
+    --extension.quantization.fsdp-prequantize
+    --extension.quantization.li-quantization fp8
 )
 
 # Tyro treats activation-checkpoint:selective as a subcommand, so it must be
