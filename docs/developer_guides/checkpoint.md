@@ -161,8 +161,7 @@ bash scripts/run_train.sh \
   --checkpoint.no-initial-load-model-only
 ```
 
-如果 `{dump_folder}/{checkpoint.folder}` 已经存在可用 checkpoint，框架会优先从该目录
-优先从该目录加载，并忽略 `initial_load_path`。从新权重启动实验时，应使用新的 `dump-folder` 或
+如果 `{dump_folder}/{checkpoint.folder}` 已经存在可用 checkpoint，框架会优先从该目录加载，并忽略 `initial_load_path`。从新权重启动实验时，应使用新的 `dump-folder` 或
 清理旧的 checkpoint 目录。
 
 如只需要模型和部分训练状态，可以排除不需要的键：
