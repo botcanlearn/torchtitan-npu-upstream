@@ -280,6 +280,20 @@ def test_wrapper_to_tensor(wrapper_cls, weight_config, act_config, device):
 
 
 # =========================================================================
+# to_inference_weight
+# =========================================================================
+
+
+@pytest.mark.parametrize("wrapper_cls, weight_config, act_config", _BASE_WRAPPER_CASES)
+def test_base_to_inference_weight_is_not_implemented(wrapper_cls, weight_config, act_config):
+    """The base class serves no quantized inference weight: subclasses have to implement it."""
+    wrapper = wrapper_cls(torch.randn(2, 4), weight_config=weight_config, activation_config=act_config)
+
+    with pytest.raises(NotImplementedError, match="to_inference_weight"):
+        wrapper.to_inference_weight()
+
+
+# =========================================================================
 # untyped_storage / data_ptr
 # =========================================================================
 

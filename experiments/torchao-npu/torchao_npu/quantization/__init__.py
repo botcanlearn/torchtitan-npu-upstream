@@ -19,3 +19,8 @@ _NPU_DTYPE_DICT = MappingProxyType(
         torch.float4_e2m1fn_x2: torch_npu.float4_e2m1fn_x2,
     }
 )
+
+# Element dtypes MX quantized data may be stored in.
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+_FP4_DTYPES = (torch.float4_e2m1fn_x2,)
+_SUPPORTED_MX_ELEM_DTYPES = (*_FP8_DTYPES, *_FP4_DTYPES)

@@ -3,6 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import pytest
 import torch
 from torch import nn
 from torchao.quantization.qat.fake_quantize_config import Float8FakeQuantizeConfig
@@ -21,3 +22,11 @@ def test_float8_handler_wraps_parameter_and_preserves_requires_grad():
     assert isinstance(result.data, Float8TrainingWeightWrapperTensor)
     assert result.data.weight_config is config.weight_config
     assert result.requires_grad
+
+
+def test_to_inference_weight_is_not_implemented():
+    """Float8 has no inference-side quantized tensor yet, so the inherited base method refuses."""
+    wrapper = Float8TrainingWeightWrapperTensor(torch.randn(2, 4), weight_config=Float8FakeQuantizeConfig())
+
+    with pytest.raises(NotImplementedError, match="to_inference_weight"):
+        wrapper.to_inference_weight()

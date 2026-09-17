@@ -16,13 +16,8 @@ import torch
 import torch_npu
 from torchao.quantization.qat.fake_quantize_config import FakeQuantizeConfigBase
 
-from torchao_npu.quantization import _NPU_DTYPE_DICT
+from torchao_npu.quantization import _NPU_DTYPE_DICT, _SUPPORTED_MX_ELEM_DTYPES
 
-NPU_SUPPORTED_ELEM_DTYPES = [
-    torch.float8_e4m3fn,
-    torch.float8_e5m2,
-    torch.float4_e2m1fn_x2,
-]
 _DYNAMIC_QUANT_MODES = frozenset(("pertoken", "pertensor", "perchannel"))
 
 
@@ -77,8 +72,8 @@ class MXQuantizeConfig(FakeQuantizeConfigBase):
     def __post_init__(self):
         assert self.block_size == 32, f"For MX formats, the block_size must be 32, block_size={self.block_size} passed."
 
-        assert self.elem_dtype in NPU_SUPPORTED_ELEM_DTYPES, (
-            f"elem_dtype must be one of {NPU_SUPPORTED_ELEM_DTYPES}, got {self.elem_dtype}"
+        assert self.elem_dtype in _SUPPORTED_MX_ELEM_DTYPES, (
+            f"elem_dtype must be one of {_SUPPORTED_MX_ELEM_DTYPES}, got {self.elem_dtype}"
         )
 
         is_fp4 = self.elem_dtype is torch.float4_e2m1fn_x2

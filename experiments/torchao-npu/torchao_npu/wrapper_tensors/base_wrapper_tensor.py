@@ -113,6 +113,10 @@ class BaseTrainingWeightWrapperTensor(TorchAOBaseTensor):
     Not intended to be used directly.
     """
 
+    _data: torch.Tensor
+    weight_config: FakeQuantizeConfigBase | None
+    activation_config: FakeQuantizeConfigBase | None
+
     @staticmethod
     def __new__(
         cls,
@@ -289,6 +293,10 @@ class BaseTrainingWeightWrapperTensor(TorchAOBaseTensor):
     def to_tensor(self) -> torch.Tensor:
         """Return the underlying raw tensor, unwrapping the subclass."""
         return self._data
+
+    def to_inference_weight(self) -> torch.Tensor:
+        """Return the quantized weight for inference."""
+        raise NotImplementedError(f"``to_inference_weight`` is not implemented for {type(self).__name__}.")
 
     def untyped_storage(self):
         # Wrapper has no storage of its own. Pass the call to where the data actually is, _data

@@ -16,6 +16,7 @@ from torchao_npu.ops.mx_ops import (
 )
 from torchao_npu.quantization.quant_configs import MXQuantizeConfig
 from torchao_npu.quantization.transform import register_parameter_swap_handler
+from torchao_npu.quantized_tensors.mx_tensor import MXTensor
 from torchao_npu.wrapper_tensors.base_wrapper_tensor import BaseTrainingWeightWrapperTensor
 
 
@@ -30,6 +31,10 @@ class MXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
 
     ``weight_config`` and ``activation_config`` must be set and equal.
     """
+
+    _data: torch.Tensor
+    weight_config: MXQuantizeConfig
+    activation_config: MXQuantizeConfig
 
     def __init__(
         self,
@@ -56,6 +61,22 @@ class MXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
             )
 
         super().__init__(tensor, weight_config=weight_config, activation_config=activation_config)
+
+    def to_inference_weight(self) -> torch.Tensor:
+        """Quantize the master weight into its inference-time :class:`MXTensor`.
+
+        Training's forward quantizes the weight's contracting (K) axis of the
+        transposed operand -- ``B_data.T`` for mm/linear, axis -2 of the
+        pre-transposed 3D weight for grouped/bmm -- which in the stored layout is
+        always the last axis. Quantizing the stored last axis here therefore
+        reproduces training's forward weight quantization up to a transpose.
+        """
+        return MXTensor.from_hp(
+            self._data,
+            quant_config=self.weight_config,
+            axis=-1,
+            act_quant_config=self.activation_config,
+        )
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):

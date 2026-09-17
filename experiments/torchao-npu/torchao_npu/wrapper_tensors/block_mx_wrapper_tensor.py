@@ -28,6 +28,8 @@ from torchao_npu.quantization.quant_configs import (
 )
 from torchao_npu.quantization.quant_primitives.block_mx import block_mx_quantize
 from torchao_npu.quantization.transform import register_parameter_swap_handler
+from torchao_npu.quantized_tensors.block_mx_tensor import BlockMXTensor
+from torchao_npu.quantized_tensors.mx_tensor import MXTensor
 from torchao_npu.wrapper_tensors.base_wrapper_tensor import (
     BaseTrainingWeightWrapperTensor,
     _ops_to_preserve_subclass,
@@ -63,6 +65,9 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
     _data: torch.Tensor
     _scale_s1: torch.Tensor
     _scale_s2: torch.Tensor
+    _data: torch.Tensor
+    weight_config: BlockMXQuantizeConfig
+    activation_config: MXQuantizeConfig
 
     def __init__(
         self,
@@ -288,6 +293,36 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
             # Training step 1+: write pre-quantized data into the pre-allocated out.
             self._write_prequantized_to_out(out, B_q, B_s1, B_s2)
             return None
+
+    def to_inference_weight(self) -> MXTensor:
+        """Quantize the master weight into its inference-time :class:`MXTensor`.
+
+        Training quantizes the stored weight's last axis (``block_mx_quantize``
+        runs on the transposed operand along axis -2, i.e. the stored last axis),
+        so quantizing axis -1 here reproduces the quantized weight used in
+        training's forward.
+
+        With mxfp4-QAT enabled the weight is served as MXFP4: training's QAT
+        pre-pass quantizes the same stored last axis, so an
+        :class:`MXTensor` built from the nested FP4 config matches it exactly.
+        Otherwise the block-MX FP8 quantization is converted to the equivalent
+        single-axis :class:`MXTensor` along the stored last dim (see
+        :meth:`~torchao_npu.quantized_tensors.block_mx_tensor.BlockMXTensor.to_mx_tensor`).
+        """
+        mxfp4_config = self.weight_config.mxfp4_fake_quantize_config
+        if mxfp4_config is not None:
+            return MXTensor.from_hp(
+                self._data,
+                quant_config=mxfp4_config,
+                axis=-1,
+                act_quant_config=self.activation_config,
+            )
+        else:
+            return BlockMXTensor.from_hp(
+                self._data,
+                quant_config=self.weight_config,
+                act_quant_config=self.activation_config,
+            ).to_mx_tensor(quant_axis=-1)
 
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
