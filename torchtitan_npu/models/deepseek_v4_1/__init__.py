@@ -3,18 +3,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""DeepSeek-V4.1 model configuration: builders, flavors and the model registry.
-
-Following torchtitan's model-directory layout, the model configuration lives in
-this package entry point: the per-layer `Config` builders, the real V4.1
-topology constants, the flavor factories and `model_registry` are all defined
-here.  The trainer-facing recipes stay in `config_registry.py`, and every
-component keeps its own `Config` in its own module.
-
-The width sets and topology constants match the frozen
-the registered 40-layer V4.1 shape.
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -24,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import torch.nn as nn
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, Linear, RMSNorm
+from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RMSNorm
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -35,7 +23,6 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model_spec import ModelSpec
 
-from torchtitan_npu.override.common.rope import WorkaroundComplexRoPE
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .attention import Attention, CompressedSparseInnerAttention2
@@ -133,16 +120,10 @@ _SWIGLU_LIMIT = 10.0
 _CANDIDATE_BLOCK_SIZE = 8
 
 
-# The real V4.1 text-backbone topology: the compression ratio of every layer
-# and the layers that own the shared compressed KV, the index selection and
-# the candidate pool.  The 30-layer crop keeps the same source layers and
-# truncates the trailing ratio-1 group; the 40-layer shapes are the frozen
-# registered 40-layer V4.1 topology.
+# Flash and debug widths share the same 40-layer KV/indexer reuse topology.
 V41_CANDIDATE_SOURCE_LAYER = 20
-V41_COMPRESS_RATIOS = (0, 0) + (2,) * 18 + (1,) * 10
 V41_FULL_COMPRESS_RATIOS = (0, 0) + (2,) * 18 + (1,) * 20
 V41_KV_SOURCE_LAYERS = (2, 8, 14, 20)
-V41_INDEX_SOURCE_LAYERS = (2, 8, 14, 20, 24, 28)
 V41_FULL_INDEX_SOURCE_LAYERS = (2, 8, 14, 20, 24, 28, 32, 36)
 
 
@@ -176,7 +157,7 @@ def _make_compressor_config(
     compress_ratio: int,
     norm_eps: float,
     is_source: bool,
-    rope: WorkaroundComplexRoPE.Config | None,
+    rope: ComplexRoPE.Config | None,
 ) -> Compressor.Config:
     """Main-KV compressor config. A reusing layer holds no weights of its own.
 
@@ -236,7 +217,7 @@ def _make_indexer_config(
     uses_candidates: bool,
     candidate_topk_blocks: int,
     candidate_block_size: int,
-    rope: WorkaroundComplexRoPE.Config | None,
+    rope: ComplexRoPE.Config | None,
 ) -> HierarchicalIndexer.Config:
     """The indexer config for one layer, in the mode its role implies.
 
@@ -319,7 +300,7 @@ def _make_v41_attn_config(
     index_n_heads: int,
     index_head_dim: int,
     index_topk: int,
-    rope: WorkaroundComplexRoPE.Config,
+    rope: ComplexRoPE.Config,
     owns_compressor: bool,
     owns_indexer: bool,
     source_key: bool,
@@ -518,8 +499,6 @@ def _make_v41_config(
     # index mask from its own ``compress_ratio``, so the ratio of a layer must equal the
     # ratio of the source it consumes; a topology that breaks this would silently read
     # another ratio's plan.
-    if n_layers not in (30, 40):
-        raise ValueError(f"the supported V4.1 layer counts are 30 or 40, got {n_layers}")
     if len(compress_ratios) != n_layers:
         raise ValueError(f"compress_ratios must match n_layers ({n_layers}), got {len(compress_ratios)}")
     for name, sources in (("kv_source_layers", kv_source_layers), ("index_source_layers", index_source_layers)):
@@ -562,13 +541,16 @@ def _make_v41_config(
     norm_eps = 1e-20
     hc_mult = 4
 
-    rope = WorkaroundComplexRoPE.Config(
+    # The text tower's three rope sites share one public ComplexRoPE.Config;
+    # reference and fused stacks pick the implementation via the public
+    # override entries (workaround / asc_complex / asc_partial).
+    rope = ComplexRoPE.Config(
         dim=widths.rope_head_dim,
         max_seq_len=widths.max_seq_len,
         theta=10000.0,
         scaling="none",
     )
-    rope_compress = WorkaroundComplexRoPE.Config(
+    rope_compress = ComplexRoPE.Config(
         dim=widths.rope_head_dim,
         max_seq_len=widths.max_seq_len,
         theta=160000.0,
@@ -700,23 +682,6 @@ def _make_v41_config(
     )
 
 
-def deepseek_v4_1_flash_30layers_16experts_vision_config(
-    *,
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
-):
-    """Thirty of the forty decoder layers, for fast single-node validation."""
-    return _make_v41_config(
-        n_layers=30,
-        compress_ratios=V41_COMPRESS_RATIOS,
-        kv_source_layers=V41_KV_SOURCE_LAYERS,
-        index_source_layers=V41_INDEX_SOURCE_LAYERS,
-        candidate_source_layer=V41_CANDIDATE_SOURCE_LAYER,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
-    )
-
-
 def deepseek_v4_1_flash_40layers_16experts_vision_config(
     *,
     moe_comm_backend: str = "standard",
@@ -752,8 +717,14 @@ def deepseek_v4_1_debugmodel_config(
     )
 
 
+deepseek_v4_1_configs = {
+    "deepseek_v4_1_flash_40layers_16experts_vision": deepseek_v4_1_flash_40layers_16experts_vision_config,
+    "deepseek_v4_1_debugmodel": deepseek_v4_1_debugmodel_config,
+}
+
+
 def model_registry(
-    flavor: str = "deepseek_v4_1_flash_30layers_16experts_vision",
+    flavor: str,
     *,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
@@ -761,14 +732,9 @@ def model_registry(
 ) -> ModelSpec:
     from .parallelize import parallelize_deepseek_v4_1
 
-    config_factories = {
-        "deepseek_v4_1_flash_30layers_16experts_vision": deepseek_v4_1_flash_30layers_16experts_vision_config,
-        "deepseek_v4_1_flash_40layers_16experts_vision": deepseek_v4_1_flash_40layers_16experts_vision_config,
-        "deepseek_v4_1_debugmodel": deepseek_v4_1_debugmodel_config,
-    }
-    if flavor not in config_factories:
-        raise ValueError(f"Unknown DeepSeek V4.1 flavor: {flavor}")
-    config = config_factories[flavor](
+    if flavor not in deepseek_v4_1_configs:
+        raise ValueError(f"Unknown deepseek_v4_1 flavor: {flavor}. Available: {list(deepseek_v4_1_configs.keys())}")
+    config = deepseek_v4_1_configs[flavor](
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
@@ -797,21 +763,16 @@ def _register_step_pre_hooks(optimizers, model_parts, parallel_dims) -> None:
     register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
-# Public surface: the model config, its component classes and the model-config
-# factories.  ``config_registry`` imports this module (never the reverse), so
-# the trainer recipes are not re-exported here.
 __all__ = [
     "V41_CANDIDATE_SOURCE_LAYER",
-    "V41_COMPRESS_RATIOS",
     "V41_FULL_COMPRESS_RATIOS",
     "V41_FULL_INDEX_SOURCE_LAYERS",
-    "V41_INDEX_SOURCE_LAYERS",
     "V41_KV_SOURCE_LAYERS",
     "Attention",
     "DeepSeekV41StateDictAdapter",
     "V41Model",
+    "deepseek_v4_1_configs",
     "deepseek_v4_1_debugmodel_config",
-    "deepseek_v4_1_flash_30layers_16experts_vision_config",
     "deepseek_v4_1_flash_40layers_16experts_vision_config",
     "model_registry",
 ]

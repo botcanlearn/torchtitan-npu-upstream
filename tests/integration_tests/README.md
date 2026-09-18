@@ -3,7 +3,7 @@
 本目录遵循 Torchtitan 的 `tests/integration_tests` 布局，负责维护集成测试定义、测试入口以及可选的 loss 精确比较。基础架构代码由
 torchtitan 迁移而来。
 
-当前支持 DeepSeek-V4、DeepSeek-V4.1 与 DeepSeek-V3.2 模型。
+当前注册 DeepSeek-V4 与 DeepSeek-V3.2 模型的集成用例。
 
 ## 测试矩阵
 
@@ -21,9 +21,6 @@ torchtitan 迁移而来。
 | `dsv3_2_dsa_ep2_fsdp2` | DeepSeek-V3.2 | DSA + EP2/FSDP2 | 2 | - | 是 | - |
 | `dsv3_2_dsa_cp2` | DeepSeek-V3.2 | DSA + CP2 | 2 | - | 否 | ST 仅验证训练触发；CPU metadata oracle 单独覆盖，暂未生成 CP2 golden loss |
 | `dsv4_ema_ep2_fsdp2` | DeepSeek-V4 | Golden + EP2/FSDP2 + EMA CPU offload | 2 | - | 否 | 校验完整 DCP metadata 包含 `ema_optimizer.*` |
-| `dsv41_multimodal_muon_2p` | DeepSeek-V4.1 | CC12M packing + A3 融合 + Muon、EP2 + FSDP2、2 steps | 2 | - | 否 | 完成性 smoke（检查实际完成步骤集合）；显式 suite，不入默认池，不作为精度验收 |
-
-V4.1 模型栈完全独立于 `deepseek_v4`（无继承、无 import、无跨模型 override，见 `tests/unit_tests/models/deepseek_v4_1/test_independence.py`）；模型默认算子是 Attention Gym 的 eager `selected_attention`（`CompressedSparseInnerAttention2`）、公共 MoE 工厂与 indexer 蒸馏损失 `IndexerDistillLoss`，具名配方（`*_multimodal` / `*_multimodal_a3` / `*_multimodal_a5`）只通过 `override.imports` 增选融合算子。
 
 `use_golden` 与 `check_loss` 是两个独立维度：`use_golden` 仅决定使用 Golden 参考算子
 还是 SMLA/NPU override；`check_loss` 决定是否启用 deterministic、读取参考 loss 并执行
@@ -31,9 +28,7 @@ V4.1 模型栈完全独立于 `deepseek_v4`（无继承、无 import、无跨模
 
 当前两个 Golden case（均为 V4）设置 `check_loss=True`，使用固定随机种子和 deterministic 模式，
 比较 TensorBoard 标量 `loss_metrics/global_avg_loss`，要求 step 集合和每个浮点值均精确相等。
-DeepSeek-V4.1 不保留专门 loss 键与默认集成 case：与上游 torchtitan 的模型测试方式一致，reference
-路径由 CPU 单测覆盖，真实训练执行通过下方显式融合 suite 手动运行，8 卡形状用 `run_train.sh`
-配合 `CONFIG=` 配方手动回归。
+DeepSeek-V4.1 的真实训练验证使用 [A3/A5 示例入口](../../examples/deepseek_v4_1/readme.md)，不注册专用手动冒烟 suite。
 
 两个 DeepSeek-V3.2 case 同样设置 `check_loss=True`，使用 RoPE workaround、Ascend DSA
 metadata/attention override，并分别对 1-rank 和 EP2/FSDP2 的 100-step loss 做精确比较。
@@ -119,14 +114,3 @@ runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到�
 
 调度器本身不设独立单元测试：其正确性（设备不重叠、失败/超时释放、并发打包、
 golden loss 等价）由集成测试自身的 canary 运行直接验证。
-
-
-### V4.1 显式融合验证
-
-V4.1 不保留默认 `models` 池用例，避免延长 CI；融合验证使用同一 runner 的显式 suite：
-
-```bash
-python -m tests.integration_tests.run_tests /tmp/dsv41_fused --test_suite deepseek_v4_1_fused --ngpu 2
-```
-
-该 suite 运行 2 卡 CC12M packing + A3 融合 + Muon 两步 smoke，检查 TensorBoard 的实际步骤集合；完成性结果不代替精度验收。reference 与 A5 的 8 卡形状通过 `run_train.sh` 配合 `CONFIG=` 配方手动回归（见 `examples/deepseek_v4_1/readme.md`），不注册 A3 冒烟环境无法执行的 A5 case。

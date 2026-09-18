@@ -134,7 +134,6 @@ def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [
-        ({"n_layers": 20}, "supported V4.1 layer counts"),
         ({"compress_ratios": V41_FULL_COMPRESS_RATIOS[:-1]}, "compress_ratios must match n_layers"),
         (
             {"compress_ratios": (0, 0, 2, 1) + (2,) * 16 + (1,) * 20},
@@ -153,7 +152,6 @@ def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
         ({"candidate_source_layer": 24}, "candidate-pool source must own the compressed KV"),
     ],
     ids=[
-        "layer_count",
         "ratio_table_length",
         "kv_ratio_mismatch",
         "no_kv_source",

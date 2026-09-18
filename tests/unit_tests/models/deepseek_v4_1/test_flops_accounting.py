@@ -51,28 +51,3 @@ def test_flops_are_window_plus_compressed_plus_indexer(flavor, seq_len, expected
 
     assert nparams == 0
     assert flops == expected
-
-
-def test_ratio_one_layers_keep_their_compressed_container():
-    """The ratio-1 layers of the 30-layer topology still select compressed entries.
-
-    The 30-layer crop is ``(0, 0) + (2,) * 18 + (1,) * 10``: dropping the ratio-1
-    layers from the account would lose ten layers' worth of selected-entry
-    attention and the three ratio-1 index sources (20, 24, 28) that score.
-    """
-    config = model_registry("deepseek_v4_1_flash_30layers_16experts_vision").model
-
-    ratio_one = [layer.attention for layer in config.layers if layer.attention.compress_ratio == 1]
-    assert len(ratio_one) == 10
-    assert sum(1 for attention in ratio_one if attention.indexer.mode.value != "reuse") == 3
-
-    _, flops = config.get_nparams_and_flops(_NoParameters(), seq_len=4096)
-
-    # 30 x window + 28 x selected + (3 full/reindex ratio-2 + 3 index-source
-    # ratio-1) x indexer: the ratio-1 container is counted, so the result is
-    # larger than the same account that stops at compress_ratio > 1.
-    window = 30 * 6 * 64 * 512 * 2 * 128
-    selected = 28 * 6 * 64 * 512 * 2 * 512
-    indexer = 3 * 6 * 32 * 128 * 2048 + 3 * 6 * 32 * 128 * 4096
-    assert flops == window + selected + indexer
-    assert flops > window + 18 * 6 * 64 * 512 * 2 * 512 + 3 * 6 * 32 * 128 * 2048

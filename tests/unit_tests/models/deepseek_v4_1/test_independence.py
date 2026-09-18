@@ -19,7 +19,6 @@ def test_v41_package_has_no_v4_references():
     paths = list((REPO / "torchtitan_npu/models/deepseek_v4_1").rglob("*.py"))
     paths += list((REPO / "tests/unit_tests/models/deepseek_v4_1").rglob("*.py"))
     paths += [
-        REPO / "tests/integration_tests/deepseek_v4_1.py",
         REPO / "examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh",
     ]
     for path in paths:

@@ -122,9 +122,11 @@ def test_trainer_config_rejects_a_ratio_table_shorter_than_the_stack():
     # Positive control: the registered table is accepted by the same entry point, so a
     # check that always raised would not pass this test.
     registered = deepseek_v4_1_debugmodel_multimodal()
+    registered.training.seq_len = 512
     registered.model_spec.model.update_from_config(config=registered)
 
     config = deepseek_v4_1_debugmodel_multimodal()
+    config.training.seq_len = 512
     model_config = config.model_spec.model
     model_config.compress_ratios = model_config.compress_ratios[:-1]
     with pytest.raises(ValueError, match="compress_ratios must match n_layers"):

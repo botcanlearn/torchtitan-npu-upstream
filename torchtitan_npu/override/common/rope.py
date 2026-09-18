@@ -235,18 +235,6 @@ def asc_complex(cfg: ComplexRoPE.Config) -> AscComplexRoPE.Config:
 
 
 @override(
-    target=WorkaroundComplexRoPE.Config,
-    exact=True,
-    description="AscendC rotation for the split-aware workaround RoPE (text/compressor/indexer sites)",
-)
-def asc_workaround(cfg: WorkaroundComplexRoPE.Config) -> AscComplexRoPE.Config:
-    """Narrow bridge for the model builders that construct the workaround
-    config directly: the derived fused config keeps ``split`` (and the YaRN
-    fields) because ``AscComplexRoPE.Config`` extends the same config."""
-    return derive(cfg, AscComplexRoPE.Config)
-
-
-@override(
     target=CosSinRoPE.Config,
     description="AscendC fused CosSinRoPE via torch_npu.npu_rotary_mul (half mode)",
 )
