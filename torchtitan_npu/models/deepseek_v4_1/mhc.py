@@ -3,7 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Single-Pass head collaboration for DeepSeek-V4.1.
+"""Single-Pass mHC (manifold-constrained Hyper-Connections) for DeepSeek V4.1.
 
 The V4.1 stack carries one stream mix across the whole model: the first
 sub-layer collapses with the identity mix (``HcPre.identity_pre_mix``) and
@@ -79,9 +79,8 @@ class HcPre(Module):
 
         ``[B, L, hc, D] x [B, L, hc] -> [B, L, D]``
         """
-        shape, dtype = x_BLHcD.size(), x_BLHcD.dtype
-        y_BLD = torch.sum(pre_mix_BLHc.unsqueeze(-1) * x_BLHcD.float().reshape(shape), dim=2)
-        return y_BLD.to(dtype)
+        y_BLD = torch.sum(pre_mix_BLHc.unsqueeze(-1) * x_BLHcD.float(), dim=2)
+        return y_BLD.to(x_BLHcD.dtype)
 
     def _split_sinkhorn(self, mixes_BLM: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Split the mixing logits and balance ``comb`` to be doubly stochastic.
@@ -103,8 +102,7 @@ class HcPre(Module):
         post_BLHc = 2 * torch.sigmoid(post_BLHc * self.hc_scale[1] + self.hc_base[hc_mult : 2 * hc_mult])
         comb_BLHcHc = comb_BLHcHc * self.hc_scale[2] + self.hc_base[2 * hc_mult :].view(hc_mult, hc_mult)
 
-        row_max_BLHc1 = comb_BLHcHc.max(dim=-1, keepdim=True).values
-        comb_BLHcHc = torch.exp(comb_BLHcHc - row_max_BLHc1).clone()
+        comb_BLHcHc = torch.exp(comb_BLHcHc - comb_BLHcHc.amax(dim=-1, keepdim=True))
         comb_BLHcHc = comb_BLHcHc / comb_BLHcHc.sum(dim=-1, keepdim=True) + self.hc_eps
         comb_BLHcHc = comb_BLHcHc / (comb_BLHcHc.sum(dim=-2, keepdim=True) + self.hc_eps)
         for _ in range(self.sinkhorn_iters - 1):
@@ -131,7 +129,7 @@ class HcPre(Module):
         # One RMS statistic per token over the whole flattened hc * D stream.
         flat_BLN = x_BLHcD.flatten(2).float()
         rsqrt_BL1 = torch.rsqrt(flat_BLN.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes_BLM = F.linear(flat_BLN, self.hc_fn.float()) * rsqrt_BL1
+        mixes_BLM = F.linear(flat_BLN, self.hc_fn) * rsqrt_BL1
         pre_BLHc, post_BLHc, comb_BLHcHc = self._split_sinkhorn(mixes_BLM)
         return self.collapse(x_BLHcD, pre_mix_BLHc), pre_BLHc, post_BLHc, comb_BLHcHc
 

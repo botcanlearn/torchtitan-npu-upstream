@@ -61,12 +61,12 @@ class Compressor(Module):
             return
         if config.rope is None or config.wkv is None or config.norm is None:
             raise ValueError("A Compressor source layer requires rope, wkv and norm configs.")
-        wgate = config.wgate
-        if config.compress_ratio > 1 and wgate is None:
-            raise ValueError("A Compressor with compress_ratio > 1 requires a wgate config.")
         self.wkv = config.wkv.build()
-        if wgate is not None:
-            self.wgate = wgate.build()
+        if config.compress_ratio > 1:
+            # The softmax gate only exists when there is more than one token to pool.
+            if config.wgate is None:
+                raise ValueError("A Compressor with compress_ratio > 1 requires a wgate config.")
+            self.wgate = config.wgate.build()
         self.norm = config.norm.build()
         self.rope = config.rope.build()
 

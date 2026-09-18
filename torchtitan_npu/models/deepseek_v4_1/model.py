@@ -155,9 +155,6 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
         x = self.hc_post(x, residual, post, comb)
         return x, ffn_pre, cmp_k, idx_k, topk_indices, topk_scores, candidates
 
-    def collapse_pre_mix(self, x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
-        return self.hc_attn_pre.collapse(x, pre_mix)
-
 
 def _vision_encoder_anchor(hidden: torch.Tensor, visual: torch.Tensor) -> torch.Tensor:
     """Keep the vision tower in the autograd graph when nothing is scattered.
@@ -485,7 +482,6 @@ class V41Model(Decoder):
         topk_indices: torch.Tensor | None = None
         topk_scores: torch.Tensor | None = None
         candidates: torch.Tensor | None = None
-        last_layer = None
         for layer in self.layers.values():
             (
                 hidden,
@@ -508,12 +504,12 @@ class V41Model(Decoder):
                 topk_scores=topk_scores,
                 candidates=candidates,
             )
-            last_layer = layer
 
-        if last_layer is None:
-            raise RuntimeError("V4.1 model has no transformer layers")
-        main_hidden = last_layer.collapse_pre_mix(hidden, pre_mix)  # pyrefly: ignore [not-callable]
+        # The stack has no learned output head: it collapses with the last block's
+        # attention-input coefficients.
+        main_hidden = HcPre.collapse(hidden, pre_mix)
         main_hidden = self.norm(main_hidden) if self.norm is not None else main_hidden
 
-        output = main_hidden if self._skip_lm_head or self.lm_head is None else self.lm_head(main_hidden)
-        return output.float()
+        if self._skip_lm_head or self.lm_head is None:
+            return main_hidden
+        return self.lm_head(main_hidden)

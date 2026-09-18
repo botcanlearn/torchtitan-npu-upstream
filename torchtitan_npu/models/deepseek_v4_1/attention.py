@@ -295,9 +295,7 @@ class Attention(BaseAttention):
 
         # Every layer compresses and indexes: a source publishes new tensors, a reusing
         # layer hands back the ones in flight (asserted inside those modules).
-        rotated, latent = self.compressor(x, positions, cmp_k)
-        if self.compressor.is_source:
-            cmp_k = rotated
+        cmp_k, latent = self.compressor(x, positions, cmp_k)
         # The indexer is trained by distillation alone, so it reads the trunk as
         # constants.  The shared index keys are the exception: a Reindex Mode layer keeps
         # the ``idx_k`` it was handed live, so its consumers go on training the key's
