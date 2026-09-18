@@ -42,7 +42,7 @@ SPMD_BACKEND="spmd_types"
 
 # Training
 SEQ_LEN=4096
-MBS=1
+MBS="${MBS:-1}"
 GBS=1024
 STEPS=100
 
@@ -133,9 +133,7 @@ OPTIMIZER_ARGS="
     --optimizer.muon_ns_steps 10
     --optimizer.muon_adjust_lr_fn match_rms_adamw
 "
-OPTIMIZER_OVERRIDES="
-    torchtitan_npu.override.common.optimizer.swap_optimizer
-"
+OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then
     NPU_OPS_OVERRIDES=(

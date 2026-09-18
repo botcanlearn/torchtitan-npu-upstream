@@ -124,9 +124,7 @@ OPTIMIZER_ARGS="
     --optimizer.muon_ns_steps 10
     --optimizer.muon_adjust_lr_fn match_rms_adamw
 "
-OPTIMIZER_OVERRIDES="
-    torchtitan_npu.override.common.optimizer.swap_optimizer
-"
+OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then
     NPU_OPS_OVERRIDES=(

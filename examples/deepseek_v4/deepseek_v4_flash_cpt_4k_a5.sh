@@ -31,6 +31,7 @@ NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.
                       xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"
 NGPU="${NGPU:-8}"
 export NODE_IPS NGPU
+export MBS="${MBS:-2}"
 
 # A5 defaults to block-FP8 quantized training. A trailing
 # --extension.quantization.no-enable-quantized-training selects BF16 instead.
@@ -40,6 +41,9 @@ QUANTIZATION_ARGS=(
     --extension.quantization.fsdp-prequantize
     --extension.quantization.li-quantization fp8
 )
+
+# Disable swap optimizer for better performance
+export OPTIMIZER_OVERRIDES=""
 
 exec bash "${SCRIPT_DIR}/deepseek_v4_flash_cpt_4k_a3.sh" \
     "${QUANTIZATION_ARGS[@]}" \

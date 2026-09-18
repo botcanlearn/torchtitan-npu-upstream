@@ -18,6 +18,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # NPU cards for configuration.
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
 
+export MBS=2
 # A5 defaults to Inductor; partial RoPE fuses through the asc_partial override.
 # swiglu_group fuses SwiGLU for routed and shared experts.
 export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
@@ -32,6 +33,9 @@ QUANTIZATION_ARGS=(
     --extension.quantization.fsdp-prequantize
     --extension.quantization.li-quantization fp8
 )
+
+# Disable swap optimizer for better performance
+export OPTIMIZER_OVERRIDES=""
 
 # Tyro treats activation-checkpoint:selective as a subcommand, so it must be
 # the final token after all regular options and override targets.
