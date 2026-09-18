@@ -12,12 +12,10 @@ Backward strategy, chosen by ``probs``:
 - ``probs`` frozen (pre-W2 absorption passes ``ones_like``): the same kernel
   with a zero placeholder — ``grad_tokens`` does not read the forward values,
   so the GMM2/W2 output need not stay alive.
-- ``probs is None`` (unweighted EP paths): the same native kernel under
-  ``torch.cond`` — for non-empty inputs it is bitwise-equal to the scatter
-  inverse and does not read forward values; CANN tiling rejects zero-row
-  inputs (error 561002), so ranks with zero routed tokens take the zero
-  branch. ``torch.cond`` keeps that runtime branch alive under the graph
-  trainer's aot_fx_trace chain.
+- ``probs is None`` (unweighted EP paths): an opaque backward op keeps the
+  zero-row guard at runtime through compile and graph-trainer capture.
+  Non-empty inputs use the native kernel; empty inputs skip its unsupported
+  zero-row tiling path.
 """
 
 __all__ = ["npu_moe_token_unpermute"]
@@ -64,6 +62,22 @@ def _npu_moe_token_unpermute_setup_context(ctx, inputs, output):
         ctx.save_for_backward(sorted_indices)
 
 
+@torch.library.custom_op("torchtitan_npu::npu_moe_token_unpermute_grad_unweighted", mutates_args=())
+def _npu_moe_token_unpermute_grad_unweighted(grad_output: torch.Tensor, sorted_indices: torch.Tensor) -> torch.Tensor:
+    # CANN tiling rejects zero rows. Keep this guard inside the opaque op:
+    # a cond subgraph can emit out-of-scope symbols for dynamic EP sizes.
+    if grad_output.numel() == 0:
+        return torch.empty_like(grad_output)
+    # The unweighted gradient does not read forward token values.
+    grad_tokens, _ = torch_npu.npu_moe_token_unpermute_grad(grad_output, grad_output, sorted_indices, probs=None)
+    return grad_tokens
+
+
+@_npu_moe_token_unpermute_grad_unweighted.register_fake
+def _npu_moe_token_unpermute_grad_unweighted_fake(grad_output, sorted_indices):
+    return torch.empty_like(grad_output)
+
+
 def _npu_moe_token_unpermute_backward(ctx, grad_output):
     if grad_output is None:
         return None, None, None
@@ -72,23 +86,7 @@ def _npu_moe_token_unpermute_backward(ctx, grad_output):
     if probs is None:
         (sorted_indices,) = ctx.saved_tensors
 
-        def native_branch():
-            # grad_tokens does not read forward values in the unweighted path,
-            # so grad_output doubles as the shape-only permuted_tokens argument.
-            grad_tokens, _ = torch_npu.npu_moe_token_unpermute_grad(
-                grad_output,
-                grad_output,
-                sorted_indices,
-                probs=None,
-            )
-            return grad_tokens
-
-        def zero_branch():
-            # CANN tiling rejects num_out_tokens == 0 (error 561002): a rank
-            # can legitimately receive zero routed tokens in EP.
-            return torch.zeros_like(grad_output)
-
-        grad_tokens = torch.cond(grad_output.numel() == 0, zero_branch, native_branch)
+        grad_tokens = _npu_moe_token_unpermute_grad_unweighted(grad_output, sorted_indices)
         return grad_tokens, None, None
 
     if probs.requires_grad:

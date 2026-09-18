@@ -2,6 +2,7 @@
 
 """CPU-bound contract tests for the AscendC MoE operator wrappers."""
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -161,6 +162,47 @@ def test_unpermute_empty_rows_backward_skips_native_kernel(monkeypatch):
     assert output.shape == (0, 3)
     assert routed.grad is not None
     assert routed.grad.shape == routed.shape
+
+
+def _compile_backends():
+    """Run CPU-safe graph capture in CI; exercise Inductor only on an NPU runner."""
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return ["aot_eager", "inductor"]
+    return ["aot_eager"]
+
+
+@pytest.mark.parametrize("backend", _compile_backends())
+def test_unpermute_unweighted_backward_with_unbacked_rows(monkeypatch, backend):
+    """The same captured backward must accept empty and non-empty EP sizes."""
+    native_rows = []
+
+    def fake_unpermute_grad(permuted_tokens, grad_output, sorted_indices, *, probs):
+        assert probs is None
+        assert grad_output.numel() > 0
+        native_rows.append(grad_output.shape[0])
+        result = torch.zeros_like(grad_output)
+        result.index_add_(0, sorted_indices.long(), grad_output)
+        return result, None
+
+    monkeypatch.setattr(moe_token_unpermute.torch_npu, "npu_moe_token_unpermute_grad", fake_unpermute_grad)
+
+    def backward(lengths):
+        a, b = lengths[0].item(), lengths[1].item()
+        torch._check(a >= 0)
+        torch._check(b >= 0)
+        rows = a + b
+        grad = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3)
+        indices = torch.arange(rows).flip(0)
+        return moe_token_unpermute._npu_moe_token_unpermute_grad_unweighted(grad, indices)
+
+    with torch._dynamo.config.patch(capture_scalar_outputs=True):
+        compiled = torch.compile(backward, backend=backend, fullgraph=True)
+        for lengths in ([2, 3], [0, 0], [1, 2]):
+            rows = sum(lengths)
+            actual = compiled(torch.tensor(lengths))
+            expected = torch.arange(rows * 3, dtype=torch.float32).reshape(rows, 3).flip(0)
+            torch.testing.assert_close(actual, expected)
+    assert native_rows == [5, 3]
 
 
 def test_unpermute_frozen_probs_backward_skips_saved_permuted_tokens(monkeypatch):
