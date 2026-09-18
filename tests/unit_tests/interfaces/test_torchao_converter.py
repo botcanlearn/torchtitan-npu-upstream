@@ -1,0 +1,219 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""CPU coverage for converter selection and weight-wrapper dispatch to NPU ops."""
+
+import importlib
+import sys
+from dataclasses import dataclass
+from types import ModuleType, SimpleNamespace
+
+import pytest
+import torch
+
+
+@pytest.fixture
+def converter_module():
+    # TorchAO-NPU is an optional dependency of the training plugin.
+    pytest.importorskip("torchao_npu")
+    importlib.import_module("torchtitan_npu")
+    return importlib.import_module("interfaces.torchao_converter")
+
+
+@pytest.fixture(autouse=True)
+def restore_quantized_module_cache(converter_module):
+    from interfaces.torchao_converter import _npu_quantized_module_cache
+
+    original = _npu_quantized_module_cache.copy()
+    yield
+    _npu_quantized_module_cache.clear()
+    _npu_quantized_module_cache.update(original)
+
+
+@pytest.fixture
+def quantization_calls(monkeypatch, converter_module):
+    calls = []
+
+    def quantize(module, config, *, filter_fn):
+        calls.append((module, config, filter_fn))
+
+    monkeypatch.setattr(converter_module, "quantize_", quantize)
+    monkeypatch.setitem(sys.modules, "cann_ops_nn.ops", ModuleType("cann_ops_nn.ops"))
+    with torch.random.fork_rng(devices=[]):
+        yield calls
+
+
+@pytest.mark.parametrize("source_kind", ["grouped", "asc"])
+def test_quantized_grouped_experts_keep_config_and_skip_reconversion(converter_module, quantization_calls, source_kind):
+    from interfaces.torchao_converter import _mxfp8_param_swap
+
+    source_cls = converter_module.GroupedExperts if source_kind == "grouped" else converter_module.AscGroupedExperts
+    source = source_cls.Config(dim=2, hidden_dim=4, num_experts=2, swiglu_limit=1.5)
+    quant_config = _mxfp8_param_swap()
+    converter = converter_module.NpuQuantizeConverter.Config(base_config=quant_config, require_match=False).build()
+
+    converted = converter.convert(source)
+
+    assert isinstance(converted, converter_module.NpuQuantizedAscGroupedExpertsModule.Config)
+    assert (converted.dim, converted.hidden_dim, converted.num_experts, converted.swiglu_limit) == (2, 4, 2, 1.5)
+    assert converter.convert(converted) is converted
+    swiglu_module = importlib.import_module("torchtitan_npu.override.common.swiglu_group")
+    assert swiglu_module.asc(converted) is converted
+    experts = converted.build()
+    assert len(quantization_calls) == 1
+    module, received_config, filter_fn = quantization_calls[0]
+    assert module is experts
+    assert received_config is quant_config
+    assert filter_fn(experts, "")
+    assert not filter_fn(torch.nn.Identity(), "child")
+
+
+def test_quantization_converter_preserves_custom_experts(converter_module, quantization_calls):
+    from interfaces.torchao_converter import _mxfp8_param_swap
+
+    class CustomExperts(converter_module.GroupedExperts):
+        @dataclass(kw_only=True, slots=True)
+        class Config(converter_module.GroupedExperts.Config):
+            output_scale: float = 3.0
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.output_scale = config.output_scale
+
+        def forward(self, x, num_tokens_per_expert, *, routed_scores_R=None):
+            return x * self.output_scale
+
+    source = CustomExperts.Config(dim=2, hidden_dim=4, num_experts=2, output_scale=5.0)
+    converter = converter_module.NpuQuantizeConverter.Config(
+        base_config=_mxfp8_param_swap(), require_match=False
+    ).build()
+
+    converted = converter.convert(source)
+
+    assert isinstance(converted, CustomExperts.Config)
+    assert converted.output_scale == 5.0
+    assert converter.convert(converted) is converted
+    experts = converted.build()
+    assert quantization_calls[0][0] is experts
+    torch.testing.assert_close(experts(torch.tensor([[1.0, 2.0]]), torch.tensor([1, 0])), torch.tensor([[5.0, 10.0]]))
+
+
+def test_quantization_converter_keeps_linear_forward(converter_module, quantization_calls):
+    from interfaces.torchao_converter import _mxfp8_param_swap
+
+    source = converter_module.Linear.Config(in_features=2, out_features=2, bias=False)
+    quant_config = _mxfp8_param_swap()
+    converter = converter_module.NpuQuantizeConverter.Config(base_config=quant_config, require_match=False).build()
+
+    converted = converter.convert(source)
+    assert converter.convert(converted) is converted
+    linear = converted.build()
+
+    assert isinstance(linear, converter_module.Linear)
+    assert not isinstance(linear, converter_module.NpuQuantizedAscGroupedExpertsModule)
+    assert quantization_calls[0][0] is linear
+    assert quantization_calls[0][1] is quant_config
+    with torch.no_grad():
+        linear.weight.copy_(torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+    torch.testing.assert_close(linear(torch.tensor([[2.0, 3.0]])), torch.tensor([[8.0, 18.0]]))
+
+
+def test_quantization_converter_preserves_li_metadata_replacement(converter_module, quantization_calls):
+    from interfaces.torchao_converter import _QuantizedLightningIndexerMetadataAdapter
+
+    source = converter_module.LightningIndexerMetadata.Config(index_n_heads=64, index_head_dim=128, index_topk=512)
+    replacement_type = _QuantizedLightningIndexerMetadataAdapter.Config
+    converter = converter_module.NpuQuantizeConverter.Config(
+        replacement_config_type=replacement_type,
+        replacement_kwargs={"quant_mode": 3},
+    ).build()
+
+    converted = converter.convert(source)
+
+    assert isinstance(converted, replacement_type)
+    assert converted.quant_mode == 3
+    assert converted.index_n_heads == 64
+    assert converted.index_head_dim == 128
+    assert converted.index_topk == 512
+    assert converted.li_kernel_config == source.li_kernel_config
+    assert not quantization_calls
+
+
+def test_parameter_quantization_skips_li_metadata(converter_module, quantization_calls):
+    from interfaces.torchao_converter import _mxfp8_param_swap
+
+    source = converter_module.LightningIndexerMetadata.Config()
+    converter = converter_module.NpuQuantizeConverter.Config(
+        base_config=_mxfp8_param_swap(), require_match=False
+    ).build()
+
+    assert converter.convert(source) is source
+    assert not quantization_calls
+
+
+@pytest.mark.parametrize("quant_format", ["mx", "block_mx"])
+def test_quantized_experts_preserve_wrappers_through_forward(monkeypatch, converter_module, quant_format):
+    from interfaces.torchao_converter import _block_fp8_param_swap, _mxfp8_param_swap
+
+    wrapper_module = importlib.import_module(f"torchao_npu.wrapper_tensors.{quant_format}_wrapper_tensor")
+    if quant_format == "mx":
+        quant_config = _mxfp8_param_swap()
+        wrapper_cls = wrapper_module.MXTrainingWeightWrapperTensor
+    else:
+        quant_config = _block_fp8_param_swap()
+        wrapper_cls = wrapper_module.BlockMXTrainingWeightWrapperTensor
+    monkeypatch.setitem(sys.modules, "cann_ops_nn.ops", ModuleType("cann_ops_nn.ops"))
+    source = converter_module.GroupedExperts.Config(dim=32, hidden_dim=32, num_experts=2)
+    converter = converter_module.NpuQuantizeConverter.Config(base_config=quant_config).build()
+
+    # Keep real quantize_, parameter wrappers, casts and torch._grouped_mm
+    # dispatch. Replace only the NPU grouped-matmul and SwiGLU boundaries.
+    with torch.random.fork_rng(devices=[]):
+        experts = converter.convert(source).build()
+    for weight in (experts.w1_EFD, experts.w3_EFD, experts.w2_EDF):
+        assert isinstance(weight, wrapper_cls)
+        assert isinstance(weight.bfloat16().transpose(-2, -1), wrapper_cls)
+
+    matmul_calls = []
+
+    def quantized_grouped_mm(x, weight, offsets, activation_config, weight_config):
+        matmul_calls.append((offsets, activation_config, weight_config))
+        return torch.cat((x[:1] @ weight[0], x[1:] @ weight[1]))
+
+    monkeypatch.setattr(wrapper_module, f"to_{quant_format}_then_grouped_mm", quantized_grouped_mm)
+    swiglu_calls = []
+
+    def swiglu(x, *, weight, group_index, clamp_limit):
+        swiglu_calls.append((x, weight, group_index, clamp_limit))
+        # This fixed boundary contract isolates dispatch from CANN numerics.
+        return (x[..., :32].float() * weight.reshape(-1, 1)).to(x.dtype)
+
+    monkeypatch.setattr(torch.ops, "cann_ops_nn", SimpleNamespace(swiglu_group=SimpleNamespace(default=swiglu)))
+    ascendc = importlib.import_module("torchtitan_npu.override.common.swiglu_group.ascendc")
+    monkeypatch.setattr(ascendc, "get_spmd_backend", lambda: "torch")
+    with torch.no_grad():
+        identity = torch.eye(32)
+        experts.w1_EFD.copy_(torch.stack((identity, identity * 2)))
+        experts.w3_EFD.copy_(torch.stack((identity * 0.5, identity * 1.5)))
+        experts.w2_EDF.copy_(torch.stack((identity * 3, identity * 4)))
+    scores = torch.tensor([0.25, 0.5, 0.75])
+
+    output = experts(torch.full((3, 32), 0.25), torch.tensor([1, 2]), routed_scores_R=scores)
+
+    torch.testing.assert_close(output, torch.tensor([[0.1875], [1.0], [1.5]]).expand(3, 32))
+    assert len(matmul_calls) == 3
+    for offsets, activation_config, weight_config in matmul_calls:
+        torch.testing.assert_close(offsets, torch.tensor([1, 3], dtype=torch.int32))
+        assert activation_config is quant_config.activation_config
+        assert weight_config is quant_config.weight_config
+    assert len(swiglu_calls) == 1
+    packed, weight, group_index, clamp_limit = swiglu_calls[0]
+    torch.testing.assert_close(packed[:, :32], torch.tensor([[0.25], [0.5], [0.5]], dtype=torch.bfloat16).expand(3, 32))
+    torch.testing.assert_close(
+        packed[:, 32:], torch.tensor([[0.125], [0.375], [0.375]], dtype=torch.bfloat16).expand(3, 32)
+    )
+    torch.testing.assert_close(weight, scores)
+    assert group_index is None
+    assert clamp_limit == -1.0

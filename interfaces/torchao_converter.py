@@ -46,6 +46,7 @@ from torchtitan_npu.models.common.metadata_extension import (
     LightningIndexerMetadata,
 )
 from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
+from torchtitan_npu.override.common.swiglu_group.ascendc import AscGroupedExperts, _ensure_cann_ops_loaded
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 if TYPE_CHECKING:
@@ -115,10 +116,9 @@ _DEFAULT_TARGET_CONFIG_TYPES = (
 def _get_npu_quantized_module_cls(parent_cls: type[Module]) -> type[Module]:
     """Create a parameter-quantized subclass while preserving host behavior.
 
-    Both Linear and GroupedExperts can have model-specific subclasses.  The
-    generated class inherits the concrete config owner instead of replacing it
-    with a fixed implementation, so custom forward methods and config fields
-    (for example DeepSeek-V4's SwiGLU clamp) remain intact.
+    The generated class inherits the concrete config owner so custom forward
+    methods and config fields remain intact. Standard GroupedExperts and
+    AscGroupedExperts use the dedicated subclass selected by NpuQuantizeConverter.
     """
 
     if parent_cls in _npu_quantized_module_cache:
@@ -147,6 +147,25 @@ def _get_npu_quantized_module_cls(parent_cls: type[Module]) -> type[Module]:
     NpuQuantizedModule.__qualname__ = f"NpuQuantized{parent_cls.__name__}"
     _npu_quantized_module_cache[parent_cls] = NpuQuantizedModule
     return NpuQuantizedModule
+
+
+class NpuQuantizedAscGroupedExpertsModule(AscGroupedExperts):
+    """Parameter-quantized routed experts with the AscGroupedExperts forward."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AscGroupedExperts.Config):
+        _torchao_npu_config: Annotated[AOBaseConfig | None, tyro.conf.Suppress] = None
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        if config._torchao_npu_config is None:
+            raise ValueError(f"{type(self).__name__}.Config requires _torchao_npu_config")
+        _ensure_cann_ops_loaded()
+        quantize_(
+            self,
+            config._torchao_npu_config,
+            filter_fn=lambda candidate, _fqn: candidate is self,
+        )
 
 
 class NpuQuantizeConverter(QuantizationConverter):
@@ -198,10 +217,17 @@ class NpuQuantizeConverter(QuantizationConverter):
                 parent_cls = cast("type[Module] | None", type(config)._owner)
                 if parent_cls is None:
                     raise TypeError(f"Config at {fqn!r} has no owning module class")
-                if parent_cls in _npu_quantized_module_cache.values():
+                if (
+                    isinstance(config, NpuQuantizedAscGroupedExpertsModule.Config)
+                    or parent_cls in _npu_quantized_module_cache.values()
+                ):
                     continue
 
-                quantized_cls = _get_npu_quantized_module_cls(parent_cls)
+                # Preserve model-specific expert subclasses and their config fields.
+                if type(config) in (GroupedExperts.Config, AscGroupedExperts.Config):
+                    quantized_cls = NpuQuantizedAscGroupedExpertsModule
+                else:
+                    quantized_cls = _get_npu_quantized_module_cls(parent_cls)
                 replacement = derive(
                     config,
                     quantized_cls.Config,
@@ -552,6 +578,7 @@ def apply_quantization_converter(
 __all__ = [
     "ConfigFilterFn",
     "NpuQuantizeConverter",
+    "NpuQuantizedAscGroupedExpertsModule",
     "any_config_filter",
     "apply_quantization_converter",
     "match_config_fqn_suffix",

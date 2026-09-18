@@ -54,28 +54,35 @@ def test_mxfp4_dequantize_rejects_partial_blocks():
 
 
 @pytest.mark.parametrize(
-    "tensor, axis",
-    [
-        # 1. Dense (is_contiguous() True) -> if branch, no transpose.
-        (torch.randn(256, 128, device="npu", dtype=torch.bfloat16), -1),
-        # 2. Quant axis strided (stride(axis) != 1): a transposed 2D tensor.
-        (torch.randn(128, 256, device="npu", dtype=torch.bfloat16).transpose(0, 1), 1),
-        # 3. Pure perm view with innermost-contiguous quant axis (like wo_a).
-        (torch.randn(4, 128, 256, device="npu", dtype=torch.bfloat16).transpose(1, 2), 1),
-        # 4. Non-pure strided view, stride(axis) == 1 but permute stays non-dense.
-        (torch.as_strided(torch.randn(4, 4, device="npu", dtype=torch.bfloat16), (2, 4), (2, 1)), 1),
-    ],
-    ids=["dense", "strided_axis", "perm_view", "non_pure"],
+    "layout",
+    ["dense", "strided_axis", "perm_view", "non_pure", "cat_gate", "cat_up", "single_row"],
 )
 @pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
-def test_mx_quantize_matches_raw_op_for_all_layouts(tensor, axis, elem_dtype):
-    """mx_quantize matches npu_dynamic_mx_quant on all four input layouts.
+def test_mx_quantize_matches_raw_op_for_all_layouts(layout, elem_dtype):
+    """Compare wrapper values/scales with the raw NPU op, including cat gradients.
 
     These are value-equivalence checks: they verify correctness, not that a real
-    transpose was avoided (that would require profiling). The point is each of
-    the four branch inputs must produce identical y/scale to the raw op.
+    transpose was avoided (that would require profiling). Each tested input
+    layout must produce identical y/scale to the raw op.
     """
     from torchao_npu.quantization.quant_primitives.mx import mx_quantize
+
+    # Allocate within the test so RNG/device state is managed by the fixture.
+    axis = -1
+    if layout == "dense":
+        tensor = torch.randn(256, 128, device="npu", dtype=torch.bfloat16)
+    elif layout == "strided_axis":
+        tensor = torch.randn(128, 256, device="npu", dtype=torch.bfloat16).T
+    elif layout == "perm_view":
+        tensor = torch.randn(4, 128, 256, device="npu", dtype=torch.bfloat16).transpose(1, 2)
+        axis = 1
+    elif layout == "non_pure":
+        tensor = torch.randn(4, 256, 129, device="npu", dtype=torch.bfloat16)[..., :128]
+    else:
+        rows = 1 if layout == "single_row" else 3
+        packed = torch.randn(rows, 256, device="npu", dtype=torch.bfloat16)
+        tensor = packed[:, 128:] if layout == "cat_up" else packed[:, :128]
+        assert tensor.stride() == (256, 1)
 
     def as_uint8(t):
         # FP8 tensors can't be compared element-wise with torch.equal on NPU;

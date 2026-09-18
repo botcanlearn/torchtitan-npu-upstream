@@ -34,10 +34,10 @@ def mx_quantize(
     stride handling, so it can only consume a dense layout.
 
     How a real transpose can be avoided: if the quant axis is the innermost-contiguous
-    dimension (``stride(axis) == 1``) and ``tensor`` is not already dense, it is
-    a pure permutation view. We then reorder dims so the quant axis lands at -1
-    (a view, no copy), quantize along -1 (now dense, so no transpose fires), and
-    permute both outputs back to the original layout.
+    dimension (``stride(axis) == 1``), reorder dims so the quant axis lands at -1
+    (a view, no copy), quantize along -1, and permute both outputs back to the
+    original layout. For a pure permutation view this restores dense storage;
+    a sliced tensor with gaps may still require a copy inside the NPU operator.
 
     When a real transpose is inevitable, no view can make the tensor dense and
     the raw op performs a real copy internally. (We still permute the outputs
@@ -47,8 +47,9 @@ def mx_quantize(
     - the tensor is not a pure permutation view, so the permuted tensor stays
       non-dense.
 
-    A dense input is nevertheless quantized as-is: ``npu_dynamic_mx_quant``
-    only inserts the transposing copy for a non-dense tensor.
+    Dense inputs with unit quant-axis stride take the same permutation path.
+    Avoid checking whole-tensor contiguity here: a sliced gradient with an
+    unbacked symbolic row count can require a data-dependent guard for that check.
 
     Warning:
         The transpose-avoiding optimization assumes every dim has a positive
@@ -61,20 +62,15 @@ def mx_quantize(
         config: MX quantization parameters.
 
     Returns:
-        ``(y, scale)``; ``y`` has the same shape/dtype as ``tensor`` and
-        ``scale`` the same shape ``npu_dynamic_mx_quant`` would produce.
+        ``(y, scale)``; ``y`` uses ``config.elem_dtype`` (packed for FP4), and
+        ``scale`` has the canonical shape produced by ``npu_dynamic_mx_quant``.
     """
 
     axis = normalize_dim(axis, tensor.ndim)
 
-    # Call the raw op directly
-    # 1) tensor.stride(axis) != 1:
-    #       a quant axis that isn't innermost-contiguous, a real transpose in inevitable.
-    # 2) tensor.stride(axis) == 1 and tensor.is_contiguous():
-    #       dense input, ``npu_dynamic_mx_quant`` does not insert a ``Contiguous/Transpose`` copy.
-    #
-    # The two conditions combined are simplied as below.
-    if tensor.stride(axis) != 1 or tensor.is_contiguous():
+    # A strided quant axis goes directly to the raw op. Do not query global
+    # contiguity: AOTAutograd may supply a sliced gradient with unbacked sizes.
+    if tensor.stride(axis) != 1:
         y, scale = torch_npu.npu_dynamic_mx_quant(
             tensor,
             axis=axis,
@@ -87,7 +83,7 @@ def mx_quantize(
         return y.view(config.elem_dtype), scale
 
     else:
-        # Non-dense, innermost-contiguous quant axis: permute it to -1.
+        # Unit-stride quant axis (dense or non-dense input): permute it to -1.
         # ``stride(axis) == 1`` here, so ordering the other dims by descending
         # stride and appending ``axis`` reproduces the dense layout (a pure view)
         # whenever the tensor is a pure permutation view. Appending ``axis``

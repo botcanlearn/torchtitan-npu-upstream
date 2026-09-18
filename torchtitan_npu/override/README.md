@@ -73,7 +73,10 @@ torchtitan_npu/override/
 │   ├── optimizer.py
 │   ├── rms_norm.py
 │   ├── rope.py
-│   └── token_dispatcher.py
+│   ├── token_dispatcher.py
+│   └── swiglu_group/
+│       ├── __init__.py
+│       └── ascendc.py
 ├── checkpoint/
 │   ├── __init__.py
 │   ├── checkpoint.py
@@ -247,6 +250,8 @@ Optimizer writer 的同步、本地 native DCP 限制。异步保存只有在 DC
 | `rope.asc_partial` | `SplitComplexRoPEConfig`（精确匹配） | `AscPartialComplexRoPE.Config` | 整宽（prefix + rotary）partial-RoPE 站点的 query/key 各收敛为一次 `cann_ops_transformer` 融合原地旋转；CANN 依赖在首次调用时惰性加载 |
 | `token_dispatcher.asc` | `AllToAllTokenDispatcher.Config` | `AscAllToAllTokenDispatcher.Config` | 使用 `torch_npu.npu_moe_token_permute` `npu_moe_token_unpermute` 融合 MoE dispatch/combine |
 | `token_dispatcher.asc_deepep` | `DeepEPTokenDispatcher.Config` | `AscDeepEPTokenDispatcher.Config` | 使用 `cann_ops_transformer.ElasticBuffer` 实现训练路径的 MoE DeepEP dispatch/combine；当前要求 `expert_parallel_degree > 1` |
+| `swiglu_group.asc` | `GroupedExperts.Config` | `AscGroupedExperts.Config` | 使用 `cann_ops_nn.swiglu_group` 完成路由专家的 SwiGLU 激活及可选路由分数乘法 |
+| `swiglu_group.asc_shared_experts` | `FeedForward.Config` | `AscFeedForward.Config` | 使用 `cann_ops_nn.swiglu_group` 完成共享专家的 SwiGLU 激活 |
 
 `rope.workaround` 与 `rope.asc_complex` 会声明同一 target，不能同时启用。
 `rope.asc_partial` 精确匹配 split-aware 的 `SplitComplexRoPEConfig`，与其他 rope
@@ -255,6 +260,30 @@ Optimizer writer 的同步、本地 native DCP 限制。异步保存只有在 DC
 `AscComplexRoPE` 和 `AscCosSinRoPE` 当前都要求同一 batch 内各行的位置布局一致，
 并使用第一行位置构造 batch 共享的 cosine/sine 表。
 
+
+### Common SwiGLU
+
+入口前缀为 `torchtitan_npu.override.common.swiglu_group.`，适用于采用公共专家配置和下述 FQN 布局的模型。
+
+`swiglu_group.asc` 和 `swiglu_group.asc_shared_experts` 分别直接匹配
+`routed_experts.inner_experts` 与 `shared_experts`，不会声明整个 `MoE.Config` 已被替换，
+因此可以和 MoE 中其他子模块的 override 并存。两者只替换 FFN 中间的 gate/up + SwiGLU
+激活桥接，路由选择、token dispatch 以及前后分组矩阵乘仍复用现有路径；路由分数作为
+`weight` 传给 `SwigluGroup`，由融合算子完成激活阶段的 score absorption。CANN 实现位于
+`common/swiglu_group/ascendc.py`。
+
+在 `TrainerEx` 中，低精配置转换先于 override 执行：选中的标准 `GroupedExperts.Config` 或
+`AscGroupedExperts.Config` 会转换为 `NpuQuantizedAscGroupedExpertsModule.Config`，复用融合前向，
+无需额外启用 `swiglu_group.asc`；显式启用时保留已有量化配置。
+其他专家子类保留原有实现；共享专家使用融合激活仍需启用 `swiglu_group.asc_shared_experts`。
+
+启用两个 expert override：
+
+```bash
+--override.imports \
+  torchtitan_npu.override.common.swiglu_group.asc \
+  torchtitan_npu.override.common.swiglu_group.asc_shared_experts
+```
 
 ### Virtual Optimizer 与 checkpoint
 
@@ -296,12 +325,12 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 
 以下入口省略 `torchtitan_npu.override.deepseek_v4.` 前缀：
 
-| 入口 | Target | Replacement |
-| --- | --- | --- |
-| `sparse_attn.asc_metadata` | `MetadataExtension.Config` | `AscMetadataExtension.Config` |
-| `sparse_attn.asc` | `CompressedSparseInnerAttention.Config` | `AscCompressedSparseInnerAttention.Config` |
-| `sparse_attn.pypto` (replaces `sparse_attn.asc`) | `CompressedSparseInnerAttention.Config` | `PyPTOCompressedSparseInnerAttention.Config` |
-| `sparse_attn.golden` | `CompressedSparseInnerAttention.Config` | `GoldenCompressedSparseInnerAttention.Config` |
+| 入口 | Target | Replacement | 说明 |
+| --- | --- | --- | --- |
+| `sparse_attn.asc_metadata` | `MetadataExtension.Config` | `AscMetadataExtension.Config` | — |
+| `sparse_attn.asc` | `CompressedSparseInnerAttention.Config` | `AscCompressedSparseInnerAttention.Config` | — |
+| `sparse_attn.pypto` (replaces `sparse_attn.asc`) | `CompressedSparseInnerAttention.Config` | `PyPTOCompressedSparseInnerAttention.Config` | — |
+| `sparse_attn.golden` | `CompressedSparseInnerAttention.Config` | `GoldenCompressedSparseInnerAttention.Config` | — |
 | `mhc.asc_hc_pre` | `HcPre.Config` | `AscHcPre.Config` | 使用 `torch_npu.npu_mhc_pre` + `torch_npu.npu_mhc_sinkhorn` |
 | `mhc.tilelang_hc_pre` | `HcPre.Config` | `TilelangHcPre.Config` | 使用外部 TileKernels Split/Apply 与 `torch_npu.npu_mhc_sinkhorn` |
 | `mhc.asc_hc_post` | `HcPost.Config` | `AscHcPost.Config` | 使用 `cann_ops_transformer.ops.mhc_post` |
@@ -317,6 +346,7 @@ torchtitan_npu.override.deepseek_v3_2.sparse_attn.asc
 `sparse_attn.asc_metadata` 无需参数。`sparse_attn.asc` 还支持可选的 `indexer_loss_coeff`，默认值为 `1.0`。
 MHC 的 `asc_hc_pre` / `asc_hc_post` 与 `triton_hc_pre` / `triton_hc_post` / `triton_hc_head` / `tilelang_hc_head` 是可选入口（`deepseek_v4/__init__.py`
 默认只导入 `sparse_attn`），需要时显式加入 `override.imports`。`triton_hc_head` 与 `tilelang_hc_head` 声明同一 `HcHead.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` / `asc_hc_post` 共存。
+
 `tilelang_hc_post` 与 `asc_hc_post` 声明同一 `HcPost.Config` 节点，两者互斥，只能启用其一；二者均可与 `asc_hc_pre` 共存。
 `tilelang_hc_pre` 与 `asc_hc_pre`、`triton_hc_pre` 作用于同一 `HcPre.Config` 节点，只能选择一个；它可以与作用于 `HcPost.Config` 的 `asc_hc_post` 同时启用。
 
@@ -337,6 +367,8 @@ torchtitan_npu.override.common.rms_norm.asc
 torchtitan_npu.override.common.rope.asc_complex
 torchtitan_npu.override.deepseek_v4.sparse_attn.asc_metadata
 torchtitan_npu.override.deepseek_v4.sparse_attn.asc
+torchtitan_npu.override.common.swiglu_group.asc
+torchtitan_npu.override.common.swiglu_group.asc_shared_experts
 ```
 
 `USE_GOLDEN=1` 启用以下数值参考组合：
