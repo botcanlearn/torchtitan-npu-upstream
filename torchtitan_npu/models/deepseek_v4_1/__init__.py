@@ -510,6 +510,7 @@ def _make_v41_config(
     candidate_source_layer: int,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    num_experts: int = 16,
     indexer_loss_coeff: float | None = 0.01,
     widths: _V41Widths = _FLASH_WIDTHS,
 ) -> V41Model.Config:
@@ -617,7 +618,7 @@ def _make_v41_config(
             layer_id=layer_id,
             dim=widths.dim,
             moe_inter_dim=widths.moe_inter_dim,
-            num_experts=16,
+            num_experts=num_experts,
             num_shared_experts=1,
             top_k=6,
             route_scale=1.5,
