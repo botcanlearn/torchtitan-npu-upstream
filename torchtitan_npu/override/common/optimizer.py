@@ -6,6 +6,7 @@
 
 """Overrides for NPU swap-backed optimizer states and their checkpoints."""
 
+from collections import deque
 from dataclasses import dataclass
 from types import MethodType
 from typing import Any
@@ -13,7 +14,7 @@ from typing import Any
 import torch
 import torch_npu
 from torch.distributed._tensor import DTensor
-from torch.optim.optimizer import Optimizer, _use_grad_for_differentiable
+from torch.optim.optimizer import Optimizer, _get_scalar_dtype, _use_grad_for_differentiable
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import derive, override
 from torchtitan.distributed.flex_shard.dist_muon import DistMuon
@@ -21,6 +22,7 @@ from torchtitan.distributed.flex_shard.dist_muon import DistMuon
 from torchtitan_npu.extensions.novaswap import swap_api
 
 _ADAMW_SWAP_BUCKET_TIMES = 16
+_ADAMW_SWAP_RESIDENT_TARGET_BUCKETS = 3
 
 
 def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -44,62 +46,107 @@ def make_swap_state_name(*parts: object) -> str:
     return ".".join(map(str, parts))
 
 
-@dataclass(frozen=True)
+@dataclass
 class _AdamWSwapBucket:
     group: dict[str, Any]
     parameters: tuple[torch.Tensor, ...]
-    state_name: str | None
+    state_name: str
+    state_numel: int
+    state_nbytes: int
+    flat: torch.Tensor | None = None
 
 
 class _NovaSwapAdamW:
     """Run stock AdamW state through NovaSwap with a bucket-level pipeline."""
 
-    _state_keys = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
-
     def __init__(self, optimizer: torch.optim.AdamW) -> None:
         self.optimizer = optimizer
         self._original_step = optimizer.step
-        self._buckets: tuple[_AdamWSwapBucket, ...] = ()
+        self._buckets: list[_AdamWSwapBucket] = []
+        self._target_bucket_bytes = 1
+        self._largest_bucket_bytes = 1
 
     @staticmethod
     def _submit(bucket: _AdamWSwapBucket, action: str) -> None:
-        if bucket.state_name is not None:
-            swap_api.execute(bucket.state_name, action)
+        swap_api.execute(bucket.state_name, action)
 
     def step(self, closure=None):
-        if not self._buckets:
-            loss = self._original_step(closure)
-            self._buckets = self._build_buckets()
-            for bucket in self._buckets:
-                self._submit(bucket, "D2H")
-            return loss
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
-        self._submit(self._buckets[0], "H2D")
-        for bucket_index, bucket in enumerate(self._buckets):
-            self._submit(bucket, "WAIT_DEVICE")
-            if bucket_index + 1 < len(self._buckets):
-                self._submit(self._buckets[bucket_index + 1], "H2D")
+        new_buckets = self._plan_uninitialized_buckets()
+        device_budget = _ADAMW_SWAP_RESIDENT_TARGET_BUCKETS * max(
+            self._target_bucket_bytes,
+            self._largest_bucket_bytes,
+        )
+        pending_releases: deque[_AdamWSwapBucket] = deque()
+        resident_bytes = 0
+
+        def reserve(bucket: _AdamWSwapBucket) -> None:
+            nonlocal resident_bytes
+            while pending_releases and resident_bytes + bucket.state_nbytes > device_budget:
+                oldest = pending_releases.popleft()
+                swap_api.wait_for_device_release(oldest.state_name)
+                resident_bytes -= oldest.state_nbytes
+            if resident_bytes + bucket.state_nbytes > device_budget:
+                raise RuntimeError("AdamW swap resident-state accounting exceeded the device budget")
+            resident_bytes += bucket.state_nbytes
+
+        def submit_h2d(bucket: _AdamWSwapBucket) -> None:
+            reserve(bucket)
+            swap_api.wait_for_device_release(bucket.state_name)
+            self._submit(bucket, "H2D")
+
+        for bucket in new_buckets:
+            reserve(bucket)
+            self._initialize_bucket_state(bucket)
             self._update_bucket(bucket)
             self._submit(bucket, "D2H")
+            pending_releases.append(bucket)
+        self._buckets.extend(new_buckets)
+
+        new_bucket_ids = {id(bucket) for bucket in new_buckets}
+        active_buckets = [
+            bucket
+            for bucket in self._buckets
+            if id(bucket) not in new_bucket_ids and any(parameter.grad is not None for parameter in bucket.parameters)
+        ]
+        if not active_buckets:
+            return loss
+
+        submit_h2d(active_buckets[0])
+        for bucket_index, bucket in enumerate(active_buckets):
+            self._submit(bucket, "WAIT_DEVICE")
+            if bucket_index + 1 < len(active_buckets):
+                submit_h2d(active_buckets[bucket_index + 1])
+            self._update_bucket(bucket)
+            self._submit(bucket, "D2H")
+            pending_releases.append(bucket)
         return loss
 
-    def _build_buckets(self) -> tuple[_AdamWSwapBucket, ...]:
-        parameters: list[torch.Tensor] = []
-        for group in self.optimizer.param_groups:
-            for parameter in group["params"]:
-                if "exp_avg" in self.optimizer.state[parameter]:
-                    parameters.append(parameter)
-        total_numel = sum(_local_tensor(parameter).numel() for parameter in parameters)
-        bucket_numel_limit = max(total_numel // _ADAMW_SWAP_BUCKET_TIMES, 1)
+    def _plan_uninitialized_buckets(self) -> list[_AdamWSwapBucket]:
+        """Plan only states that PyTorch AdamW would lazily create this step."""
+        uninitialized = [
+            (group, parameter)
+            for group in self.optimizer.param_groups
+            for parameter in group["params"]
+            if parameter.grad is not None and not self.optimizer.state[parameter]
+        ]
+        if not uninitialized:
+            return []
+
+        total_state_bytes = sum(
+            self._state_numel(group, parameter) * _local_tensor(parameter).element_size()
+            for group, parameter in uninitialized
+        )
+        bucket_byte_limit = max(total_state_bytes // _ADAMW_SWAP_BUCKET_TIMES, 1)
+        self._target_bucket_bytes = max(self._target_bucket_bytes, bucket_byte_limit)
         buckets: list[_AdamWSwapBucket] = []
         current_group: dict[str, Any] | None = None
         current_parameters: list[torch.Tensor] = []
-        current_numel = 0
+        current_state_bytes = 0
         current_signature: tuple[torch.device, torch.dtype] | None = None
 
         def append_bucket() -> None:
@@ -107,79 +154,109 @@ class _NovaSwapAdamW:
                 return
             if current_group is None:
                 raise RuntimeError("AdamW swap bucket has no parameter group")
-            moments: list[tuple[dict[str, Any], str, torch.Tensor, torch.Tensor]] = []
-            for parameter in current_parameters:
-                state = self.optimizer.state[parameter]
-                for state_key in self._state_keys:
-                    moment = state.get(state_key)
-                    if moment is None:
-                        continue
-                    local_moment = _local_tensor(moment)
-                    if local_moment.numel() == 0:
-                        continue
-                    moments.append((state, state_key, moment, local_moment))
-
-            state_name = None
-            if moments:
-                device, dtype = moments[0][3].device, moments[0][3].dtype
-                if not all(
-                    local_moment.device == device and local_moment.dtype == dtype for _, _, _, local_moment in moments
-                ):
-                    raise RuntimeError("AdamW swap bucket states must share a device and dtype")
-                flat = torch.empty(
-                    sum(local_moment.numel() for _, _, _, local_moment in moments),
-                    dtype=dtype,
-                    device=device,
-                )
-                offset = 0
-                for state, state_key, moment, local_moment in moments:
-                    flat_view = flat.narrow(0, offset, local_moment.numel()).view_as(local_moment)
-                    flat_view.copy_(local_moment)
-                    state[state_key] = _replace_local_tensor(moment, flat_view)
-                    offset += local_moment.numel()
-                state_name = make_swap_state_name("adamw", id(self.optimizer), "bucket", len(buckets))
-                swap_api.register_tensor(flat, state_name)
+            state_numel = sum(self._state_numel(current_group, parameter) for parameter in current_parameters)
+            state_nbytes = state_numel * _local_tensor(current_parameters[0]).element_size()
+            self._largest_bucket_bytes = max(self._largest_bucket_bytes, state_nbytes)
             buckets.append(
                 _AdamWSwapBucket(
                     group=current_group,
                     parameters=tuple(current_parameters),
-                    state_name=state_name,
+                    state_name=make_swap_state_name(
+                        "adamw", id(self.optimizer), "bucket", len(self._buckets) + len(buckets)
+                    ),
+                    state_numel=state_numel,
+                    state_nbytes=state_nbytes,
                 )
             )
 
-        for group in self.optimizer.param_groups:
-            for parameter in group["params"]:
-                if "exp_avg" not in self.optimizer.state[parameter]:
-                    continue
-                parameter_numel = _local_tensor(parameter).numel()
-                local_exp_avg = _local_tensor(self.optimizer.state[parameter]["exp_avg"])
-                parameter_signature = (local_exp_avg.device, local_exp_avg.dtype)
-                if current_parameters:
-                    same_group = group is current_group
-                    fits_bucket = current_numel + parameter_numel <= bucket_numel_limit
-                    same_signature = parameter_signature == current_signature
-                    if not (same_group and fits_bucket and same_signature):
-                        append_bucket()
-                        current_parameters = []
-                        current_numel = 0
-                current_group = group
-                current_signature = parameter_signature
-                current_parameters.append(parameter)
-                current_numel += parameter_numel
+        for group, parameter in uninitialized:
+            local_parameter = _local_tensor(parameter)
+            parameter_signature = (local_parameter.device, local_parameter.dtype)
+            parameter_state_bytes = self._state_numel(group, parameter) * local_parameter.element_size()
+            if current_parameters:
+                same_group = group is current_group
+                fits_bucket = current_state_bytes + parameter_state_bytes <= bucket_byte_limit
+                same_signature = parameter_signature == current_signature
+                if not (same_group and fits_bucket and same_signature):
+                    append_bucket()
+                    current_parameters = []
+                    current_state_bytes = 0
+            current_group = group
+            current_signature = parameter_signature
+            current_parameters.append(parameter)
+            current_state_bytes += parameter_state_bytes
         append_bucket()
-        return tuple(buckets)
+        return buckets
+
+    @staticmethod
+    def _state_keys(group: dict[str, Any]) -> tuple[str, ...]:
+        if group["amsgrad"]:
+            return "exp_avg", "exp_avg_sq", "max_exp_avg_sq"
+        return "exp_avg", "exp_avg_sq"
+
+    def _state_numel(self, group: dict[str, Any], parameter: torch.Tensor) -> int:
+        return len(self._state_keys(group)) * _local_tensor(parameter).numel()
+
+    @staticmethod
+    def _initialize_step(group: dict[str, Any], device: torch.device) -> torch.Tensor:
+        if group["differentiable"]:
+            raise ValueError("AdamW NovaSwap only supports differentiable=False")
+        if group["foreach"]:
+            raise ValueError("AdamW NovaSwap only supports foreach=False")
+        # Match AdamW._init_group: fused/capturable paths keep step on-device;
+        # otherwise the scalar remains on CPU. Only the moment allocation is
+        # replaced by the bucket flat storage above.
+        if group["capturable"] or group["fused"]:
+            return torch.zeros(
+                (),
+                dtype=_get_scalar_dtype(is_fused=group["fused"]),
+                device=device,
+            )
+        return torch.tensor(0.0, dtype=_get_scalar_dtype(), device="cpu")
+
+    def _initialize_bucket_state(self, bucket: _AdamWSwapBucket) -> None:
+        """Install flat NPU state views before the first stock AdamW update."""
+        if bucket.flat is not None:
+            raise RuntimeError(f"AdamW swap bucket {bucket.state_name!r} is already initialized")
+        first_local = _local_tensor(bucket.parameters[0])
+        flat = torch.zeros(bucket.state_numel, dtype=first_local.dtype, device=first_local.device)
+        offset = 0
+        state_keys = self._state_keys(bucket.group)
+        for parameter in bucket.parameters:
+            state = self.optimizer.state[parameter]
+            if state:
+                raise RuntimeError("AdamW swap attempted to initialize an existing optimizer state")
+            local_parameter = _local_tensor(parameter)
+            if (local_parameter.device, local_parameter.dtype) != (first_local.device, first_local.dtype):
+                raise RuntimeError("AdamW swap bucket parameters must share a device and dtype")
+            state["step"] = self._initialize_step(bucket.group, first_local.device)
+            for state_key in state_keys:
+                view = flat.narrow(0, offset, local_parameter.numel()).view_as(local_parameter)
+                state[state_key] = _replace_local_tensor(parameter, view)
+                offset += local_parameter.numel()
+        if offset != bucket.state_numel:
+            raise RuntimeError("AdamW swap bucket state size does not match its planned layout")
+        bucket.flat = flat
+        swap_api.register_tensor(flat, bucket.state_name)
 
     def _update_bucket(self, bucket: _AdamWSwapBucket) -> None:
         original_param_groups = self.optimizer.param_groups
+        pre_hooks = self.optimizer._optimizer_step_pre_hooks
+        post_hooks = self.optimizer._optimizer_step_post_hooks
+        saved_pre_hooks = pre_hooks.copy()
+        saved_post_hooks = post_hooks.copy()
         self.optimizer.param_groups = [{**bucket.group, "params": bucket.parameters}]
+        # The public, instance-level wrapper retains PyTorch's step hooks once
+        # per logical optimizer step. Calling the saved stock step per bucket
+        # must not replay those external hooks for every bucket.
+        pre_hooks.clear()
+        post_hooks.clear()
         try:
-            # The saved method is the unwrapped upstream AdamW.step.  Calling
-            # it with exactly one temporary param group preserves all current
-            # AdamW behavior while leaving this wrapper responsible only for
-            # bucket scheduling.
             self._original_step()
         finally:
             self.optimizer.param_groups = original_param_groups
+            pre_hooks.update(saved_pre_hooks)
+            post_hooks.update(saved_post_hooks)
 
 
 def _make_swap(t: torch.Tensor) -> torch.Tensor:
@@ -350,6 +427,8 @@ class OptimizerStateSwapContainer(OptimizersContainer):
 
     @staticmethod
     def _swap_adamw(optimizer: torch.optim.AdamW) -> None:
+        if any(state for state in optimizer.state.values()):
+            raise ValueError("AdamW NovaSwap must be installed before AdamW initializes optimizer state")
         swap = _NovaSwapAdamW(optimizer)
 
         @Optimizer.profile_hook_step

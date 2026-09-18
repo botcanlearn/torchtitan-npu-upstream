@@ -71,7 +71,7 @@ def test_config_manager_adapts_standard_component_configs_without_changing_value
     assert isinstance(config.training.extension, TrainingExtensionConfig)
     assert config.training.extension.allow_hf32 is True
     assert isinstance(config.optimizer, OptimizerConfig)
-    assert config.optimizer.name == "native"
+    assert config.optimizer.name == "AdamW"
     for config_field in fields(Trainer.Config):
         if config_field.name in ("optimizer", "profiler", "training", "checkpoint"):
             continue
@@ -291,6 +291,21 @@ def test_config_manager_materializes_muon_from_cli(monkeypatch, tmp_path):
     assert muon_group.optimizer_kwargs["foreach"] is False
     assert adamw_group.optimizer_name == "AdamW"
     assert adamw_group.optimizer_kwargs["foreach"] is False
+
+
+def test_config_manager_accepts_adamw_from_cli(monkeypatch, tmp_path):
+    module_name = "_torchtitan_npu_adamw_config_registry"
+
+    def test_config() -> TrainerEx.Config:
+        return TrainerEx.Config(hf_assets_path=str(tmp_path))
+
+    _install_config_registry(monkeypatch, module_name, test_config)
+
+    config = ConfigManager().parse_args(
+        ["--module", module_name, "--config", "test_config", "--optimizer.name", "AdamW"]
+    )
+
+    assert config.optimizer.name == "AdamW"
 
 
 def test_config_package_does_not_reexport_trainer_config():

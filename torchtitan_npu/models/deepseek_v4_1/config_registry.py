@@ -44,13 +44,13 @@ def _document_alignment(model_spec) -> int:
 
 
 def _v41_optimizer_config(model_spec, *, lr: float) -> OptimizerConfig:
-    """Build the native-default V4.1 optimizer schema.
+    """Build the AdamW-default V4.1 optimizer schema.
 
     V4.1 has no Muon profile (no MTP depths, no hc_head, no APE, no
-    indexer compressors); the native AdamW recipe is the resolved
+    indexer compressors); the recipe's AdamW configuration is the resolved
     contract of the frozen baseline.
     """
-    native = default_adamw(lr=lr, eps=1e-6)
+    adamw = default_adamw(lr=lr, eps=1e-6)
     return OptimizerConfig(
         lr=lr,
         beta1=0.9,
@@ -61,9 +61,9 @@ def _v41_optimizer_config(model_spec, *, lr: float) -> OptimizerConfig:
         muon_enable_nesterov=True,
         muon_ns_steps=10,
         muon_adjust_lr_fn="match_rms_adamw",
-        param_groups=native.param_groups,
-        implementation=native.implementation,
-        optimizer_factory_kwargs_by_name=native.optimizer_factory_kwargs_by_name,
+        param_groups=adamw.param_groups,
+        implementation=adamw.implementation,
+        optimizer_factory_kwargs_by_name=adamw.optimizer_factory_kwargs_by_name,
     )
 
 

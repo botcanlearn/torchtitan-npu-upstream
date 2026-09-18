@@ -33,9 +33,9 @@ class MuonOptimizerProfile:
 
 @dataclass(kw_only=True, slots=True)
 class OptimizerConfig(OptimizersContainer.Config):
-    """NPU optimizer CLI schema while preserving native optimizer configs."""
+    """NPU optimizer CLI schema while preserving recipe-provided AdamW configs."""
 
-    name: Literal["native", "Muon"] = "native"
+    name: Literal["AdamW", "Muon"] = "AdamW"
     lr: float = 1e-5
     beta1: float = 0.9
     beta2: float = 0.95
@@ -56,10 +56,10 @@ class OptimizerConfig(OptimizersContainer.Config):
     def materialize(self) -> None:
         """Turn an explicit Muon selection into upstream optimizer groups.
 
-        ``native`` is intentionally a strict no-op so converting every NPU
+        ``AdamW`` is intentionally a strict no-op so converting every NPU
         recipe to this schema cannot alter its existing optimizer behavior.
         """
-        if self.name == "native":
+        if self.name == "AdamW":
             return
         if self._muon_profile is None:
             raise ValueError("optimizer.name=Muon requires a recipe with a DSV4 Muon profile")

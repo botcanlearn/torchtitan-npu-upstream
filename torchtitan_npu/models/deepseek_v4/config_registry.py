@@ -204,13 +204,13 @@ def _dsv4_optimizer_config(
     *,
     lr: float,
 ) -> OptimizerConfig:
-    """Build a native-default DSV4 optimizer schema with a Muon profile.
+    """Build an AdamW-default DSV4 optimizer schema with a Muon profile.
 
-    ``name`` remains ``native`` until the user explicitly supplies
+    ``name`` remains ``AdamW`` until the user explicitly supplies
     ``--optimizer.name Muon``.  Keeping the profile on the ordinary recipe
     makes the CLI selection the sole Muon entry point.
     """
-    native = default_adamw(lr=lr, eps=1e-6)
+    adamw = default_adamw(lr=lr, eps=1e-6)
     return OptimizerConfig(
         lr=lr,
         beta1=0.9,
@@ -222,9 +222,9 @@ def _dsv4_optimizer_config(
         muon_ns_steps=10,
         muon_adjust_lr_fn="match_rms_adamw",
         _muon_profile=_dsv4_muon_profile(model_spec),
-        param_groups=native.param_groups,
-        implementation=native.implementation,
-        optimizer_factory_kwargs_by_name=native.optimizer_factory_kwargs_by_name,
+        param_groups=adamw.param_groups,
+        implementation=adamw.implementation,
+        optimizer_factory_kwargs_by_name=adamw.optimizer_factory_kwargs_by_name,
     )
 
 

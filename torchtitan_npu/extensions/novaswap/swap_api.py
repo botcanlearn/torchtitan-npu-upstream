@@ -74,5 +74,10 @@ def get_handle_phase(tensor_name: str) -> str | None:
     return SwapEngine.handle_phase(tensor_name)
 
 
+def wait_for_device_release(tensor_name: str) -> None:
+    """Wait until a D2H operation has retired this tensor's NPU storage."""
+    SwapEngine.wait_for_device_release(tensor_name)
+
+
 def shutdown() -> None:
     SwapEngine.shutdown()

@@ -12,6 +12,8 @@ import torch
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, OverrideConfig, apply_overrides
 
+from torchtitan_npu.extensions.novaswap import swap_api as product_swap_api
+from torchtitan_npu.extensions.novaswap.swap_engine import SwapEngine
 from torchtitan_npu.override.common import optimizer as product_swap
 from torchtitan_npu.override.common.optimizer import OptimizerStateSwapContainer
 
@@ -33,7 +35,11 @@ def _patch_container_global(monkeypatch, name: str, value) -> None:
 
 
 def _patch_container_swap_api(monkeypatch, swap_api) -> None:
+    if not hasattr(swap_api, "wait_for_device_release"):
+        swap_api.wait_for_device_release = lambda _name: None
+    monkeypatch.setattr(product_swap, "swap_api", swap_api)
     _patch_container_global(monkeypatch, "swap_api", swap_api)
+    monkeypatch.setitem(product_swap._NovaSwapAdamW._submit.__globals__, "swap_api", swap_api)
 
 
 class _Root(Configurable):
@@ -128,6 +134,23 @@ def test_optimizer_state_swap_has_no_unowned_cleanup_facade() -> None:
     assert "_torchtitan_npu_swap_error" not in contents
 
 
+def test_novaswap_wait_for_device_release_keeps_handle_and_filters_npu(monkeypatch) -> None:
+    calls = []
+
+    class ReleaseWorker:
+        def wait_for_name(self, name, *, release_target=None) -> None:
+            calls.append((name, release_target))
+
+    monkeypatch.setattr(SwapEngine, "_ready", True)
+    monkeypatch.setattr(SwapEngine, "_release_worker", ReleaseWorker())
+    monkeypatch.setattr(SwapEngine, "_handles", {"state": ()})
+
+    product_swap_api.wait_for_device_release("state")
+
+    assert calls == [("state", "npu")]
+    assert SwapEngine._handles == {"state": ()}
+
+
 def test_optimizer_state_swap_adamw_pipelines_novaswap_buckets(monkeypatch) -> None:
     parameter_a = torch.nn.Parameter(torch.ones(4))
     parameter_b = torch.nn.Parameter(torch.ones(4))
@@ -143,11 +166,15 @@ def test_optimizer_state_swap_adamw_pipelines_novaswap_buckets(monkeypatch) -> N
         if action == "D2H":
             phases[name] = "D2H"
 
+    def wait_for_device_release(name) -> None:
+        events.append(("wait_for_device_release", name))
+
     fake_swap_api = SimpleNamespace(
         register_tensor=register_tensor,
         execute=execute,
         get_handle_phase=lambda name: phases.get(name),
         remove_tensor=lambda name: events.append(("remove", name)),
+        wait_for_device_release=wait_for_device_release,
     )
     _patch_container_swap_api(monkeypatch, fake_swap_api)
     OptimizerStateSwapContainer._swap_adamw(optimizer)
@@ -165,6 +192,7 @@ def test_optimizer_state_swap_adamw_pipelines_novaswap_buckets(monkeypatch) -> N
         "D2H",
         "D2H",
     ]
+    assert [event[1] for event in events if event[0] == "wait_for_device_release"] == []
     for parameter in (parameter_a, parameter_b):
         state = optimizer.state[parameter]
         assert set(state) == {"step", "exp_avg", "exp_avg_sq"}
@@ -186,17 +214,165 @@ def test_optimizer_state_swap_adamw_pipelines_novaswap_buckets(monkeypatch) -> N
     ]
 
 
+def test_optimizer_state_swap_adamw_installs_flat_state_before_stock_step(monkeypatch) -> None:
+    parameter = torch.nn.Parameter(torch.arange(4.0))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, foreach=False)
+    events = []
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: events.append(("register", name, tensor)),
+            execute=lambda name, action: events.append((action, name)),
+        ),
+    )
+    swap = product_swap._NovaSwapAdamW(optimizer)
+    original_step = swap._original_step
+
+    def stock_step(closure=None):
+        state = optimizer.state[parameter]
+        assert set(state) == {"step", "exp_avg", "exp_avg_sq"}
+        assert state["step"].device.type == "cpu"
+        assert state["exp_avg"].untyped_storage().data_ptr() == state["exp_avg_sq"].untyped_storage().data_ptr()
+        assert events[0][0] == "register"
+        return original_step(closure)
+
+    swap._original_step = stock_step
+    parameter.grad = torch.ones_like(parameter)
+    swap.step()
+
+    assert [event[0] for event in events] == ["register", "D2H"]
+    assert torch.equal(optimizer.state[parameter]["step"], torch.tensor(1.0))
+
+
+def test_optimizer_state_swap_adamw_lazily_adds_bucket_for_late_gradient(monkeypatch) -> None:
+    parameter_a = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    parameter_b = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    swapped = torch.optim.AdamW([parameter_a, parameter_b], lr=1e-3, foreach=False)
+    reference_a = torch.nn.Parameter(parameter_a.detach().clone())
+    reference_b = torch.nn.Parameter(parameter_b.detach().clone())
+    reference = torch.optim.AdamW([reference_a, reference_b], lr=1e-3, foreach=False)
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: None,
+            execute=lambda name, action: None,
+        ),
+    )
+    OptimizerStateSwapContainer._swap_adamw(swapped)
+
+    parameter_a.grad = torch.full_like(parameter_a, 0.25)
+    reference_a.grad = parameter_a.grad.clone()
+    swapped.step()
+    reference.step()
+    assert parameter_b not in swapped.state
+
+    parameter_a.grad = torch.full_like(parameter_a, 0.5)
+    parameter_b.grad = torch.full_like(parameter_b, 0.75)
+    reference_a.grad = parameter_a.grad.clone()
+    reference_b.grad = parameter_b.grad.clone()
+    swapped.step()
+    reference.step()
+
+    for swapped_parameter, reference_parameter in (
+        (parameter_a, reference_a),
+        (parameter_b, reference_b),
+    ):
+        assert torch.equal(swapped_parameter, reference_parameter)
+        for key, value in reference.state[reference_parameter].items():
+            assert torch.equal(swapped.state[swapped_parameter][key], value)
+
+
+def test_optimizer_state_swap_adamw_initializes_amsgrad_flat_state(monkeypatch) -> None:
+    parameter = torch.nn.Parameter(torch.arange(3.0))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, foreach=False, amsgrad=True)
+    registered = []
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: registered.append(tensor),
+            execute=lambda name, action: None,
+        ),
+    )
+    OptimizerStateSwapContainer._swap_adamw(optimizer)
+
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert set(state) == {"step", "exp_avg", "exp_avg_sq", "max_exp_avg_sq"}
+    assert registered[0].numel() == parameter.numel() * 3
+    storage = state["exp_avg"].untyped_storage().data_ptr()
+    assert state["exp_avg_sq"].untyped_storage().data_ptr() == storage
+    assert state["max_exp_avg_sq"].untyped_storage().data_ptr() == storage
+
+
+def test_optimizer_state_swap_adamw_matches_fused_step_placement(monkeypatch) -> None:
+    parameter = torch.nn.Parameter(torch.arange(3.0))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, foreach=False, fused=True)
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: None,
+            execute=lambda name, action: None,
+        ),
+    )
+    OptimizerStateSwapContainer._swap_adamw(optimizer)
+
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    state = optimizer.state[parameter]
+    assert state["step"].device == parameter.device
+    assert state["step"].dtype == torch.float32
+    assert state["step"].item() == 1
+
+
+def test_optimizer_state_swap_adamw_runs_external_step_hooks_once(monkeypatch) -> None:
+    parameters = [
+        torch.nn.Parameter(torch.tensor([1.0, 2.0])),
+        torch.nn.Parameter(torch.tensor([3.0, 4.0])),
+    ]
+    optimizer = torch.optim.AdamW(parameters, lr=1e-3, foreach=False)
+    hooks = []
+    optimizer.register_step_pre_hook(lambda *_args: hooks.append("pre"))
+    optimizer.register_step_post_hook(lambda *_args: hooks.append("post"))
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: None,
+            execute=lambda name, action: None,
+        ),
+    )
+    OptimizerStateSwapContainer._swap_adamw(optimizer)
+
+    for parameter in parameters:
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    assert hooks == ["pre", "post"]
+
+
+def test_optimizer_state_swap_adamw_rejects_preinitialized_state() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=1e-3, foreach=False)
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    with pytest.raises(ValueError, match="must be installed before AdamW initializes optimizer state"):
+        OptimizerStateSwapContainer._swap_adamw(optimizer)
+
+
 def test_optimizer_state_swap_adamw_prefetches_before_current_bucket_compute(monkeypatch) -> None:
     parameter_a = torch.nn.Parameter(torch.ones(4))
     parameter_b = torch.nn.Parameter(torch.ones(4))
     optimizer = torch.optim.AdamW([parameter_a, parameter_b], lr=1e-3, foreach=False)
     events = []
-    monkeypatch.setattr(
-        product_swap,
-        "swap_api",
+    _patch_container_swap_api(
+        monkeypatch,
         SimpleNamespace(
             register_tensor=lambda tensor, name: None,
             execute=lambda name, action: events.append((action, name)),
+            wait_for_device_release=lambda name: events.append(("WAIT_PRIOR_RELEASE", name)),
         ),
     )
     swap = product_swap._NovaSwapAdamW(optimizer)
@@ -210,14 +386,42 @@ def test_optimizer_state_swap_adamw_prefetches_before_current_bucket_compute(mon
     swap.step()
 
     assert [action for action, _ in events] == [
+        "WAIT_PRIOR_RELEASE",
         "H2D",
         "WAIT_DEVICE",
+        "WAIT_PRIOR_RELEASE",
         "H2D",
         "AdamW",
         "D2H",
         "WAIT_DEVICE",
         "AdamW",
         "D2H",
+    ]
+
+
+def test_optimizer_state_swap_adamw_waits_for_oldest_release_at_byte_budget(monkeypatch) -> None:
+    events = []
+    parameters = [torch.nn.Parameter(torch.ones(4)) for _ in range(2)]
+    optimizer = torch.optim.AdamW(parameters, lr=1e-3, foreach=False)
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=lambda tensor, name: None,
+            execute=lambda name, action: events.append((action, name)),
+            wait_for_device_release=lambda name: events.append(name),
+        ),
+    )
+    swap = product_swap._NovaSwapAdamW(optimizer)
+    monkeypatch.setattr(product_swap, "_ADAMW_SWAP_RESIDENT_TARGET_BUCKETS", 1)
+    for parameter in parameters:
+        parameter.grad = torch.ones_like(parameter)
+
+    swap.step()
+
+    assert events == [
+        ("D2H", f"adamw.{id(optimizer)}.bucket.0"),
+        f"adamw.{id(optimizer)}.bucket.0",
+        ("D2H", f"adamw.{id(optimizer)}.bucket.1"),
     ]
 
 

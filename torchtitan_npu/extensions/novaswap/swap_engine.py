@@ -84,18 +84,24 @@ class _AsyncReleaseWorker:
             for handle_id in finished:
                 self._entries.pop(handle_id, None)
 
-    def wait_for_name(self, tensor_name: str) -> None:
+    def wait_for_name(self, tensor_name: str, *, release_target: str | None = None) -> None:
         """Wait until retired storage owned by one tensor name is released."""
+        if release_target is not None and release_target not in {"cpu", "npu"}:
+            raise ValueError(f"unsupported release target {release_target!r}")
+
+        def matches(entry_tensor: str, entry_target: str) -> bool:
+            return entry_tensor == tensor_name and (release_target is None or entry_target == release_target)
+
         with self._condition:
             while any(
-                entry_tensor == tensor_name and state == "pending"
-                for entry_tensor, _, state, _ in self._entries.values()
+                matches(entry_tensor, entry_target) and state == "pending"
+                for entry_tensor, _, state, entry_target in self._entries.values()
             ):
                 self._condition.wait()
             finished = [
                 handle_id
-                for handle_id, (entry_tensor, _, state, _) in self._entries.items()
-                if entry_tensor == tensor_name and state in {"released", "cancelled"}
+                for handle_id, (entry_tensor, _, state, entry_target) in self._entries.items()
+                if matches(entry_tensor, entry_target) and state in {"released", "cancelled"}
             ]
             for handle_id in finished:
                 self._entries.pop(handle_id, None)
@@ -344,6 +350,18 @@ class SwapEngine:
         if phase == "H2D" and all(handle.device_waited for handle in handles):
             return "H2D_WAITED"
         return phase
+
+    @classmethod
+    def wait_for_device_release(cls, tensor_name: str) -> None:
+        """Wait for a D2H-retired NPU storage while retaining its host handle."""
+        if not cls._ready:
+            raise RuntimeError("SwapEngine is not initialized")
+        release_worker = cls._release_worker
+        if release_worker is None:
+            raise RuntimeError("SwapEngine release worker is not initialized")
+        if tensor_name not in cls._handles:
+            raise AssertionError(f"NPU release wait lacks a live swap handle for {tensor_name!r}")
+        release_worker.wait_for_name(tensor_name, release_target="npu")
 
     @classmethod
     def remove(cls, tensor_name: str) -> None:
