@@ -60,7 +60,9 @@ _TORCH_OPS_FUNCTIONS = (
 # carry ``(Tensor(a!)) -> ()`` schemas and really run on CPU during the rope
 # tests (the test module registers CPU kernels emulating the CANN math), so
 # the mock must define them with the exact native signatures whenever the
-# real package did not.
+# real package did not.  The mHC ops follow the same rule: the fused mHC
+# modules register autograd formulas for them, which requires the ops to
+# exist even though the CPU tests never execute them.
 _TORCH_OPS_MUTATOR_SCHEMAS = (
     (
         "inplace_partial_rotary_mul",
@@ -71,6 +73,16 @@ _TORCH_OPS_MUTATOR_SCHEMAS = (
         "inplace_partial_rotary_mul_backward",
         "inplace_partial_rotary_mul_backward(Tensor(a!) grad_output, Tensor r1, Tensor r2, *, "
         'str rotary_mode="interleave", int[2] partial_slice=[0, 0]) -> ()',
+    ),
+    (
+        "mhc_post",
+        "mhc_post(Tensor x, Tensor? h_res, Tensor h_out, Tensor h_post) -> Tensor",
+    ),
+    (
+        "mhc_pre_sinkhorn",
+        "mhc_pre_sinkhorn(Tensor x, Tensor phi, Tensor alpha, Tensor bias, int hc_mult, "
+        "int num_iters, float hc_eps, float norm_eps, bool out_flag) -> "
+        "(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)",
     ),
 )
 
@@ -101,6 +113,10 @@ def _fake_cann_ops():
     # at module level, so a bare importable module keeps the CPU suite green.
     ct.inplace_partial_rotary_mul_module = types.ModuleType("cann_ops_transformer.ops.inplace_partial_rotary_mul")
     ct.inplace_partial_rotary_mul_module.__path__ = []
+    # ``torchtitan_npu.ops.ascendc.mhc`` imports this submodule for its op
+    # registration side effect; an empty module satisfies that import.
+    ct.mhc_post_backward_module = types.ModuleType("cann_ops_transformer.ops.mhc_post_backward")
+    ct.mhc_post_backward_module.__path__ = []
     return ct
 
 
@@ -125,6 +141,7 @@ def install():
     sys.modules["cann_ops_transformer"] = recorder
     sys.modules["cann_ops_transformer.ops"] = recorder.ops
     sys.modules["cann_ops_transformer.ops.inplace_partial_rotary_mul"] = recorder.inplace_partial_rotary_mul_module
+    sys.modules["cann_ops_transformer.ops.mhc_post_backward"] = recorder.mhc_post_backward_module
     ns = torch.ops.cann_ops_transformer
     for fn_name in _TORCH_OPS_FUNCTIONS:
         if not hasattr(ns, fn_name):

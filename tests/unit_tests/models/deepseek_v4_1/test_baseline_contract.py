@@ -8,7 +8,7 @@ import torch
 
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 from torchtitan_npu.models.deepseek_v4_1 import _LINEAR_INIT, _make_v41_moe_config
-from torchtitan_npu.models.deepseek_v4_1.config_registry import deepseek_v4_1_debugmodel
+from torchtitan_npu.models.deepseek_v4_1.config_registry import deepseek_v4_1_debugmodel_multimodal
 
 
 def test_plain_weights_use_routed_experts_and_track_empty_experts():
@@ -112,7 +112,7 @@ def test_v41_moe_rides_the_common_stack_with_an_opt_in_vision_bias():
 
 
 def test_baseline_rejects_tensor_parallel():
-    config = deepseek_v4_1_debugmodel()
+    config = deepseek_v4_1_debugmodel_multimodal()
     config.parallelism.tensor_parallel_degree = 2
     with pytest.raises(NotImplementedError, match="TP=1"):
         config.model_spec.model.update_from_config(config=config)
@@ -121,10 +121,10 @@ def test_baseline_rejects_tensor_parallel():
 def test_trainer_config_rejects_a_ratio_table_shorter_than_the_stack():
     # Positive control: the registered table is accepted by the same entry point, so a
     # check that always raised would not pass this test.
-    registered = deepseek_v4_1_debugmodel()
+    registered = deepseek_v4_1_debugmodel_multimodal()
     registered.model_spec.model.update_from_config(config=registered)
 
-    config = deepseek_v4_1_debugmodel()
+    config = deepseek_v4_1_debugmodel_multimodal()
     model_config = config.model_spec.model
     model_config.compress_ratios = model_config.compress_ratios[:-1]
     with pytest.raises(ValueError, match="compress_ratios must match n_layers"):

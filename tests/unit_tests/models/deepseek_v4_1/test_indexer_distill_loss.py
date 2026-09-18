@@ -63,23 +63,32 @@ def test_student_gradient_is_z_times_y_minus_p() -> None:
 
 
 def test_invalid_slots_contribute_nothing() -> None:
-    """A row whose slots are all unused produces no gradient on that row."""
+    """A row whose slots are all unused produces no gradient on that row.
+
+    The valid row carries a hand-computed gradient: with a uniform teacher
+    ``p = [0.5, 0.5]``, ``Z = 1`` and student ``Y = softmax(log 3, 0) =
+    [0.75, 0.25]``, the closed form gives ``dI = [0.25, -0.25]``.
+    """
     loss = _loss()
     q_BLHD = torch.zeros(1, 2, 1, 1)
     cmp_k_BND = torch.zeros(1, 2, 1)
-    topk_indices_BLK = torch.tensor([[[0, 1]], [[-1, -1]]])
+    topk_indices_BLK = torch.tensor([[[0, 1], [-1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
-    # The student logits carry the indexer's own marking: an unused slot is -inf.
     lse_BLH = log_two.expand(1, 2, 1).clone()
     student_logits = torch.tensor(
-        [[[0.0, 0.0], [-torch.inf, -torch.inf]]], requires_grad=True
+        [[[float(torch.log(torch.tensor(3.0))), 0.0], [0.0, 0.0]]], requires_grad=True
     )
     carrier = torch.zeros(1, 2, 1)
 
     loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier).sum().backward()
 
     # The all-invalid row has no teacher mass, so its slots receive no gradient.
-    torch.testing.assert_close(student_logits.grad[0, 1], torch.zeros(2), rtol=0, atol=0)
+    torch.testing.assert_close(
+        student_logits.grad,
+        torch.tensor([[[0.25, -0.25], [0.0, 0.0]]]),
+        rtol=1e-6,
+        atol=1e-7,
+    )
 
 
 def test_unreachable_slot_marked_minus_inf_is_dropped_not_nan() -> None:
@@ -160,3 +169,41 @@ def test_per_layer_losses_sum_to_the_pooled_teacher() -> None:
     pooled = student_grad(log_two - torch.log(torch.tensor(1.5)))
 
     torch.testing.assert_close(pooled, first + second, rtol=1e-6, atol=1e-7)
+
+
+def test_structural_padding_rows_are_excluded_from_distillation() -> None:
+    """A row the loader marks as structural padding trains nothing, while a
+    real image row (masked label, valid query) keeps its gradient.
+
+    Both rows share the uniform teacher ``p = [0.5, 0.5]`` with ``Z = 1``
+    and student ``Y = softmax(log 2, 0) = [2/3, 1/3]``; the closed form
+    gives ``dI = [1/6, -1/6]`` on the valid row and zero on the padding.
+    """
+    loss = _loss()
+    q_BLHD = torch.zeros(1, 2, 1, 1)
+    cmp_k_BND = torch.zeros(1, 2, 1)
+    topk_indices_BLK = torch.tensor([[[0, 1], [0, 1]]])
+    log_two = torch.log(torch.tensor(2.0))
+    lse_BLH = log_two.expand(1, 2, 1).clone()
+    student_logits = torch.tensor(
+        [[[float(log_two), 0.0], [float(log_two), 0.0]]], requires_grad=True
+    )
+    carrier = torch.zeros(1, 2, 1)
+    query_valid_mask = torch.tensor([[True, False]])
+
+    loss(
+        q_BLHD,
+        cmp_k_BND,
+        topk_indices_BLK,
+        lse_BLH,
+        student_logits,
+        carrier=carrier,
+        query_valid_mask=query_valid_mask,
+    ).sum().backward()
+
+    torch.testing.assert_close(
+        student_logits.grad,
+        torch.tensor([[[1 / 6, -1 / 6], [0.0, 0.0]]]),
+        rtol=1e-6,
+        atol=1e-7,
+    )

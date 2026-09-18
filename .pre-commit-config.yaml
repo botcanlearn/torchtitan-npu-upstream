@@ -25,7 +25,7 @@ repos:
       - id: check-yaml
         args: ["--allow-multiple-documents"]
       - id: check-added-large-files
-        exclude: ^tests/assets/tokenizer/
+        exclude: ^tests/assets/tokenizer/|^tests/assets/cc12m_test/cc12m-train-0000\.tar$
       - id: check-merge-conflict
       - id: detect-private-key
       - id: check-json

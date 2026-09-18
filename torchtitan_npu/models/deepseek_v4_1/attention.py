@@ -28,10 +28,14 @@ returns the per-head log-sum-exp of the full softmax (window, selected compresse
 and sink) and the student logits arrive as an input; the loss itself, including the
 teacher it rebuilds from them, lives on ``IndexerDistillLoss``.  The loss's inputs are
 detached at that call site: the distillation must train the indexer and nothing else.
+A query row the metadata marks as structural padding is excluded from the
+distillation instead of contributing.
 
-The projections use the rope module with the site's un-rotated prefix width; the sparse
-core is Attention Gym's eager ``selected_attention``, which is also what the NPU ports
-replace.
+The projections use the rope module with the site's un-rotated prefix width.  The
+sparse core is Attention Gym's eager ``selected_attention``, and ``_compute_attention``
+is the seam the fused NPU ports replace: a fused subclass swaps exactly that method —
+keeping this forward's validation and distillation wiring — and returns the operator's
+output together with the per-head LSE the teacher rebuilds from.
 """
 
 from dataclasses import dataclass
@@ -57,13 +61,18 @@ class CompressedSparseInnerAttention2(Module):
 
     The whole core is Attention Gym's ``selected_attention`` in one call: ``q`` carries
     ``H`` heads while both KV sources carry a single shared head, and ``topk_indices``
-    index the compressed KV with ``-1`` for unused slots.
+    index the compressed KV with ``-1`` for unused slots.  ``compress_ratio`` carries
+    the layer's verified ratio (0 window-only, 1 a full-resolution second KV stream,
+    2 the compressed shared KV): a fused port needs it to translate the metadata's
+    document boundaries into its kernel layout, so it is never guessed from shapes.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         window_size: int
         softmax_scale: float
+        # The layer's compression ratio, carried explicitly for the fused ports.
+        compress_ratio: int
         # Indexer distillation loss, attached only on layers that consume the selection
         # (``compress_ratio > 0`` with an index source at or before them).
         aux_loss: LoggedAuxLoss.Config | None = None
@@ -72,7 +81,73 @@ class CompressedSparseInnerAttention2(Module):
         super().__init__()
         self.window_size = config.window_size
         self.softmax_scale = config.softmax_scale
+        self.compress_ratio = config.compress_ratio
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
+
+    def _compute_attention(
+        self,
+        q: torch.Tensor,
+        swa_k: torch.Tensor,
+        cmp_k: torch.Tensor | None,
+        *,
+        attention_masks,
+        topk_indices: torch.Tensor | None,
+        attn_sink: torch.Tensor | None,
+        wants_teacher: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run the sparse core; the seam the fused NPU ports replace.
+
+        Args:
+            q: Queries of shape ``[B, L, H, Dk]``.
+            swa_k: Sliding-window KV of shape ``[B, L, Dk]``, shared across heads.
+            cmp_k: Shared compressed KV of shape ``[B, N, Dk]``, paired with
+                ``topk_indices``.
+            attention_masks: The forward's varlen metadata; the operator reads its
+                document ids for the sliding-window branch.
+            topk_indices: Selected compressed entries ``[B, L, K]``, ``-1`` for unused.
+            attn_sink: Per-head sink logits of shape ``[H]``.
+            wants_teacher: Whether the distillation teacher is needed this call.
+
+        Returns:
+            ``(output [B, L, H, Dk], lse [B, H, L] | None)``: the LSE is the per-head
+            log-sum-exp of the full softmax (window, selected entries and sink) and is
+            produced exactly when ``wants_teacher`` is set.
+        """
+        batch, num_tokens, _, head_dim = q.size()
+        local_kv_B1LD = swa_k.reshape(batch, 1, num_tokens, head_dim)
+        if cmp_k is not None:
+            # ``forward`` pairs the two inputs, so ``topk_indices`` is present here.
+            assert topk_indices is not None
+            sparse_kv_B1ND = cmp_k.reshape(batch, 1, cmp_k.size(1), head_dim)
+            kv_indices_BLK = topk_indices
+        else:
+            # Window-only layer: the sparse pool is empty and every query keeps the
+            # window plus the sink.
+            sparse_kv_B1ND = q.new_zeros(batch, 1, 0, head_dim)
+            kv_indices_BLK = torch.empty(batch, num_tokens, 0, dtype=torch.long, device=q.device)
+
+        result = selected_attention(
+            q.transpose(1, 2),
+            local_kv_B1LD,
+            sparse_kv_B1ND,
+            kv_indices_BLK,
+            attention_sink=attn_sink,
+            doc_ids=attention_masks.doc_ids_BL,
+            sliding_window_size=self.window_size,
+            scale=self.softmax_scale,
+            # TODO: run the fused kernels once they validate this path; ``impl`` is the
+            # pinned attn-gym 0.0.9 argument, ``"reference"`` its eager PyTorch path.
+            impl="reference",
+            return_aux=AuxRequest(lse=True) if wants_teacher else None,
+        )
+        if wants_teacher:
+            # With ``return_aux`` requested the operator returns (output, aux).
+            assert isinstance(result, tuple)
+            out_BHLD, aux = result
+            assert aux.lse is not None
+            return out_BHLD.transpose(1, 2), aux.lse
+        assert isinstance(result, torch.Tensor)
+        return result.transpose(1, 2), None
 
     def forward(
         self,
@@ -90,7 +165,8 @@ class CompressedSparseInnerAttention2(Module):
             swa_k: Sliding-window KV of shape ``[B, L, Dk]``, shared across heads.
             cmp_k: Shared compressed KV of shape ``[B, N, Dk]``.
             attention_masks: The forward's varlen metadata; the operator reads its
-                document ids for the sliding-window branch.
+                document ids for the sliding-window branch and the loss reads its
+                valid-token marks when the loader produced any.
             topk_indices: Selected compressed entries ``[B, L, K]``, ``-1`` for unused.
             topk_scores: Student logits at those entries ``[B, L, K]``.
             attn_sink: Per-head sink logits of shape ``[H]``.
@@ -98,21 +174,8 @@ class CompressedSparseInnerAttention2(Module):
         Returns:
             Attention output of shape ``[B, L, H, Dk]``.
         """
-        batch, num_tokens, _, head_dim = q.size()
         if (cmp_k is None) != (topk_indices is None):
             raise ValueError("cmp_k and topk_indices must be provided together.")
-
-        local_kv_B1LD = swa_k.reshape(batch, 1, num_tokens, head_dim)
-        if cmp_k is not None:
-            # The check above pairs the two inputs, so both are present here.
-            assert topk_indices is not None
-            sparse_kv_B1ND = cmp_k.reshape(batch, 1, cmp_k.size(1), head_dim)
-            kv_indices_BLK = topk_indices
-        else:
-            # Window-only layer: the sparse pool is empty and every query keeps the
-            # window plus the sink.
-            sparse_kv_B1ND = q.new_zeros(batch, 1, 0, head_dim)
-            kv_indices_BLK = torch.empty(batch, num_tokens, 0, dtype=torch.long, device=q.device)
 
         # The loss runs only while training: in eval there is nothing to distill and the
         # extra ``lse`` the teacher needs would be dead output.  A compress layer that
@@ -121,31 +184,21 @@ class CompressedSparseInnerAttention2(Module):
         # loss is attached.
         aux_loss = self.aux_loss
         wants_teacher = self.training and aux_loss is not None and cmp_k is not None
-        out = selected_attention(
-            q.transpose(1, 2),
-            local_kv_B1LD,
-            sparse_kv_B1ND,
-            kv_indices_BLK,
-            attention_sink=attn_sink,
-            doc_ids=attention_masks.doc_ids_BL,
-            sliding_window_size=self.window_size,
-            scale=self.softmax_scale,
-            # TODO: run the fused kernels once they validate this path; ``impl`` is the
-            # pinned attn-gym 0.0.9 argument, ``"reference"`` its eager PyTorch path.
-            impl="reference",
-            return_aux=AuxRequest(lse=True) if wants_teacher else None,
+        attn_BLHD, lse_BHL = self._compute_attention(
+            q,
+            swa_k,
+            cmp_k,
+            attention_masks=attention_masks,
+            topk_indices=topk_indices,
+            attn_sink=attn_sink,
+            wants_teacher=wants_teacher,
         )
         if not wants_teacher:
-            # ``return_aux`` was not requested, so the operator returned the output alone.
-            assert isinstance(out, torch.Tensor)
-            return out.transpose(1, 2)
+            return attn_BLHD
 
-        # With ``return_aux`` requested the operator returns (output, aux).
-        assert isinstance(out, tuple)
-        out_BHLD, aux = out
-        attn_BLHD = out_BHLD.transpose(1, 2)
+        # ``wants_teacher`` paired cmp_k with topk_indices, so all three are present.
         assert aux_loss is not None
-        assert aux.lse is not None
+        assert lse_BHL is not None
         # The teacher's sources are constants: the distillation must train the indexer and
         # nothing else, and ``topk_scores`` is the one live input, carrying the gradient
         # that trains it.  ``lse`` arrives as ``[B, H, L]``; the loss reads ``[B, L, H]``.
@@ -153,9 +206,10 @@ class CompressedSparseInnerAttention2(Module):
             q.detach(),
             cmp_k.detach(),
             topk_indices,
-            aux.lse.transpose(1, 2).detach(),
+            lse_BHL.transpose(1, 2).detach(),
             topk_scores,
             carrier=attn_BLHD,
+            query_valid_mask=attention_masks.valid_tokens_BL,
         )
 
 

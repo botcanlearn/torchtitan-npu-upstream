@@ -501,6 +501,7 @@ class IndexerDistillLoss(LoggedAuxLoss):
         topk_scores_BLK: torch.Tensor,
         *,
         carrier: torch.Tensor,
+        query_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build the teacher, score the student against it, inject the gradient.
 
@@ -517,7 +518,7 @@ class IndexerDistillLoss(LoggedAuxLoss):
             cmp_k_BND: Shared compressed KV ``[B, N, Dk]``; a constant.
             topk_indices_BLK: Selected compressed entries ``[B, L, K]``; ``-1`` unused.
             lse_BLH: Per-head log-sum-exp of the sparse softmax, ``[B, L, H]``; a constant.
-            topk_scores_BLK: Student logits at the selected entries, ``[B, L, K]``, with
+            topk_scores_BLK: Student logits at the selected entries ``[B, L, K]``, with
                 the indexer's ``-inf`` marking an unused slot.  The one live input.
             carrier: Tensor whose backward path carries the injected gradient (the
                 attention output).
@@ -535,6 +536,12 @@ class IndexerDistillLoss(LoggedAuxLoss):
         # A row with no reachable entry is all -inf, which log_softmax would turn into NaN.
         # It carries no teacher mass either, so it is zeroed and contributes nothing.
         row_valid_BL = torch.isfinite(logits_BLK).any(dim=-1)
+
+        if query_valid_mask is not None:
+            # Structural padding (the alignment pad and the row tail) is not a
+            # query: it has no teacher and must train nothing.  Real image
+            # tokens stay valid even though their labels are masked.
+            row_valid_BL = row_valid_BL & query_valid_mask
         logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
         log_student_BLK = F.log_softmax(logits_BLK, dim=-1)
 

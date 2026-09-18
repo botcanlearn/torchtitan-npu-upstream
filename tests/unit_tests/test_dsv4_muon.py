@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from torch.distributed.tensor import Shard
 from torchtitan.distributed.flex_shard import BlockShard
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
@@ -94,7 +95,6 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
     assert "_distributed_paper_parameter_muon_optimizer" not in source
     assert "deepseek_v4_debugmodel_paper_muon" not in source
     assert "BlockShard(dim=0" in source
-    assert "MeshAxisName.EFSDP.value: Shard(0)" in source
 
     profile = _dsv4_muon_profile(model_registry("debugmodel"))
     compute_shardings = profile.optimizer_factory_kwargs["DistMuon"][
@@ -103,7 +103,9 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
     expert_layout = compute_shardings[
         "layers.2.moe.routed_experts.inner_experts.w1_EFD"
     ]
-    assert set(expert_layout.shardings_by_mesh_axis) >= {
+    assert all(isinstance(p, Shard) and p.dim == 0 for p in expert_layout.shardings_by_mesh_axis.values())
+    assert set(expert_layout.shardings_by_mesh_axis) == {
+        MeshAxisName.FSDP.value,
         MeshAxisName.DP_SHARD.value,
         f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
         MeshAxisName.EFSDP.value,

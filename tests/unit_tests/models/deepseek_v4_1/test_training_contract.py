@@ -12,24 +12,8 @@ from torch.utils.checkpoint import DefaultDeviceType
 from torchtitan.distributed.activation_checkpoint import FullAC
 
 from torchtitan_npu.models.deepseek_v4_1.vision_data import build_image_token_layout
-from torchtitan_npu.models.deepseek_v4_1.vision_loader import _SyntheticVisionDataset
 
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
-
-
-def test_synthetic_vision_without_image_files():
-    dataset = _SyntheticVisionDataset(vocab_size=64, seq_len=128, patch_count=64, span_start=8)
-
-    sample, labels = next(iter(dataset))
-    repeated, repeated_labels = next(iter(dataset))
-
-    assert sample["pixel_values"].shape == (64, 588)
-    assert sample["image_grid"].tolist() == [[8, 8]]
-    assert sample["image_feature_indices"][sample["image_feature_indices"] >= 0].tolist() == list(range(9))
-    assert labels[-1].item() == -100
-    assert (labels[:-1][sample["token_types"][1:] >= 0] == -100).all()
-    torch.testing.assert_close(sample["pixel_values"], repeated["pixel_values"], rtol=0, atol=0)
-    torch.testing.assert_close(labels, repeated_labels, rtol=0, atol=0)
 
 
 def test_full_ac_preserves_image_routing(monkeypatch):

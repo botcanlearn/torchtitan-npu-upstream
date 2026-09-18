@@ -388,6 +388,7 @@ def _make_v41_attn_config(
     inner_attention_cfg = CompressedSparseInnerAttention2.Config(
         window_size=window_size,
         softmax_scale=softmax_scale,
+        compress_ratio=compress_ratio,
         aux_loss=aux_loss,
     )
     return Attention.Config(

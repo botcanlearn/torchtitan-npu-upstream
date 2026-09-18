@@ -25,6 +25,7 @@ from torchtitan.models.common.rope import (
     _reshape_for_broadcast,
 )
 
+from torchtitan_npu.models.common.rope import HalfRotation
 from torchtitan_npu.patches.torchtitan.models.common.rope import (
     SplitComplexRoPEConfig,
     SplitCosSinRoPEConfig,
@@ -234,6 +235,18 @@ def asc_complex(cfg: ComplexRoPE.Config) -> AscComplexRoPE.Config:
 
 
 @override(
+    target=WorkaroundComplexRoPE.Config,
+    exact=True,
+    description="AscendC rotation for the split-aware workaround RoPE (text/compressor/indexer sites)",
+)
+def asc_workaround(cfg: WorkaroundComplexRoPE.Config) -> AscComplexRoPE.Config:
+    """Narrow bridge for the model builders that construct the workaround
+    config directly: the derived fused config keeps ``split`` (and the YaRN
+    fields) because ``AscComplexRoPE.Config`` extends the same config."""
+    return derive(cfg, AscComplexRoPE.Config)
+
+
+@override(
     target=CosSinRoPE.Config,
     description="AscendC fused CosSinRoPE via torch_npu.npu_rotary_mul (half mode)",
 )
@@ -311,3 +324,59 @@ class AscPartialComplexRoPE(WorkaroundComplexRoPE):
 )
 def asc_partial(cfg: SplitComplexRoPEConfig) -> AscPartialComplexRoPE.Config:
     return derive(cfg, AscPartialComplexRoPE.Config)
+
+
+def _npu_rotary_mul_shared_axis(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rotary_mode: str,
+) -> torch.Tensor:
+    """``npu_rotary_mul`` requires a shared batch axis for position tables.
+
+    Fold batch into sequence when the tables carry per-sample positions,
+    so distinct positions for every sample are retained.
+    """
+    values = x.float()
+    if x.ndim == 3:
+        values = values.unsqueeze(0)
+    if cos.ndim == 3:
+        cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
+    shape = values.shape
+    if cos.shape[0] != 1:
+        values = values.flatten(0, 1).unsqueeze(0)
+        cos = cos.expand(shape[0], shape[1], -1, -1).flatten(0, 1).unsqueeze(0)
+        sin = sin.expand(shape[0], shape[1], -1, -1).flatten(0, 1).unsqueeze(0)
+    output = torch_npu.npu_rotary_mul(
+        values.contiguous(),
+        cos.contiguous(),
+        sin.contiguous(),
+        rotary_mode=rotary_mode,
+    )
+    output = output.reshape(shape)
+    if x.ndim == 3:
+        output = output.squeeze(0)
+    return output
+
+
+class AscHalfRotation(HalfRotation):
+    @dataclass(kw_only=True, slots=True)
+    class Config(HalfRotation.Config):
+        pass
+
+    def forward(self, x, cos, sin, *, inverse=False):
+        if inverse:
+            sin = -sin
+        # The seam contract is half-width tables (one entry per frequency);
+        # npu_rotary_mul consumes full-width tables.
+        cos, sin = torch.cat((cos, cos), dim=-1), torch.cat((sin, sin), dim=-1)
+        return _npu_rotary_mul_shared_axis(x, cos, sin, "half").to(x.dtype)
+
+
+@override(
+    target=HalfRotation.Config,
+    exact=True,
+    description="AscendC fused half rotation for external tables via torch_npu.npu_rotary_mul",
+)
+def asc_half_rotation(cfg: HalfRotation.Config) -> AscHalfRotation.Config:
+    return derive(cfg, AscHalfRotation.Config)

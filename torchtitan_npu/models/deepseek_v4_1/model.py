@@ -62,18 +62,24 @@ class DeepSeekV41Metadata:
     tensor serves both consumers, which is why they agree by construction:
     ``selected_attention`` applies ``doc_ids[q] == doc_ids[k]`` to its sliding-window
     branch, and the indexer applies the same equality one axis over, entry ``j``
-    covering tokens ``[j * compress_ratio, (j + 1) * compress_ratio)``.  No
-    ``cu_seqlens``-style ragged form is carried because the operators consume the
-    per-token view directly.
+    covering tokens ``[j * compress_ratio, (j + 1) * compress_ratio)``.
 
     ``selection_masks`` precomputes the indexer's document-isolation and causal-
     completeness views for this forward, keyed by ``compress_ratio``.  That rule depends
     only on ``doc_ids`` and the ratio, so every indexer looks its own up instead of
     rebuilding it.
+
+    Two optional fields carry what a packed loader knows but the per-token view cannot
+    express: ``valid_tokens_BL`` marks structural padding (the document-alignment pad
+    and the row tail) so the distillation excludes those rows, and ``cu_seq_q`` is the
+    ragged cumulative boundary form the fused sparse kernel consumes.  Both are
+    ``None`` for loaders without the marks.
     """
 
     doc_ids_BL: torch.Tensor  # noqa: N815
     selection_masks: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+    valid_tokens_BL: torch.Tensor | None = None  # noqa: N815
+    cu_seq_q: torch.Tensor | None = None
 
 
 class DeepSeekV41TransformerBlock(TransformerBlock):
@@ -342,23 +348,32 @@ class V41Model(Decoder):
         )
 
     def get_attention_masks(  # pyrefly: ignore [bad-override]
-        self, positions: torch.Tensor
+        self, positions: torch.Tensor, *, valid_tokens: torch.Tensor | None = None
     ) -> DeepSeekV41Metadata:
-        """Build the per-forward varlen metadata: a document id per token, plus the
-        indexer's selection masks.
+        """Build the per-forward varlen metadata: a document id per token, the
+        indexer's selection masks, and the packed loader's validity marks when it
+        produced any.
 
         ``selected_attention`` consumes the document ids for the window branch, and the
-        indexer derives its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from them, so
-        no ragged ``cu_seqlens`` form is needed.  That rule is the same for every layer
-        with the same pooling ratio, so it is evaluated here once per ratio rather than
-        inside each indexer.
+        indexer derives its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from them —
+        a rule that depends only on the ratio, so it is evaluated here once per ratio
+        rather than inside each indexer.  ``cu_seq_q`` flattens the same boundaries
+        into the ragged cumulative form the fused sparse kernel takes (CP1, one
+        packed row per rank).
         """
         if positions is None:
             raise ValueError("DeepSeek V4.1 requires positions to build its attention metadata")
         doc_ids_BL = torch.cumsum((positions == 0).to(torch.int32), dim=-1) - 1
+        cu_seq_q = None
+        if positions.size(0) == 1:
+            starts = (positions[0] == 0).nonzero().flatten().to(torch.int32)
+            total = torch.tensor([positions.numel()], dtype=torch.int32, device=positions.device)
+            cu_seq_q = torch.cat((starts, total))
         return DeepSeekV41Metadata(
             doc_ids_BL=doc_ids_BL,
             selection_masks=indexer_selection_masks(doc_ids_BL, self.compress_ratios),
+            valid_tokens_BL=valid_tokens,
+            cu_seq_q=cu_seq_q,
         )
 
     def build_attention_masks(self, inputs, labels, extra_kwargs, *, cp_mesh=None, load_balancer_type=None):
@@ -371,7 +386,12 @@ class V41Model(Decoder):
         del load_balancer_type
         if cp_mesh is not None:
             raise NotImplementedError("DeepSeek V4.1 currently supports CP=1 only")
-        extra_kwargs["attention_masks"] = self.get_attention_masks(extra_kwargs.get("positions"))
+        # The packed loader's validity mark is metadata, not a forward input:
+        # consume it here so it never reaches a forward that does not take it.
+        valid_tokens = extra_kwargs.pop("valid_tokens", None)
+        extra_kwargs["attention_masks"] = self.get_attention_masks(
+            extra_kwargs.get("positions"), valid_tokens=valid_tokens
+        )
         return inputs, labels, extra_kwargs
 
     def _prepare_multimodal_embeddings(

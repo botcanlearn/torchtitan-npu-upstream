@@ -59,5 +59,8 @@ pip install --no-deps -e "${TORCHTITAN_DIR}"
 # fused-op smoke tests once).  New pure-Python runtime wheels go here by name.
 pip install --no-deps attn-gym==0.0.9
 
+pip install --no-deps torchvision==0.29.0.dev20260720 \
+    --extra-index-url https://download.pytorch.org/whl/nightly/cpu
+
 python -c 'from torchtitan.distributed.context_parallel.api import cp_shard; print(cp_shard.__module__)'
 python -m pytest -v --tb=short tests/unit_tests

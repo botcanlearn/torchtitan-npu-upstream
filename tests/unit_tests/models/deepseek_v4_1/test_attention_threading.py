@@ -331,7 +331,7 @@ def test_distill_loss_gets_detached_teacher_sources(monkeypatch) -> None:
     registered_forward = indexer_module.IndexerDistillLoss.forward
     seen = []
 
-    def record_forward(self, q, cmp_k, topk_indices, lse, topk_scores, *, carrier):
+    def record_forward(self, q, cmp_k, topk_indices, lse, topk_scores, *, carrier, query_valid_mask=None):
         seen.append(
             (
                 q.requires_grad,
@@ -341,7 +341,10 @@ def test_distill_loss_gets_detached_teacher_sources(monkeypatch) -> None:
                 carrier.requires_grad,
             )
         )
-        return registered_forward(self, q, cmp_k, topk_indices, lse, topk_scores, carrier=carrier)
+        return registered_forward(
+            self, q, cmp_k, topk_indices, lse, topk_scores,
+            carrier=carrier, query_valid_mask=query_valid_mask,
+        )
 
     monkeypatch.setattr(indexer_module.IndexerDistillLoss, "forward", record_forward)
     _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
