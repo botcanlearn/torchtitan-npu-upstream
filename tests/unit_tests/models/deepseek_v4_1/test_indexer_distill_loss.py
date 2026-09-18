@@ -18,11 +18,11 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_INDEX_SOURCE_LAYERS,
     deepseek_v4_1_debugmodel_config,
 )
-from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerKLLoss
+from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
 
 
-def _loss(coeff: float = 1.0) -> IndexerKLLoss:
-    config = IndexerKLLoss.Config(
+def _loss(coeff: float = 1.0) -> IndexerDistillLoss:
+    config = IndexerDistillLoss.Config(
         coeff=coeff,
         reduce_mesh="batch",
         global_batch_size=1,
@@ -40,12 +40,12 @@ def test_student_gradient_is_z_times_y_minus_p() -> None:
     # Both compressed logits are zero, so the conditional teacher is uniform and the mass
     # is exp(log 2 - lse); lse = log 2 makes it 1, i.e. p = [0.5, 0.5] and Z = 1.
     log_two = torch.log(torch.tensor(2.0))
-    lse_BHL = log_two.expand(1, 1, 1).clone()
+    lse_BLH = log_two.expand(1, 1, 1).clone()
     # Student logits log 3 / 0 give Y = softmax(log 3, 0) = [0.75, 0.25].
     student_logits = torch.tensor([[[torch.log(torch.tensor(3.0)), 0.0]]], requires_grad=True)
     carrier = torch.zeros(1, 1, 1)
 
-    returned = loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BHL, student_logits, carrier=carrier)
+    returned = loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier)
     # The carrier's values pass through unchanged; the loss hangs off its graph.
     torch.testing.assert_close(returned, carrier, rtol=0, atol=0)
     assert returned.grad_fn is not None
@@ -69,20 +69,58 @@ def test_invalid_slots_contribute_nothing() -> None:
     cmp_k_BND = torch.zeros(1, 2, 1)
     topk_indices_BLK = torch.tensor([[[0, 1]], [[-1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
-    lse_BHL = log_two.expand(1, 1, 2).clone()
-    student_logits = torch.zeros(1, 2, 2, requires_grad=True)
+    # The student logits carry the indexer's own marking: an unused slot is -inf.
+    lse_BLH = log_two.expand(1, 2, 1).clone()
+    student_logits = torch.tensor(
+        [[[0.0, 0.0], [-torch.inf, -torch.inf]]], requires_grad=True
+    )
     carrier = torch.zeros(1, 2, 1)
 
-    loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BHL, student_logits, carrier=carrier).sum().backward()
+    loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier).sum().backward()
 
     # The all-invalid row has no teacher mass, so its slots receive no gradient.
     torch.testing.assert_close(student_logits.grad[0, 1], torch.zeros(2), rtol=0, atol=0)
 
 
+def test_unreachable_slot_marked_minus_inf_is_dropped_not_nan() -> None:
+    """The -inf the indexer puts on an unused slot must not turn 0 * -inf into a NaN.
+
+    The teacher has no mass there (``p = 0``), so the entry contributes nothing and its
+    gradient is exactly zero -- but only because the loss zeroes the slot it cannot reach.
+    """
+    loss = _loss()
+    q_BLHD = torch.zeros(1, 1, 1, 1)
+    cmp_k_BND = torch.zeros(1, 2, 1)
+    # Two selectable entries and one unreachable slot, as the indexer emits it.
+    topk_indices_BLK = torch.tensor([[[0, 1, -1]]])
+    log_two = torch.log(torch.tensor(2.0))
+    lse_BLH = log_two.expand(1, 1, 1).clone()
+    student_logits = torch.tensor(
+        [[[torch.log(torch.tensor(3.0)), 0.0, -torch.inf]]], requires_grad=True
+    )
+    carrier = torch.zeros(1, 1, 1)
+
+    loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier).sum().backward()
+
+    assert torch.isfinite(student_logits.grad).all()
+    # dI = Z * Y - p is unchanged by the unreachable slot: Y = [0.75, 0.25, 0].
+    torch.testing.assert_close(
+        student_logits.grad,
+        torch.tensor([[[0.25, -0.25, 0.0]]]),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+    torch.testing.assert_close(
+        loss.read(),
+        torch.tensor(float(log_two - 0.5 * torch.log(torch.tensor(3.0)))),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
 def test_distill_loss_is_attached_only_where_a_selection_exists() -> None:
-    """The loss follows upstream's rule: every consumer, and only index sources score."""
+    """The loss follows upstream's rule: every consumer of a selection, and no other layer."""
     config = deepseek_v4_1_debugmodel_config()
-    index_sources = set(V41_FULL_INDEX_SOURCE_LAYERS)
 
     for layer_id, layer in enumerate(config.layers):
         attention = layer.attention
@@ -91,7 +129,6 @@ def test_distill_loss_is_attached_only_where_a_selection_exists() -> None:
             source <= layer_id for source in V41_FULL_INDEX_SOURCE_LAYERS
         )
         assert (aux_loss is not None) == consumes_selection
-        assert attention.indexer.needs_selection_scores == (aux_loss is not None and layer_id in index_sources)
         if aux_loss is not None:
             assert aux_loss.coeff == 0.01
             assert aux_loss.reduce_mesh == "batch"

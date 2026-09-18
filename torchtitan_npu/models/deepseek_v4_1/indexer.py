@@ -1,315 +1,324 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Lightning indexer for DeepSeek V4.1 (CSA2).
+"""Lightning indexer for DeepSeek V4.1 (CSA2) and its distillation loss.
 
 Shape legend for this file:
     B = batch, L = sequence length, D = model dimension,
     Hi = ``num_index_heads``, Di = ``index_head_dim``,
-    R = ``compress_ratio``, N = L // R compressed entries, K = ``index_topk``.
+    N = number of compressed KV entries (``L // compress_ratio``),
+    K = ``index_topk`` (entries selected per query).
 
 Score of query ``t`` against compressed entry ``j``::
 
     S_{t,h,j} = <q^I_{t,h}, k^I_j>
     I_{t,j}   = sum_h w_{t,h} * relu(S_{t,h,j})
 
-The top-``K`` entries of ``I_{t,.}`` are what the sparse attention reads.  Entry
-``j`` covers tokens ``[j * R, (j + 1) * R)``, so it is rotated at its first
-token's position: the packed positions reset per document, so the ratio stride
-selects exactly that token.
-
-Every layer owns an :class:`Indexer`, but only *source* layers carry parameters:
-an index-source layer produces the top-k, a layer that owns the compressed KV
-also produces the index keys, and a reuse layer returns what it was handed.
-``is_source`` and ``owns_k`` encode that contract and are asserted in ``forward``,
-so a misconfigured layer fails loudly instead of silently recomputing or silently
-reusing.
-
-The hierarchical candidate pool is declared here too: the layer that builds the
-pool scores every visible entry, and the layers inside the pool window restrict
-their own selection to it.  The pool tensor itself is threaded through the
-forward, not stored on the module.
-
-Selection is discrete, hence carries no gradient: the indexer is trained *only* by
-:class:`IndexerKLLoss`, which distills each consumer layer's attention mass on those
+The top-``K`` entries of ``I_{t,.}`` are what the sparse attention reads.  Selection is
+discrete, hence carries no gradient: the indexer is trained *only* by
+:class:`IndexerDistillLoss`, which distills each consumer layer's attention mass on those
 entries -- a marginal weighted by that layer's own compressed share -- into
-``softmax(I)``.
+``softmax(I_{t,.})``.
 
-The queries and keys are rotated by the rope module with the site's un-rotated
-prefix width, at the group's first token for the keys.
+The whole computation is single-pass: no query chunking, which is a kernel-side concern
+and not something the reference implementation should carry.  A kernel-backed variant
+replaces the score-and-select half: the per-head weights and the relaxed score, the
+visibility and candidate masking, and the top-k selection are what the NPU
+``lightning_indexer`` forward and ``sparse_lightning_indexer_kl_loss_grad`` backward
+implement.
+
+Packed documents are handled exactly like ``selected_attention`` handles its window:
+``doc_ids`` equality plus index arithmetic.  Entry ``j`` covers tokens
+``[j * compress_ratio, (j + 1) * compress_ratio)``, so its document is
+``doc_ids[:, j * compress_ratio]`` and it is causally complete for query ``t`` iff
+``j < (t + 1) // compress_ratio``.  An entry is selectable by ``t`` iff both hold.  This
+relies on every document segment being a multiple of ``compress_ratio`` tokens, which the
+V4.1 dataloader enforces with its ``document_alignment`` and which is also what makes the
+compressor's reshape segment-exact.
+
+Every layer owns a :class:`HierarchicalIndexer`, statically assigned one of CSA2's three
+modes: Full Mode carries the parameters and produces both the index keys and the top-k,
+Reindex Mode carries its own query and rescores the shared keys, and Reuse Mode carries
+the shared top-k forward without computing anything.  The mode is asserted in ``forward``,
+so a misconfigured layer fails loudly instead of silently recomputing or silently reusing.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
 from torchtitan_npu.patches.torchtitan.models.common.aux_loss import LoggedAuxLoss
 
+if TYPE_CHECKING:
+    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.nn_modules import RMSNorm
+    from torchtitan.models.common.rope import RoPE
 
-def select_candidate_blocks(
-    scores_BLN: torch.Tensor,
-    newest_BL1: torch.Tensor,
-    newest_valid_BL1: torch.Tensor,
-    topk_blocks: int,
-    block_size: int,
-) -> torch.Tensor:
-    """Level one of the hierarchical indexer: keep the best-scoring blocks.
+    from .model import DeepSeekV41Metadata
 
-    Args:
-        scores_BLN: Index scores ``[B, L, N]``, already masked to ``-inf`` on entries the
-            query cannot select (other documents and incomplete groups).
-        newest_BL1: Index of each query's newest selectable entry, ``[B, L, 1]``.
-        newest_valid_BL1: Whether that entry exists (the query's document has at least
-            one complete group), ``[B, L, 1]``.
-        topk_blocks: Maximum number of blocks to keep.
-        block_size: Positions per block.
 
-    Returns:
-        Boolean mask ``[B, L, N]`` selecting every position of the kept blocks.
+class IndexerMode(str, Enum):
+    """CSA2's static per-layer modes (report section 2.3.1).
+
+    ``FULL`` owns the main KV and projects its own index keys, ``REINDEX`` rescores the
+    shared keys with its own query, and ``REUSE`` computes no index query at all.
     """
-    width = scores_BLN.size(-1)
-    if width % block_size != 0:
-        scores_BLN = F.pad(scores_BLN, (0, -width % block_size), value=-torch.inf)
-    # A block is scored by its best position, which is what makes the pool
-    # recall-oriented rather than a second token-level selection.
-    block_scores_BLB = scores_BLN.unflatten(-1, (-1, block_size)).amax(dim=-1)
-    num_blocks = block_scores_BLB.size(-1)
 
-    # The block holding a query's newest selectable entry is only partly filled, and must
-    # not be outscored by an older, full block.  A query whose document has no complete
-    # group yet owns no such block and pins nothing.
-    last_BL1 = newest_BL1 // block_size
-    pin_BLB = torch.arange(num_blocks, device=scores_BLN.device).view(1, 1, -1) == last_BL1
-    block_scores_BLB = block_scores_BLB.masked_fill(pin_BLB & newest_valid_BL1, torch.inf)
-
-    top = block_scores_BLB.topk(min(topk_blocks, num_blocks), dim=-1)
-    # Fewer reachable blocks than ``topk_blocks`` leaves -inf picks behind: drop them.
-    keep_BLB = torch.zeros_like(block_scores_BLB, dtype=torch.bool).scatter_(-1, top.indices, top.values > -torch.inf)
-    return keep_BLB.repeat_interleave(block_size, dim=-1)[..., :width]
+    FULL = "full"
+    REINDEX = "reindex"
+    REUSE = "reuse"
 
 
-class Indexer(Module):
-    """Score compressed entries and keep the top ``index_topk`` per query.
+# Bound at module level so the mode adapters in HierarchicalIndexer read as
+# "if self.mode is REUSE".
+FULL = IndexerMode.FULL
+REINDEX = IndexerMode.REINDEX
+REUSE = IndexerMode.REUSE
 
-    Key modes: a key-owning indexer owns ``wk``/``k_norm`` and consumes the
-    KV-source compressor's latent; an external-key indexer owns no key
-    projection and requires the shared ``idx_k``.
+
+def _selection_mask(doc_ids_BL: torch.Tensor, compress_ratio: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Document isolation plus causal completeness over the compressed-entry axis.
+
+    Returns ``(visible_BLN, newest_BL1, newest_valid_BL1)`` for one ``compress_ratio``.
+    Entry ``j`` belongs to ``doc_ids_BL[:, j * compress_ratio]`` and is complete for query
+    ``t`` iff ``j < (t + 1) // compress_ratio``; the two conditions are exactly the
+    ``selected_attention`` window rule one axis over.
+    """
+    num_tokens = doc_ids_BL.size(1)
+    num_cmp = num_tokens // compress_ratio
+    entry_BL1 = torch.arange(num_tokens, device=doc_ids_BL.device).view(1, -1, 1)
+    # Global number of complete groups up to and including each query.
+    complete_BL1 = (entry_BL1 + 1) // compress_ratio
+    entry_B1N = torch.arange(num_cmp, device=doc_ids_BL.device).view(1, 1, -1)
+    cmp_doc_ids_BN = doc_ids_BL[:, ::compress_ratio]
+    visible_BLN = (entry_B1N < complete_BL1) & (cmp_doc_ids_BN.unsqueeze(1) == doc_ids_BL.unsqueeze(-1))
+
+    newest_BL1 = complete_BL1 - 1
+    newest_valid_BL1 = (newest_BL1 >= 0) & (
+        cmp_doc_ids_BN.gather(1, newest_BL1.clamp_min(0).squeeze(-1)).unsqueeze(-1) == doc_ids_BL.unsqueeze(-1)
+    )
+    return visible_BLN, newest_BL1, newest_valid_BL1
+
+
+def indexer_selection_masks(
+    doc_ids_BL: torch.Tensor, compress_ratios: tuple[int, ...]
+) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """The indexer's selection masks for one forward, one per pooling ratio.
+
+    The mask depends only on the forward's ``doc_ids`` and on a layer's
+    ``compress_ratio``, so it is built once per forward and looked up by every indexer
+    instead of being rebuilt per layer.  Ratios of 0 are skipped: those layers reuse a
+    selection rather than make one.
+    """
+    return {
+        ratio: _selection_mask(doc_ids_BL, ratio) for ratio in sorted({ratio for ratio in compress_ratios if ratio > 0})
+    }
+
+
+class HierarchicalIndexer(Module):
+    """The Hierarchical Sparse Indexer (report section 2.3.2) across CSA2's layer modes.
+
+    V4.1 is a Causal Encoder-Decoder (CED): the bottom ``L/2`` layers are the causal
+    encoder and the top ``L/2`` the decoder, and this indexer is used in the decoder
+    only.  That is why the released config puts the candidate-pool source at the first
+    decoder layer, ``candidate_source_layer = 20`` of 40.
+
+    Each layer is statically assigned one mode (report section 2.3.1), and ``forward`` is
+    the adapter over them:
+
+    - ``FULL``: the layer owns the main KV, so it projects the index keys from the
+      compressor latent and runs the indexer.  With ``candidate_topk_blocks > 0`` it is
+      also the group's candidate source and builds the shared pool.
+    - ``REINDEX``: it reuses the main KV and index keys of a preceding Full Mode layer,
+      computes its own index query and rescores them.  With ``candidate_topk_blocks > 0``
+      it searches only the shared candidate pool, otherwise every visible entry.
+    - ``REUSE``: no index query and no scores; it carries the latest Top-K indices and
+      the shared keys forward.
+
+    The candidate pool is the hierarchy: the source scores every causally visible entry
+    once, scores each block by its best entry and keeps ``candidate_topk_blocks`` blocks
+    of ``candidate_block_size`` positions -- 2048 x 8 = 16384 candidates against
+    ``index_topk`` 512 in V4.1-Flash -- and the Reindex Mode layers search only those.
+    The pool boundary comes from a top-k over blocks, so it receives no gradient: it is a
+    training/inference consistency and per-query cost device, not a learned component.
+
+    The indexer is trained by distillation alone, so its graph starts at its own
+    parameters: the caller detaches the trunk inputs (``Attention.forward``).  The shared
+    index keys are the one exception -- a Reindex Mode layer receives ``idx_k`` live, so
+    that the consumers of a key keep training its owner.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        mode: IndexerMode
         num_index_heads: int
         index_head_dim: int
         index_topk: int
         compress_ratio: int
-        is_source: bool
-        # This layer projects the index keys from its own compressor latent.
-        owns_k: bool
-        # Hierarchical indexer: this layer builds the shared candidate pool, or
-        # restricts its own selection to it.
-        is_candidate_source: bool = False
-        uses_candidates: bool = False
+        # Candidate pool: a Full Mode source builds it, Reindex Mode layers search it.
+        # 0 leaves the mode's plain behaviour, scoring every visible entry.
         candidate_topk_blocks: int = 0
         candidate_block_size: int = 0
-        # Whether a distillation loss consumes the student logits at the selected
-        # entries.  When no loss is attached (inference, or an LM-only run) the
-        # gather-and-score recomputation is dead work and is skipped.
-        needs_selection_scores: bool = False
-        # Present on source layers:
+        # Present on Full and Reindex Mode layers:
         rope: RoPE.Config | None = None
         wq_b: Linear.Config | None = None
         weights_proj: Linear.Config | None = None
-        # Present on key-owning layers:
+        # Present on Full Mode layers, which project their own keys:
         wk: Linear.Config | None = None
         k_norm: RMSNorm.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
+        self.mode = config.mode
+        self.compress_ratio = config.compress_ratio
         self.num_index_heads = config.num_index_heads
         self.index_head_dim = config.index_head_dim
         self.index_topk = config.index_topk
-        self.compress_ratio = config.compress_ratio
-        self.softmax_scale = config.index_head_dim**-0.5
-        self.is_source = config.is_source
-        self.owns_k = config.owns_k
-        self.is_candidate_source = config.is_candidate_source
-        self.uses_candidates = config.uses_candidates
         self.candidate_topk_blocks = config.candidate_topk_blocks
         self.candidate_block_size = config.candidate_block_size
-        self.needs_selection_scores = config.needs_selection_scores
-        if not self.is_source:
+        if self.mode is REUSE:
             return
         if config.rope is None or config.wq_b is None or config.weights_proj is None:
-            raise ValueError("An index-source layer requires rope, wq_b and weights_proj configs.")
-        wk, k_norm = config.wk, config.k_norm
-        if self.owns_k and (wk is None or k_norm is None):
-            raise ValueError("A key-owning indexer requires wk and k_norm configs.")
+            raise ValueError("A Full or Reindex Mode indexer requires rope, wq_b and weights_proj configs.")
         self.rope = config.rope.build()
         self.wq_b = config.wq_b.build()
         self.weights_proj = config.weights_proj.build()
-        if wk is not None and k_norm is not None:
-            self.wk = wk.build()
-            self.k_norm = k_norm.build()
+        if self.mode is FULL:
+            if config.wk is None or config.k_norm is None:
+                raise ValueError("A Full Mode indexer requires wk and k_norm configs to project its own index keys.")
+            self.wk = config.wk.build()
+            self.k_norm = config.k_norm.build()
 
-    def _project_qkw(
-        self,
-        x: torch.Tensor,
-        qr: torch.Tensor,
-        positions: torch.Tensor,
-        *,
-        latent: torch.Tensor | None,
-        idx_k: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """First half of the indexer: the projections that produce q, k and w.
+    @staticmethod
+    def select_candidate_blocks(
+        scores_BLN: torch.Tensor,
+        newest_BL1: torch.Tensor,
+        newest_valid_BL1: torch.Tensor,
+        topk_blocks: int,
+        block_size: int,
+    ) -> torch.Tensor:
+        """The candidate source's blockwise selection: keep the best-scoring blocks.
 
-        A key-owning layer projects its keys from the compressor latent; a re-indexing
-        layer scores the shared ``idx_k`` instead.
+        Args:
+            scores_BLN: Index scores ``[B, L, N]``, already masked to ``-inf`` on entries
+                the query cannot select (other documents and incomplete groups).
+            newest_BL1: Index of each query's newest selectable entry, ``[B, L, 1]``.
+            newest_valid_BL1: Whether that entry exists (the query's document has at least
+                one complete group), ``[B, L, 1]``.
+            topk_blocks: Maximum number of blocks to keep.
+            block_size: Positions per block.
 
         Returns:
-            ``(idx_q, idx_k, idx_w)``.
+            Boolean mask ``[B, L, N]`` selecting every position of the kept blocks.
         """
-        bsz, seqlen, _ = qr.size()
-        idx_q = self.wq_b(qr).view(bsz, seqlen, self.num_index_heads, self.index_head_dim)
-        # The rope config carries the site's un-rotated prefix width.
-        idx_q = self.rope(idx_q, positions=positions)
-        if self.owns_k:
-            # ``forward`` asserts both before calling: a key owner always has its own
-            # weights and the compressor latent.
-            assert latent is not None
-            # The indexer's inputs are detached: the distillation loss must train the
-            # indexer and nothing else, so its graph starts at the indexer's own
-            # parameters.
-            projected_k = self.k_norm(self.wk(latent.detach()))
-            # Entry j is rotated at the first token of the group it stands for.  One
-            # rank-2 head; the rope rotates rank-3 [B, N, 1, H].
-            idx_k = self.rope(projected_k.unsqueeze(2), positions=positions[..., :: self.compress_ratio]).squeeze(2)
-        else:
-            # A re-indexing layer scores the shared keys ``forward`` asserted are present.
-            assert idx_k is not None
-        # ``weights_proj`` is scaled by the index softmax scale and the head count, as in
-        # the reference: the per-head scores are averaged rather than summed.
-        idx_w = self.weights_proj(x) * (self.softmax_scale * self.num_index_heads**-0.5)
-        return idx_q, idx_k, idx_w
+        width = scores_BLN.size(-1)
+        if width % block_size != 0:
+            scores_BLN = F.pad(scores_BLN, (0, -width % block_size), value=-torch.inf)
+        # A block is scored by its best position, which is what makes the pool
+        # recall-oriented rather than a second token-level selection.
+        block_scores_BLB = scores_BLN.unflatten(-1, (-1, block_size)).amax(dim=-1)
+        num_blocks = block_scores_BLB.size(-1)
 
-    def _selection_mask(
-        self,
-        doc_ids_BL: torch.Tensor,
-        num_cmp: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Document isolation plus causal completeness over the entry axis.
+        # The block holding a query's newest selectable entry is only partly filled, and
+        # must not be outscored by an older, full block.  A query whose document has no
+        # complete group yet owns no such block and pins nothing.
+        last_BL1 = newest_BL1 // block_size
+        pin_BLB = torch.arange(num_blocks, device=scores_BLN.device).view(1, 1, -1) == last_BL1
+        block_scores_BLB = block_scores_BLB.masked_fill(pin_BLB & newest_valid_BL1, torch.inf)
 
-        Returns ``(visible_BLN, newest_BL1, newest_valid_BL1)``.  Entry ``j`` belongs to
-        ``doc_ids_BL[:, j * compress_ratio]`` and is complete for query ``t`` iff
-        ``j < (t + 1) // compress_ratio``; the two conditions are exactly the
-        ``selected_attention`` window rule one axis over.
-        """
-        num_tokens = doc_ids_BL.size(1)
-        ratio = self.compress_ratio
-        entry_BL1 = torch.arange(num_tokens, device=device).view(1, -1, 1)
-        # Global number of complete groups up to and including each query.
-        complete_BL1 = (entry_BL1 + 1) // ratio
-        entry_BN1 = torch.arange(num_cmp, device=device).view(1, 1, -1)
-        cmp_doc_ids_BN = doc_ids_BL[:, ::ratio]
-        visible_BLN = (entry_BN1 < complete_BL1) & (cmp_doc_ids_BN.unsqueeze(1) == doc_ids_BL.unsqueeze(-1))
-
-        newest_BL1 = complete_BL1 - 1
-        in_range_BL1 = newest_BL1 >= 0
-        newest_doc_BL = cmp_doc_ids_BN.gather(1, newest_BL1.clamp_min(0).squeeze(-1))
-        newest_valid_BL1 = in_range_BL1 & (newest_doc_BL.unsqueeze(-1) == doc_ids_BL.unsqueeze(-1))
-        return visible_BLN, newest_BL1, newest_valid_BL1
-
-    def _selected_scores(
-        self,
-        idx_q: torch.Tensor,
-        idx_k: torch.Tensor,
-        idx_w: torch.Tensor,
-        topk_indices_BLK: torch.Tensor,
-    ) -> torch.Tensor:
-        """Recompute the index scores at the selected entries, with gradient.
-
-        The gradient this produces is what trains the indexer: it flows into ``wq_b``,
-        ``weights_proj``, and into the shared index keys' owner through ``idx_k``.
-        """
-        # Invalid (-1) slots gather entry 0; the loss masks them out.
-        batch_index = torch.arange(idx_k.size(0), device=idx_k.device)[:, None, None]
-        selected_BLKD = idx_k[batch_index, topk_indices_BLK.clamp_min(0)]
-        logits_BLHK = torch.einsum("blhd,blkd->blhk", idx_q, selected_BLKD)
-        logits_BLHK = logits_BLHK.relu() * idx_w.unsqueeze(-1)
-        return logits_BLHK.sum(dim=2)
-
-    def _select_topk(
-        self,
-        idx_q: torch.Tensor,
-        idx_k: torch.Tensor,
-        idx_w: torch.Tensor,
-        attention_masks,
-        *,
-        candidates: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Second half: score the visible entries, keep the top ``index_topk``.
-
-        This is the half a fused kernel replaces: the relaxed score
-        ``relu(q @ k^T) * w`` summed over heads, the visibility mask, the optional
-        candidate-pool restriction, the top-k and the candidate pool itself.
-
-        Returns ``(topk_indices, topk_scores, candidates)``.  ``topk_scores`` carries
-        the student logits at the selected entries; it is produced with the indexer
-        distillation loss and stays ``None`` until then.
-        """
-        visible_BLN, newest_BL1, newest_valid_BL1 = self._selection_mask(
-            attention_masks.doc_ids_BL, idx_k.shape[1], idx_q.device
+        top = block_scores_BLB.topk(min(topk_blocks, num_blocks), dim=-1)
+        # Fewer reachable blocks than ``topk_blocks`` leaves -inf picks behind: drop them.
+        keep_BLB = torch.zeros_like(block_scores_BLB, dtype=torch.bool).scatter_(
+            -1, top.indices, top.values > -torch.inf
         )
-        topk = min(self.index_topk, idx_k.shape[1])
-        index_score = torch.einsum("bshd,btd->bsht", idx_q, idx_k)
-        index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-        index_score = index_score.sum(dim=2)
-        index_score = index_score.where(visible_BLN, float("-inf"))
-        if self.uses_candidates:
-            if candidates is None:
-                raise ValueError("a layer inside the candidate window requires the shared pool")
-            candidate_mask = candidates.squeeze(1) if candidates.ndim == 4 else candidates
-            if candidate_mask.shape != index_score.shape:
-                raise ValueError(
-                    "candidate mask shape must match index score shape: "
-                    f"{tuple(candidate_mask.shape)} vs {tuple(index_score.shape)}"
+        return keep_BLB.repeat_interleave(block_size, dim=-1)[..., :width]
+
+    def _score_and_select(
+        self,
+        idx_q_BLHiDi: torch.Tensor,
+        idx_k_BNDi: torch.Tensor,
+        weights_BLHi: torch.Tensor,
+        attention_masks: DeepSeekV41Metadata,
+        *,
+        candidates_BLN: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """The score-and-select half, and the half a fused kernel replaces.
+
+        Everything between the projections and the returned tensors:
+
+        1. the relaxed index score ``sum_h w * relu(q . k)`` over every entry the query
+           can see.  Selection is discrete and carries no gradient, so this runs outside
+           the autograd graph;
+        2. the hierarchy step: a Full Mode source builds the shared candidate pool, and a
+           Reindex Mode layer searches the pool it was handed instead of every visible
+           entry.  Without ``candidate_topk_blocks`` both modes score everything visible;
+        3. the top ``index_topk`` entries of the resulting scores;
+        4. the same relaxed score recomputed at those selected entries, now *with*
+           gradient: the student logits the distillation loss consumes.  It is a second
+           pass rather than a gather from step 1 for exactly the reason step 1 is outside
+           the graph -- the full ``[B, L, Hi, N]`` tensor must not enter it.
+
+        Returns:
+            ``(topk_indices_BLK, topk_scores_BLK, candidates_BLN)``.  An unused slot of a
+            padded row is ``-1`` in the indices and ``-inf`` in the student logits, so
+            that the distillation's softmax drops it without looking at the indices.
+        """
+        visible_BLN, newest_BL1, newest_valid_BL1 = attention_masks.selection_masks[self.compress_ratio]
+
+        with torch.no_grad():
+            scores_BLHiN = torch.einsum("blhd,bnd->blhn", idx_q_BLHiDi, idx_k_BNDi)
+            scores_BLN = (scores_BLHiN.relu() * weights_BLHi.unsqueeze(-1)).sum(dim=2)
+            scores_BLN = scores_BLN.masked_fill(~visible_BLN, -torch.inf)
+
+            if self.mode is FULL and self.candidate_topk_blocks > 0:
+                candidates_BLN = self.select_candidate_blocks(
+                    scores_BLN,
+                    newest_BL1,
+                    newest_valid_BL1,
+                    self.candidate_topk_blocks,
+                    self.candidate_block_size,
                 )
-            index_score = index_score.where(candidate_mask, float("-inf"))
+            elif self.mode is REINDEX and self.candidate_topk_blocks > 0:
+                assert candidates_BLN is not None, (
+                    "A Reindex Mode indexer with candidate_topk_blocks set searches the "
+                    "pool the candidate source built, which no preceding layer produced."
+                )
+                scores_BLN = scores_BLN.masked_fill(~candidates_BLN, -torch.inf)
 
-        indices = index_score.topk(topk, dim=-1, sorted=False).indices.sort(dim=-1).values
-        valid_BLK = visible_BLN.gather(-1, indices)
-        topk_indices = torch.where(valid_BLK, indices, -1)
+            topk = min(self.index_topk, scores_BLN.size(-1))
+            selected_BLK = scores_BLN.topk(topk, dim=-1, sorted=False).indices.sort(dim=-1).values
+            # Entries the query cannot see yet, or that a pool excluded, come back as -1,
+            # which the sparse attention and the loss both skip.
+            topk_indices_BLK = torch.where(visible_BLN.gather(-1, selected_BLK), selected_BLK, -1)
 
-        if self.is_candidate_source:
-            candidates = select_candidate_blocks(
-                index_score,
-                newest_BL1,
-                newest_valid_BL1,
-                self.candidate_topk_blocks,
-                self.candidate_block_size,
-            )
-
-        # The student logits only exist to be distilled.  Producing them when no loss
-        # consumes them (inference, or a run with the coefficient set to ``None``) would
-        # add a gather plus an einsum over the selected entries for nothing.
-        topk_scores = None
-        if self.needs_selection_scores and self.training and torch.is_grad_enabled():
-            topk_scores = self._selected_scores(idx_q, idx_k, idx_w, topk_indices)
-        return topk_indices, topk_scores, candidates
+        # The gradient this produces is what trains the indexer: it flows into
+        # ``wq_b``, ``weights_proj``, and into the shared index keys' owner through
+        # ``idx_k``.  It is built unconditionally so the returned contract is the same on
+        # every path; whether anything consumes it is the distillation loss's decision.
+        batch_index = torch.arange(idx_k_BNDi.size(0), device=idx_k_BNDi.device)[:, None, None]
+        selected_BLKDi = idx_k_BNDi[batch_index, topk_indices_BLK.clamp_min(0)]
+        logits_BLHiK = torch.einsum("blhd,blkd->blhk", idx_q_BLHiDi, selected_BLKDi)
+        logits_BLHiK = logits_BLHiK.relu() * weights_BLHi.unsqueeze(-1)
+        # A ``-1`` slot scores against entry 0 and means nothing: it is marked with
+        # the value that drops it from the distillation's student softmax.
+        topk_scores_BLK = logits_BLHiK.sum(dim=2).masked_fill(topk_indices_BLK < 0, -torch.inf)
+        return topk_indices_BLK, topk_scores_BLK, candidates_BLN
 
     def forward(
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
         positions: torch.Tensor,
-        attention_masks,
+        attention_masks: DeepSeekV41Metadata,
         *,
         latent: torch.Tensor | None = None,
         idx_k: torch.Tensor | None = None,
@@ -322,82 +331,106 @@ class Indexer(Module):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
-        """Args:
+        """The mode adapter.
+
+        A Reuse Mode layer does no work at all: it hands its arguments back untouched.
+        The other two modes project the index query and the per-head weights, and only
+        Full Mode also projects the keys, from its own compressor latent.
+
+        Args:
             x: Hidden states of shape ``[B, L, D]``.
             qr: Query LoRA latent of shape ``[B, L, Q]``.
             positions: Position ids of shape ``[B, L]``.
-            attention_masks: The forward's varlen metadata; its document ids own the
-                entry isolation and causal completeness the selection is masked with.
-            latent: The compressor's pre-RoPE latent; a key-owning layer projects its
-                keys from it.
-            idx_k: The shared index keys when this layer does not own them.
-            topk_indices: The shared top-k when this layer does not produce it.
-            topk_scores: The shared student logits at those entries.
-            candidates: The shared candidate pool mask.
+            attention_masks: The forward's varlen metadata; the indexer reads its
+                document ids and its precomputed selection masks.
+            latent: The compressor's pre-RoPE latent; a Full Mode layer projects its keys
+                from it.
+            idx_k: The shared index keys, rescored by a Reindex Mode layer.
+            topk_indices: The shared top-k, carried by a Reuse Mode layer.
+            topk_scores: The shared student logits at those entries.  A Reuse Mode layer
+                keeps them: they are what its own distillation loss compares its teacher
+                against, and what the rest of its group inherits.
+            candidates: The shared candidate pool, built by a Full Mode source and
+                searched by the Reindex Mode layers after it.
 
         Returns:
-            ``(idx_k, topk_indices, topk_scores, candidates)``.  Reuse layers pass their
-            inputs through: they have no parameters of their own to train, but they must
-            not drop the state their group depends on.
+            ``(idx_k, topk_indices, topk_scores, candidates)``.  A Reuse Mode layer passes
+            its inputs through: it has no parameters of its own to train, but it must not
+            drop the student logits its group depends on.
         """
-        # A source supersedes whatever was in flight, so these are consumption
-        # contracts: an index source that does not own the keys must be handed the
-        # shared ones, and a reusing layer must be handed a selection to reuse.
-        if self.owns_k:
-            assert latent is not None, "A key-owning indexer projects its keys from the compressor latent."
-        elif self.is_source:
-            assert idx_k is not None, (
-                "A re-indexing layer scores the shared index keys, which no preceding key-owning layer produced."
-            )
-        if self.compress_ratio > 0 and not self.is_source:
-            assert topk_indices is not None, (
-                "A layer that reuses the top-k must receive it: no index source "
-                f"precedes this one (compress_ratio={self.compress_ratio})."
-            )
-        if not self.is_source:
+        # Reuse Mode carries the shared selection forward: nothing to compute.  A layer
+        # whose own ratio pools still consumes a selection, so being handed none means no
+        # index source precedes it and the topology is wrong.
+        if self.mode is REUSE:
+            if self.compress_ratio > 0:
+                assert topk_indices is not None, (
+                    "A Reuse Mode indexer must be handed the shared top-k: no index "
+                    f"source precedes this one (compress_ratio={self.compress_ratio})."
+                )
             return idx_k, topk_indices, topk_scores, candidates
 
-        idx_q, idx_k, idx_w = self._project_qkw(
-            x.detach(),
-            qr.detach(),
-            positions,
-            latent=latent,
-            idx_k=idx_k,
+        # Only Full Mode projects keys, from its own compressor latent; Reindex Mode
+        # rescores the keys a preceding Full Mode layer produced.
+        if self.mode is FULL:
+            assert latent is not None, "A Full Mode indexer projects its keys from the compressor latent."
+            idx_k = self.k_norm(self.wk(latent))
+            # One rank-2 head; RoPE rotates rank-3 [B, N, 1, H], with the entry's own
+            # first token as its position.
+            idx_k = self.rope(idx_k.unsqueeze(2), positions=positions[..., :: self.compress_ratio]).squeeze(2)
+        else:
+            assert idx_k is not None, (
+                "A Reindex Mode indexer rescores the shared index keys, which no preceding Full Mode layer produced."
+            )
+
+        # The index query is rotated at the token's own position.
+        idx_q = self.rope(
+            self.wq_b(qr).unflatten(-1, (self.num_index_heads, self.index_head_dim)),
+            positions=positions,
         )
-        topk_indices, topk_scores, candidates = self._select_topk(
+        # Scaled by the index softmax scale and the head count, as in the reference: the
+        # per-head scores are averaged rather than summed.
+        weights = self.weights_proj(x) * (self.index_head_dim**-0.5 * self.num_index_heads**-0.5)
+
+        topk_indices, topk_scores, candidates = self._score_and_select(
             idx_q,
             idx_k,
-            idx_w,
+            weights,
             attention_masks,
-            candidates=candidates,
+            candidates_BLN=candidates,
         )
         return idx_k, topk_indices, topk_scores, candidates
 
 
-class IndexerKLLoss(LoggedAuxLoss):
+class IndexerDistillLoss(LoggedAuxLoss):
     """Distill the attention's distribution over the top-k entries into the indexer.
 
-    The teacher is the head-averaged attention mass on the selected entries, with the
-    full softmax denominator (sliding window, selected compressed entries and sink
-    alike).  That mass is a *marginal* ``p`` whose row sum ``Z <= 1``: the window and the
-    sink hold the rest of the probability.  The loss scores the conditional teacher
-    ``t = p / Z`` against the student ``softmax(I)`` and weights the row by ``Z``::
+    The teacher is the head-averaged attention mass on the selected entries, with the full
+    softmax denominator (sliding window, selected compressed entries and sink alike).
+    That mass is a *marginal* ``p`` whose row sum ``Z <= 1``: the window and the sink hold
+    the rest of the probability.  The objective scores the conditional teacher ``t = p / Z``
+    against the student ``softmax(I)`` and weights the row by ``Z``::
 
-        L = sum_j p_j (log t_j - log Y_j),   dI = Z * Y - p
+        L = sum_t sum_j p_{t,j} (log t_{t,j} - log Y_{t,j}),   dI = Z * Y - p
 
-    Pre-normalising ``p`` to ``t`` would set ``Z = 1`` and quietly change the objective,
-    so ``_teacher`` returns ``p`` unchanged.
+    So it takes roughly the form of a KL from the student to the teacher, weighted by the
+    row's compressed mass.  ``p`` is deliberately left *unnormalised*: pre-normalising it to
+    ``t`` would set ``Z = 1`` everywhere and quietly drop that weight.
 
     Like ``MicrobatchWiseLoadBalanceLoss``, the loss owns the whole computation: the
     attention hands over the tensors the teacher needs (queries, compressed keys, the
     selected entries and the operator's LSE) plus the student logits, and the forward
-    builds the teacher, forms the weighted KL and injects the gradient on the carrier.
+    builds the teacher, forms the weighted KL and injects the gradient on the carrier.  The
+    caller passes the teacher's sources as constants -- the distillation must train the
+    indexer and nothing else -- which leaves ``topk_scores`` the only differentiable input.
 
-    One instance is attached per layer that consumes the selection, and they all score
-    the *same* student logits, because the indexer's ``topk_scores`` tensor is shared
-    across the group.  Each layer's backward therefore flows into that shared tensor, so
-    the indexer accumulates the gradient of every consumer; ``dI`` being affine in the
-    teacher is what makes this per-layer sum equal to the single pooled-teacher loss.
+    One instance is attached per layer that consumes the selection, and they all score the
+    *same* student logits, because the indexer's ``topk_scores`` tensor is shared across
+    the group.  Each layer's backward therefore flows into that shared tensor, so the
+    indexer accumulates the gradient of every consumer; ``dI`` being affine in the teacher
+    is what makes this per-layer sum equal to the single pooled-teacher loss.
+
+    The loss is summed over rows and normalized by the step's global valid-token count
+    by the :class:`LoggedAuxLoss` framework, exactly like the MoE balance loss.
 
     The fused NPU counterpart is ``sparse_lightning_indexer_kl_loss_grad`` in
     ops-transformer (see ``deepseek_v41_indexer_distill_findings.md``): it reads the
@@ -423,18 +456,28 @@ class IndexerKLLoss(LoggedAuxLoss):
         q_BLHD: torch.Tensor,
         cmp_k_BND: torch.Tensor,
         topk_indices_BLK: torch.Tensor,
-        lse_BHL: torch.Tensor,
+        lse_BLH: torch.Tensor,
     ) -> torch.Tensor:
         """Raw head-averaged attention mass on the selected entries, ``[B, L, K]``.
 
-        ``lse`` is the operator's per-head log-sum-exp over window + selected compressed
-        + sink, so ``exp(logit - lse)`` is each head's probability on that entry with the
-        full denominator.  Averaging over heads gives the *marginal* mass ``p``, whose
-        row sum ``Z <= 1`` is the compressed slice's share of the full softmax.
+        ``lse_BLH`` is the operator's per-head log-sum-exp over window + selected
+        compressed + sink, so ``exp(logit - lse)`` is each head's probability on that
+        entry with the full denominator.  Averaging over heads gives the *marginal* mass
+        ``p``, whose row sum ``Z <= 1`` is the compressed slice's share of the full
+        softmax: the window and the sink hold the rest.  A head whose mass sits on the
+        window or the sink therefore contributes ``m_h = exp(compressed_lse_h - lse_h) < 1``,
+        instead of every head contributing unit compressed mass.  The head mean (not the
+        sum) is what the kernel reduces with, and it is what keeps ``Z`` a share rather
+        than a multiple of it.
 
-        ``p`` is deliberately returned unnormalised: the loss weights each row's KL by
+        ``p`` is deliberately returned unnormalised.  The loss weights each row's KL by
         ``Z``, so pre-normalising to ``p / Z`` would set ``Z = 1`` and change the
-        objective.
+        objective; the caller derives the conditional teacher.
+
+        The per-head term is evaluated as ``m_h * softmax_h(logit)``: the conditional is a
+        plain softmax over the selected support, stable without any shift, and only the
+        mass needs the ``lse`` difference.  A row whose mass underflows fp32 returns zeros,
+        which is the correct limit: there is no compressed mass left to distil.
         """
         valid_BLK = topk_indices_BLK >= 0
         row_valid_BL = valid_BLK.any(dim=-1)
@@ -444,66 +487,60 @@ class IndexerKLLoss(LoggedAuxLoss):
         logits_BLHK = logits_BLHK.masked_fill(~valid_BLK.unsqueeze(2), -torch.inf)
 
         comp_lse_BLH = torch.logsumexp(logits_BLHK, dim=-1)
-        # The operator returns the LSE as [B, H, L]; the compressed logits are [B, L, H].
-        mass_BLH = torch.exp(comp_lse_BLH - lse_BHL.transpose(1, 2).float())
+        mass_BLH = torch.exp(comp_lse_BLH - lse_BLH.float())
         # A row with no valid slot has an all -inf softmax row; its mass is zero anyway.
         conditional_BLHK = torch.softmax(logits_BLHK.masked_fill(~row_valid_BL[:, :, None, None], 0.0), dim=-1)
         return (mass_BLH.unsqueeze(-1) * conditional_BLHK).sum(dim=2) / q_BLHD.size(2)
-
-    @staticmethod
-    def _kl(
-        p_BLK: torch.Tensor,
-        t_BLK: torch.Tensor,
-        topk_scores_BLK: torch.Tensor,
-        topk_indices_BLK: torch.Tensor,
-    ) -> torch.Tensor:
-        """Marginal-weighted KL from the student to the teacher, summed over rows.
-
-        Row ``(b, l)`` contributes ``sum_j p_j (log t_j - log Y_j)``: that is
-        ``Z * KL(t || Y)``, whose gradient w.r.t. the student logits is ``Z * Y - p``.
-        Both ``p`` and ``t`` are detached constants.
-        """
-        valid_BLK = topk_indices_BLK >= 0
-        row_valid_BL = valid_BLK.any(dim=-1)
-        logits_BLK = topk_scores_BLK.float().masked_fill(~valid_BLK, -torch.inf)
-        # A row with no valid slot would produce NaN in log_softmax; it is zeroed below.
-        logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
-        log_student_BLK = F.log_softmax(logits_BLK, dim=-1)
-
-        # xlogy keeps 0 * log(0) = 0: an entry with no teacher mass contributes nothing
-        # even though its conditional is 0, and the invalid slots are dropped below.
-        weighted_BLK = torch.special.xlogy(p_BLK, t_BLK) - p_BLK * log_student_BLK
-        weighted_BLK = weighted_BLK.masked_fill(~valid_BLK, 0.0)
-        return weighted_BLK.sum(dim=-1).masked_fill(~row_valid_BL, 0.0).sum()
 
     def forward(
         self,
         q_BLHD: torch.Tensor,
         cmp_k_BND: torch.Tensor,
         topk_indices_BLK: torch.Tensor,
-        lse_BHL: torch.Tensor,
+        lse_BLH: torch.Tensor,
         topk_scores_BLK: torch.Tensor,
         *,
         carrier: torch.Tensor,
     ) -> torch.Tensor:
         """Build the teacher, score the student against it, inject the gradient.
 
+        The gradient is roughly a KL gradient: row ``(b, l)`` contributes
+        ``sum_j p_j (log t_j - log Y_j)``, the conditional teacher ``t = p / Z`` scored
+        against the student and weighted by the row's marginal mass ``Z`` through ``p``.
+        That is ``Z * KL(t || Y)``, whose gradient w.r.t. the student logits is
+        ``Z * Y - p``.  ``p`` stays unnormalised on purpose: ``Z`` is the compressed
+        slice's share of the full softmax, and normalising ``p`` first would set it to 1.
+
         Args:
-            q_BLHD: Attention queries ``[B, L, H, Dk]``.
-            cmp_k_BND: Shared compressed KV ``[B, N, Dk]``.
+            q_BLHD: Attention queries ``[B, L, H, Dk]``; a constant (detached by the
+                caller).
+            cmp_k_BND: Shared compressed KV ``[B, N, Dk]``; a constant.
             topk_indices_BLK: Selected compressed entries ``[B, L, K]``; ``-1`` unused.
-            lse_BHL: Per-head log-sum-exp of the sparse softmax, ``[B, H, L]``.
-            topk_scores_BLK: Student logits at the selected entries, ``[B, L, K]``.
+            lse_BLH: Per-head log-sum-exp of the sparse softmax, ``[B, L, H]``; a constant.
+            topk_scores_BLK: Student logits at the selected entries, ``[B, L, K]``, with
+                the indexer's ``-inf`` marking an unused slot.  The one live input.
             carrier: Tensor whose backward path carries the injected gradient (the
                 attention output).
 
         Returns:
             ``carrier`` unchanged.
         """
-        with torch.no_grad():
-            p_BLK = self._teacher(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BHL)
-            # The conditional teacher; a row whose mass underflowed keeps t = 0 and its
-            # p = 0 makes the contribution vanish.
-            eps = torch.finfo(torch.float32).tiny
-            t_BLK = p_BLK / p_BLK.sum(dim=-1, keepdim=True).clamp_min(eps)
-        return self.inject(carrier, self._kl(p_BLK, t_BLK, topk_scores_BLK, topk_indices_BLK))
+        p_BLK = self._teacher(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH)
+        # The conditional teacher; a row whose mass underflowed keeps t = 0 and its p = 0
+        # makes the contribution vanish.
+        eps = torch.finfo(torch.float32).tiny
+        t_BLK = p_BLK / p_BLK.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+        logits_BLK = topk_scores_BLK.float()
+        # A row with no reachable entry is all -inf, which log_softmax would turn into NaN.
+        # It carries no teacher mass either, so it is zeroed and contributes nothing.
+        row_valid_BL = torch.isfinite(logits_BLK).any(dim=-1)
+        logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
+        log_student_BLK = F.log_softmax(logits_BLK, dim=-1)
+
+        # xlogy keeps 0 * log(0) = 0: an entry with no teacher mass contributes nothing
+        # even though its conditional is 0.  The student term is a plain product, so the
+        # slots the indexer marked unreachable would be 0 * -inf = NaN and are dropped.
+        weighted_BLK = torch.special.xlogy(p_BLK, t_BLK) - p_BLK * log_student_BLK
+        weighted_BLK = weighted_BLK.masked_fill(~torch.isfinite(logits_BLK), 0.0)
+        return self.inject(carrier, weighted_BLK.sum())

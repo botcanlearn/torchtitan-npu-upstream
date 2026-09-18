@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -40,7 +40,7 @@ from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .attention import Attention, CompressedSparseInnerAttention2
 from .compressor import Compressor
-from .indexer import Indexer, IndexerKLLoss
+from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, IndexerDistillLoss
 from .mhc import HcPost, HcPre
 from .model import DeepSeekV41TransformerBlock, V41Model
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
@@ -236,24 +236,31 @@ def _make_indexer_config(
     uses_candidates: bool,
     candidate_topk_blocks: int,
     candidate_block_size: int,
-    needs_selection_scores: bool,
     rope: WorkaroundComplexRoPE.Config | None,
-) -> Indexer.Config:
-    """Lightning-indexer config. Only an index source carries the projections; its keys
-    come from its own compressor latent, or from the shared ones otherwise."""
+) -> HierarchicalIndexer.Config:
+    """The indexer config for one layer, in the mode its role implies.
+
+    A layer that owns the compressed KV is Full Mode (it projects its own index keys); an
+    index source without it is Reindex Mode (it rescores the shared keys); every other
+    layer is Reuse Mode.  The candidate pool is built by the Full Mode source and searched
+    by the Reindex Mode layers after it, so those carry ``candidate_topk_blocks``.
+    """
     owns_index_k = owns_k and is_source
-    return Indexer.Config(
+    if not is_source:
+        mode = REUSE
+    elif owns_index_k:
+        mode = FULL
+    else:
+        mode = REINDEX
+    wants_pool = is_candidate_source or uses_candidates
+    return HierarchicalIndexer.Config(
+        mode=mode,
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
         compress_ratio=compress_ratio,
-        is_source=is_source,
-        owns_k=owns_index_k,
-        is_candidate_source=is_candidate_source,
-        uses_candidates=uses_candidates,
-        candidate_topk_blocks=candidate_topk_blocks,
-        candidate_block_size=candidate_block_size,
-        needs_selection_scores=needs_selection_scores,
+        candidate_topk_blocks=candidate_topk_blocks if wants_pool else 0,
+        candidate_block_size=candidate_block_size if wants_pool else 0,
         rope=dataclasses.replace(rope) if rope is not None else None,
         wq_b=(
             Linear.Config(
@@ -353,12 +360,11 @@ def _make_v41_attn_config(
     compresses = compress_ratio > 0
     aux_loss = None
     if indexer_loss_coeff is not None and compresses and any(source <= layer_id for source in index_source_layers):
-        aux_loss = IndexerKLLoss.Config(
+        aux_loss = IndexerDistillLoss.Config(
             coeff=indexer_loss_coeff,
             reduce_mesh="batch",
             softmax_scale=softmax_scale,
         )
-    needs_selection_scores = owns_indexer and aux_loss is not None
 
     # Every layer carries an indexer; only a source carries its weights and its rope.
     indexer_cfg = _make_indexer_config(
@@ -376,7 +382,6 @@ def _make_v41_attn_config(
         uses_candidates=uses_candidates,
         candidate_topk_blocks=candidate_topk_blocks,
         candidate_block_size=candidate_block_size,
-        needs_selection_scores=needs_selection_scores,
         rope=indexer_rope if owns_indexer else None,
     )
 

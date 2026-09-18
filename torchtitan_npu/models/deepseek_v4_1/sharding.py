@@ -25,6 +25,8 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig, SpmdLayout
 
+from .indexer import REUSE
+
 _dense_param_rep = dense_param_placement(tp=spmd.R)
 _attn_sink_placement = dense_param_placement(tp=spmd.S(0))
 
@@ -137,7 +139,7 @@ def set_v41_attention_sharding(attention_cfg, *, enable_sp: bool):
 
     if at.compressor.is_source:
         set_compressor_sharding(at.compressor)
-    if at.indexer.is_source:
+    if at.indexer.mode is not REUSE:
         set_indexer_sharding(at.indexer)
 
 

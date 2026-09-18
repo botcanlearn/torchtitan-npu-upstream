@@ -25,9 +25,10 @@ successor needs.  The stack has no learned output head: the model collapses the
 branches with the last block's coefficients and feeds the result straight to the output
 norm.
 
-Packed documents are described by :class:`DeepSeekV41Metadata`: the only varlen
-metadata is a document id per token, which both Attention Gym's operator (window
-branch) and the indexer (entry-axis isolation) derive their masks from.
+Packed documents are described by :class:`DeepSeekV41Metadata`: the only per-token varlen
+metadata is a document id per token, which both Attention Gym's operator (window branch)
+and the indexer (entry-axis isolation) derive their masks from, and the indexer's
+selection masks are precomputed from it once per forward.
 """
 
 from __future__ import annotations
@@ -39,11 +40,14 @@ import torch
 from torch import nn
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
+from .indexer import IndexerMode, indexer_selection_masks
 from .mhc import HcPost, HcPre
 from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings  # noqa: TC001
 from .vision_data import scatter_image_features
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from torchtitan.models.common.moe import MoE
 
     from .attention import Attention
@@ -53,17 +57,23 @@ if TYPE_CHECKING:
 class DeepSeekV41Metadata:
     """Per-forward varlen metadata, built by :meth:`V41Model.get_attention_masks`.
 
-    ``doc_ids_BL`` is the only field: a non-decreasing document index per token, built
-    from the positions resetting to 0 at every packed segment start.  The same tensor
-    serves both consumers, which is why they agree by construction:
+    ``doc_ids_BL`` is the only per-token field: a non-decreasing document index per token,
+    built from the positions resetting to 0 at every packed segment start.  The same
+    tensor serves both consumers, which is why they agree by construction:
     ``selected_attention`` applies ``doc_ids[q] == doc_ids[k]`` to its sliding-window
     branch, and the indexer applies the same equality one axis over, entry ``j``
     covering tokens ``[j * compress_ratio, (j + 1) * compress_ratio)``.  No
     ``cu_seqlens``-style ragged form is carried because the operators consume the
     per-token view directly.
+
+    ``selection_masks`` precomputes the indexer's document-isolation and causal-
+    completeness views for this forward, keyed by ``compress_ratio``.  That rule depends
+    only on ``doc_ids`` and the ratio, so every indexer looks its own up instead of
+    rebuilding it.
     """
 
     doc_ids_BL: torch.Tensor  # noqa: N815
+    selection_masks: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
 
 class DeepSeekV41TransformerBlock(TransformerBlock):
@@ -259,21 +269,35 @@ class V41Model(Decoder):
             num_flops_per_token -= 6 * len(self.layers) * first_attention.n_heads * head_dims * seq_len
             for layer in self.layers:
                 attention = layer.attention
-                inner_attention = attention.inner_attention
+                # Sliding window, always attended.
                 num_flops_per_token += (
-                    6 * attention.n_heads * (2 * attention.head_dim) * min(seq_len, inner_attention.window_size)
+                    6
+                    * attention.n_heads
+                    * (2 * attention.head_dim)
+                    * min(seq_len, attention.inner_attention.window_size)
                 )
-                if attention.compress_ratio > 1:
+                # A ratio-1 layer pools one token per entry instead of skipping the
+                # pool: it still selects from the compressed container it shares with
+                # its source, so ``> 0`` is the boundary, not ``> 1``.
+                if attention.compress_ratio > 0:
                     compressed_seq_len = seq_len // attention.compress_ratio
-                    if attention.indexer is not None:
+                    # The selected compressed entries, at most index_topk per query.
+                    num_flops_per_token += (
+                        6
+                        * attention.n_heads
+                        * (2 * attention.head_dim)
+                        * min(attention.indexer.index_topk, compressed_seq_len)
+                    )
+                    # The indexer scores every causally visible compressed entry. A
+                    # Reuse Mode layer is handed the selection its source already
+                    # made, so only Full and Reindex Mode layers pay for scoring.
+                    if attention.indexer.mode is not IndexerMode.REUSE:
                         num_flops_per_token += (
                             6
                             * attention.indexer.num_index_heads
                             * attention.indexer.index_head_dim
                             * compressed_seq_len
                         )
-                        compressed_seq_len = min(compressed_seq_len, attention.indexer.index_topk)
-                    num_flops_per_token += 6 * attention.n_heads * (2 * attention.head_dim) * compressed_seq_len
             return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
@@ -320,15 +344,22 @@ class V41Model(Decoder):
     def get_attention_masks(  # pyrefly: ignore [bad-override]
         self, positions: torch.Tensor
     ) -> DeepSeekV41Metadata:
-        """Build the only varlen metadata: a document id per token.
+        """Build the per-forward varlen metadata: a document id per token, plus the
+        indexer's selection masks.
 
-        ``selected_attention`` consumes it for the window branch, and the indexer derives
-        its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from it, so no ragged
-        ``cu_seqlens`` form is needed.
+        ``selected_attention`` consumes the document ids for the window branch, and the
+        indexer derives its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from them, so
+        no ragged ``cu_seqlens`` form is needed.  That rule is the same for every layer
+        with the same pooling ratio, so it is evaluated here once per ratio rather than
+        inside each indexer.
         """
         if positions is None:
             raise ValueError("DeepSeek V4.1 requires positions to build its attention metadata")
-        return DeepSeekV41Metadata(doc_ids_BL=torch.cumsum((positions == 0).to(torch.int32), dim=-1) - 1)
+        doc_ids_BL = torch.cumsum((positions == 0).to(torch.int32), dim=-1) - 1
+        return DeepSeekV41Metadata(
+            doc_ids_BL=doc_ids_BL,
+            selection_masks=indexer_selection_masks(doc_ids_BL, self.compress_ratios),
+        )
 
     def build_attention_masks(self, inputs, labels, extra_kwargs, *, cp_mesh=None, load_balancer_type=None):
         """Build the model-owned per-batch varlen metadata.

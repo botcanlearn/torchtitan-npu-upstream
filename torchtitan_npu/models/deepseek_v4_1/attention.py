@@ -26,7 +26,8 @@ metadata.
 The attention is also where the indexer's distillation loss is applied.  The operator
 returns the per-head log-sum-exp of the full softmax (window, selected compressed entries
 and sink) and the student logits arrive as an input; the loss itself, including the
-teacher it rebuilds from them, lives on ``IndexerKLLoss``.
+teacher it rebuilds from them, lives on ``IndexerDistillLoss``.  The loss's inputs are
+detached at that call site: the distillation must train the indexer and nothing else.
 
 The projections use the rope module with the site's un-rotated prefix width; the sparse
 core is Attention Gym's eager ``selected_attention``, which is also what the NPU ports
@@ -48,7 +49,7 @@ from torchtitan_npu.patches.torchtitan.models.common.aux_loss import LoggedAuxLo
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .compressor import Compressor
-from .indexer import Indexer
+from .indexer import HierarchicalIndexer
 
 
 class CompressedSparseInnerAttention2(Module):
@@ -113,8 +114,13 @@ class CompressedSparseInnerAttention2(Module):
             sparse_kv_B1ND = q.new_zeros(batch, 1, 0, head_dim)
             kv_indices_BLK = torch.empty(batch, num_tokens, 0, dtype=torch.long, device=q.device)
 
+        # The loss runs only while training: in eval there is nothing to distill and the
+        # extra ``lse`` the teacher needs would be dead output.  A compress layer that
+        # consumes the selection always has the teacher's other inputs -- ``cmp_k`` holds
+        # the scored entries and an index source precedes it -- which is exactly when the
+        # loss is attached.
         aux_loss = self.aux_loss
-        wants_teacher = self.training and aux_loss is not None and topk_scores is not None and cmp_k is not None
+        wants_teacher = self.training and aux_loss is not None and cmp_k is not None
         out = selected_attention(
             q.transpose(1, 2),
             local_kv_B1LD,
@@ -140,11 +146,14 @@ class CompressedSparseInnerAttention2(Module):
         attn_BLHD = out_BHLD.transpose(1, 2)
         assert aux_loss is not None
         assert aux.lse is not None
+        # The teacher's sources are constants: the distillation must train the indexer and
+        # nothing else, and ``topk_scores`` is the one live input, carrying the gradient
+        # that trains it.  ``lse`` arrives as ``[B, H, L]``; the loss reads ``[B, L, H]``.
         return aux_loss(
-            q,
-            cmp_k,
+            q.detach(),
+            cmp_k.detach(),
             topk_indices,
-            aux.lse,
+            aux.lse.transpose(1, 2).detach(),
             topk_scores,
             carrier=attn_BLHD,
         )
@@ -171,7 +180,7 @@ class Attention(BaseAttention):
         inner_attention: CompressedSparseInnerAttention2.Config  # pyrefly: ignore [bad-override]
         rope: RoPE.Config
         compressor: Compressor.Config
-        indexer: Indexer.Config
+        indexer: HierarchicalIndexer.Config
         wq_a: Linear.Config
         q_norm: RMSNorm.Config
         wq_b: Linear.Config
@@ -235,12 +244,16 @@ class Attention(BaseAttention):
         rotated, latent = self.compressor(x, positions, cmp_k)
         if self.compressor.is_source:
             cmp_k = rotated
+        # The indexer is trained by distillation alone, so it reads the trunk as
+        # constants.  The shared index keys are the exception: a Reindex Mode layer keeps
+        # the ``idx_k`` it was handed live, so its consumers go on training the key's
+        # owner.
         idx_k, topk_indices, topk_scores, candidates = self.indexer(
-            x,
-            qr,
+            x.detach(),
+            qr.detach(),
             positions,
             attention_masks,
-            latent=latent,
+            latent=latent.detach() if latent is not None else None,
             idx_k=idx_k,
             topk_indices=topk_indices,
             topk_scores=topk_scores,

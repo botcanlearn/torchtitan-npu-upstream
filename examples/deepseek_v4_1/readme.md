@@ -15,6 +15,6 @@ V4.1 固定运行 eager/reference 算子路径：AscendC 融合稀疏 attention 
 
 CI 使用 `dsv41_debugmodel_2p_ep2_fsdp2`：2 卡 FSDP2/EP2 的 reference 路径真实训练执行；它是 smoke run，末步 loss 不保证 run-to-run 复现（deterministic 与 seed 只在 `check_loss=True` 时启用），需要稳定数值时显式传 `--debug.deterministic --debug.seed=42`。V4.1 与上游 torchtitan 的该模型一致，不保留专门 loss 锚，也不做逐值比较；8 卡形状用 `run_train.sh` 手动回归。
 
-indexer 蒸馏损失由 `IndexerKLLoss` 实现（上游默认 `coeff=0.01`）：每层只要消费了 selection 就挂一个损失，教师用该层自身 attention 的完整 softmax 分母（窗口 + 压缩条目 + sink）重建，按压缩切片的边际质量加权；梯度经 `_AuxLossInjection` 注入，只训练 indexer 自身参数，训练指标为 `indexer_kl_loss/mean`。
+indexer 蒸馏损失由 `IndexerDistillLoss` 实现（上游默认 `coeff=0.01`）：每层只要消费了 selection 就挂一个损失，教师用该层自身 attention 的完整 softmax 分母（窗口 + 压缩条目 + sink）重建，按压缩切片的边际质量加权；梯度经 `_AuxLossInjection` 注入，只训练 indexer 自身参数，训练指标为 `indexer_distill_loss/mean`。
 
 入口默认关闭 checkpoint；需要保存/加载时显式配置。图像与 tokenizer 的内容保持现有测试资源；V4.1 tokenizer 环境变量为 `DSV41_TOKENIZER_PATH`，兼容旧 `DSV4_TOKENIZER_PATH` 的处理集中在配置入口。

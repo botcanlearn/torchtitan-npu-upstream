@@ -26,7 +26,7 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_INDEX_SOURCE_LAYERS,
     V41_KV_SOURCE_LAYERS,
 )
-from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerKLLoss
+from torchtitan_npu.models.deepseek_v4_1.indexer import REUSE, IndexerDistillLoss
 
 _TOKENS = torch.arange(128).remainder(32).unsqueeze(0)
 _POSITIONS = torch.arange(128).unsqueeze(0)
@@ -61,7 +61,7 @@ def _tiny_debug_model(monkeypatch):
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
     config.vocab_size = config.tok_embeddings.num_embeddings = config.lm_head.out_features = 64
     # The trainer's update_from_config fills the aux-loss denominators before the run.
-    for _, loss_cfg, _, _ in config.traverse(IndexerKLLoss.Config):
+    for _, loss_cfg, _, _ in config.traverse(IndexerDistillLoss.Config):
         loss_cfg.global_batch_size = 1
     with torch.random.fork_rng(devices=[]):
         model = build_cpu_model(config)
@@ -189,14 +189,14 @@ def test_candidate_pool_reaches_only_its_window_indexers(monkeypatch) -> None:
     """The pool built at layer 20 is the mask the later indexers actually select with."""
     model, _ = _tiny_debug_model(monkeypatch)
     indexer_module = importlib.import_module("torchtitan_npu.models.deepseek_v4_1.indexer")
-    registered_forward = indexer_module.Indexer.forward
+    registered_forward = indexer_module.HierarchicalIndexer.forward
     observed_masks = []
 
     def record_forward(self, x, qr, positions, attention_masks, **kwargs):
         observed_masks.append(kwargs.get("candidates"))
         return registered_forward(self, x, qr, positions, attention_masks, **kwargs)
 
-    monkeypatch.setattr(indexer_module.Indexer, "forward", record_forward)
+    monkeypatch.setattr(indexer_module.HierarchicalIndexer, "forward", record_forward)
     _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
     with torch.no_grad():
         model(_TOKENS, **kwargs)
@@ -226,6 +226,12 @@ def test_metadata_document_ids_restart_per_packed_document(monkeypatch) -> None:
         atol=0,
     )
 
+    # The indexer's selection masks are precomputed once per forward, one per pooling
+    # ratio, so no layer rebuilds them.
+    assert set(metadata.selection_masks) == {ratio for ratio in model.compress_ratios if ratio > 0}
+    for ratio, (visible, _, _) in metadata.selection_masks.items():
+        assert visible.shape == (1, positions.size(1), positions.size(1) // ratio)
+
 
 def test_weightless_compressor_passes_the_container_through(monkeypatch) -> None:
     """Every layer compresses; a non-source one holds no weights and returns its input."""
@@ -253,22 +259,103 @@ def test_weightless_compressor_passes_the_container_through(monkeypatch) -> None
     assert latent is None
 
 
-def test_student_logits_are_training_only(monkeypatch) -> None:
-    """Inference skips the gather-and-score half: no loss consumes it there."""
+def test_student_logits_are_published_outside_training(monkeypatch) -> None:
+    """The indexer always builds the student logits; only the loss decides to consume them.
+
+    The rescore at the selected entries is unconditional, so an eval forward under
+    ``torch.no_grad()`` returns the same contract as a training one: a window-only layer
+    publishes ``None`` and an index source publishes its logits, which its whole group
+    shares.
+    """
     model, _ = _tiny_debug_model(monkeypatch)
+    model.eval()
     blocks_in, blocks_out, _, handles = _record_module_forwards(model)
     try:
         _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
-        model.eval()
         with torch.no_grad():
             model(_TOKENS, **kwargs)
     finally:
         for handle in handles:
             handle.remove()
 
-    assert blocks_in["2"]["topk_scores"] is None
-    for output in blocks_out.values():
-        assert output[_TOPK_SCORES] is None
+    for name in ("0", "1"):
+        assert blocks_in[name]["topk_scores"] is None
+        assert blocks_out[name][_TOPK_SCORES] is None
+    source_scores = blocks_out["2"][_TOPK_SCORES]
+    assert source_scores is not None
+    # A real rescore, not an empty placeholder: at least the reachable slots are scored.
+    assert torch.isfinite(source_scores).any()
+    for name in ("3", "4", "5", "6", "7"):
+        assert blocks_in[name]["topk_scores"] is source_scores
+        assert blocks_out[name][_TOPK_SCORES] is source_scores
+
+
+def test_unreachable_selection_slots_are_marked_in_the_student_logits(monkeypatch) -> None:
+    """The indexer marks a padded selection slot with -inf, which is what the loss drops.
+
+    The distillation reads row validity from ``isfinite``, so the marking and the indices
+    have to agree on every slot of every layer's student logits.
+    """
+    model, _ = _tiny_debug_model(monkeypatch)
+    _, blocks_out, _, handles = _record_module_forwards(model)
+    try:
+        _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
+        model(_TOKENS, **kwargs)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    unreachable = 0
+    for name, output in blocks_out.items():
+        scores = output[_TOPK_SCORES]
+        if scores is None:
+            continue
+        indices = output[_TOPK]
+        assert torch.equal(torch.isfinite(scores), indices >= 0), name
+        unreachable += int((indices < 0).sum())
+    # Early queries cannot fill index_topk slots, so the marking is actually exercised.
+    assert unreachable > 0
+
+
+def test_distill_loss_gets_detached_teacher_sources(monkeypatch) -> None:
+    """Only the student logits stay live when the loss is applied.
+
+    ``inject`` seeds the aux value with ones on backward, so a teacher source that also
+    feeds the attention output -- q, cmp_k or the operator's lse -- would collect that
+    seed on top of its real gradient.  The call site detaches all three, and the indexer
+    detaches its own trunk inputs, which is what keeps the distillation training the
+    indexer and nothing else.
+    """
+    model, _ = _tiny_debug_model(monkeypatch)
+    indexer_module = importlib.import_module("torchtitan_npu.models.deepseek_v4_1.indexer")
+    registered_forward = indexer_module.IndexerDistillLoss.forward
+    seen = []
+
+    def record_forward(self, q, cmp_k, topk_indices, lse, topk_scores, *, carrier):
+        seen.append(
+            (
+                q.requires_grad,
+                cmp_k.requires_grad,
+                lse.requires_grad,
+                topk_scores.requires_grad,
+                carrier.requires_grad,
+            )
+        )
+        return registered_forward(self, q, cmp_k, topk_indices, lse, topk_scores, carrier=carrier)
+
+    monkeypatch.setattr(indexer_module.IndexerDistillLoss, "forward", record_forward)
+    _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
+    model(_TOKENS, **kwargs)
+
+    assert seen, "the debug model attaches the loss to every layer that consumes a selection"
+    for q_live, cmp_k_live, lse_live, scores_live, carrier_live in seen:
+        assert not q_live
+        assert not cmp_k_live
+        assert not lse_live
+        # The one live input carries the gradient that trains the indexer, and the
+        # carrier is the attention output the injection hands back.
+        assert scores_live
+        assert carrier_live
 
 
 def test_weightless_indexer_passes_the_selection_through(monkeypatch) -> None:
@@ -277,7 +364,9 @@ def test_weightless_indexer_passes_the_selection_through(monkeypatch) -> None:
     index_sources = set(V41_FULL_INDEX_SOURCE_LAYERS)
     for layer_id, layer in model.layers.items():
         indexer = layer.attention.indexer
-        assert indexer.is_source == (int(layer_id) in index_sources)
+        # Full Mode owns the keys, Reindex Mode only rescores them, and every other layer
+        # is Reuse Mode.
+        assert (indexer.mode is REUSE) == (int(layer_id) not in index_sources)
         if int(layer_id) not in index_sources:
             assert not list(indexer.parameters())
 
@@ -318,7 +407,7 @@ def test_reuse_layer_without_the_shared_tensor_fails_loudly(monkeypatch) -> None
     # A re-indexing layer must be handed the shared index keys; its compressed KV is
     # already in flight, so only the key is missing.
     head_dim = config.layers[24].attention.head_dim
-    with pytest.raises(AssertionError, match="re-indexing layer"):
+    with pytest.raises(AssertionError, match="Reindex Mode indexer rescores"):
         model.layers["24"].attention(
             hidden,
             _POSITIONS,

@@ -18,6 +18,7 @@ from typing import Any
 from torch.distributed.tensor import DTensor
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
+from .indexer import REUSE
 from .vision_state_dict import DeepSeekV41VisionStateDictAdapter
 
 
@@ -81,7 +82,7 @@ class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):
                     )
                 self.from_hf_map.update(compressor_map)
             indexer_cfg = layer_cfg.attention.indexer
-            if indexer_cfg.is_source:
+            if indexer_cfg.mode is not REUSE:
                 indexer_map = {
                     f"layers.{layer_id}.attn.indexer.wq_b.weight": (f"layers.{layer_id}.attention.indexer.wq_b.weight"),
                     f"layers.{layer_id}.attn.indexer.weights_proj.weight": (

@@ -15,22 +15,14 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     deepseek_v4_1_debugmodel_config,
 )
 from torchtitan_npu.models.deepseek_v4_1.attention import Attention
-from torchtitan_npu.models.deepseek_v4_1.indexer import Indexer
+from torchtitan_npu.models.deepseek_v4_1.indexer import FULL, REINDEX, REUSE, _selection_mask
 
 
 def test_index_selection_mask_is_document_isolated_and_causal() -> None:
     """Entry j is visible to query t of the same document iff group j is complete at t."""
-    indexer = Indexer.Config(
-        num_index_heads=1,
-        index_head_dim=1,
-        index_topk=1,
-        compress_ratio=2,
-        is_source=False,
-        owns_k=False,
-    ).build()
     # Two documents of four tokens each; entry j covers tokens [2j, 2j + 2).
     doc_ids_BL = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=torch.int32)
-    visible, newest, newest_valid = indexer._selection_mask(doc_ids_BL, num_cmp=4, device=torch.device("cpu"))
+    visible, newest, newest_valid = _selection_mask(doc_ids_BL, 2)
 
     expected_visible = torch.tensor(
         [
@@ -75,17 +67,19 @@ def test_v41_config_uses_specialized_attention_with_explicit_ownership() -> None
         # Every layer compresses and indexes; only a source carries the weights.
         assert layer.attention.compressor.is_source == (layer_id in kv_sources)
         assert (layer.attention.compressor.wkv is not None) == (layer_id in kv_sources)
-        assert layer.attention.indexer.is_source == (layer_id in index_sources)
-        assert layer.attention.indexer.owns_k == (layer_id in key_owners)
+        # The indexer's own mode spells out the same roles: it owns the index keys
+        # (Full), only rescores them (Reindex), or computes nothing (Reuse).
+        expected_mode = FULL if layer_id in key_owners else REINDEX if layer_id in index_sources else REUSE
+        assert layer.attention.indexer.mode is expected_mode
         assert (layer.attention.indexer.wq_b is not None) == (layer_id in index_sources)
+        assert (layer.attention.indexer.wk is not None) == (layer_id in key_owners)
 
     ratio_one_source = config.layers[20].attention
     assert ratio_one_source.compress_ratio == 1
     assert ratio_one_source.compressor.is_source
     assert ratio_one_source.compressor.wgate is None
     assert not hasattr(ratio_one_source.compressor, "use_ape")
-    assert ratio_one_source.indexer.is_source
-    assert ratio_one_source.indexer.owns_k
+    assert ratio_one_source.indexer.mode is FULL
     assert ratio_one_source.indexer.wk is not None
     assert ratio_one_source.indexer.k_norm is not None
 
@@ -97,17 +91,16 @@ def test_v41_config_uses_specialized_attention_with_explicit_ownership() -> None
     assert reindex.compressor.wgate is None
     assert reindex.compressor.norm is None
     assert reindex.compressor.rope is None
-    assert reindex.indexer.is_source
+    assert reindex.indexer.mode is REINDEX
     # A re-indexing layer scores the shared keys, so it owns no key projection.
-    assert not reindex.indexer.owns_k
     assert reindex.indexer.wk is None
     assert reindex.indexer.k_norm is None
     assert not hasattr(reindex.indexer, "compressor")
 
     reuse = config.layers[21].attention
-    assert not reuse.indexer.is_source
+    assert reuse.indexer.mode is REUSE
     assert reuse.indexer.wq_b is None
-    assert not reuse.indexer.owns_k
+    assert reuse.indexer.wk is None
 
 
 def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
@@ -119,15 +112,23 @@ def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
 
     for layer_id, layer in enumerate(config.layers):
         indexer = layer.attention.indexer
-        if not indexer.is_source:
-            continue
-        assert indexer.is_candidate_source == (layer_id == V41_CANDIDATE_SOURCE_LAYER)
-        assert indexer.uses_candidates == (layer_id in pool_consumers)
-        assert indexer.candidate_topk_blocks == 4
-        assert indexer.candidate_block_size == 8
+        if layer_id == V41_CANDIDATE_SOURCE_LAYER:
+            # The Full Mode source is the only layer that builds the pool.
+            assert indexer.mode is FULL
+            assert indexer.candidate_topk_blocks == 4
+            assert indexer.candidate_block_size == 8
+        elif layer_id in pool_consumers:
+            # A Reindex Mode layer after the source searches the shared pool.
+            assert indexer.mode is REINDEX
+            assert indexer.candidate_topk_blocks == 4
+            assert indexer.candidate_block_size == 8
+        else:
+            # Everything else scores every visible entry, or checks nothing at all.
+            assert indexer.candidate_topk_blocks == 0
+            assert indexer.candidate_block_size == 0
 
-    assert config.layers[V41_CANDIDATE_SOURCE_LAYER].attention.indexer.is_candidate_source
-    assert config.layers[24].attention.indexer.uses_candidates
+    assert config.layers[V41_CANDIDATE_SOURCE_LAYER].attention.indexer.mode is FULL
+    assert config.layers[24].attention.indexer.mode is REINDEX
 
 
 @pytest.mark.parametrize(

@@ -96,8 +96,8 @@ registry._DEBUG_WIDTHS = replace(
 )
 cfg = registry.model_registry("deepseek_v4_1_debugmodel").model
 cfg.vocab_size = cfg.tok_embeddings.num_embeddings = cfg.lm_head.out_features = 64
-from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerKLLoss
-for _, loss_cfg, _, _ in cfg.traverse(IndexerKLLoss.Config):
+from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
+for _, loss_cfg, _, _ in cfg.traverse(IndexerDistillLoss.Config):
     loss_cfg.global_batch_size = 1
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 model = build_cpu_model(cfg)
