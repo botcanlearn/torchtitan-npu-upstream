@@ -543,6 +543,24 @@ class WindowPlan:
     cu_seqlens_ori_kv: torch.Tensor
 
 
+class _GatherReceivedRows(torch.autograd.Function):
+    """Gather a CP receive buffer whose row count equals the routing length."""
+
+    @staticmethod
+    def forward(ctx, rows: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:  # pyrefly: ignore [bad-override]
+        ctx.save_for_backward(indices)
+        return rows[indices]
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):  # pyrefly: ignore [bad-override]
+        (indices,) = ctx.saved_tensors
+        # The routing plan contains one index per received row. Use that
+        # saved tensor's size instead of retaining the collective's unbacked
+        # output-size expression across selective checkpoint recomputation.
+        grad_rows = grad.new_zeros((indices.numel(), *grad.shape[1:]))
+        return grad_rows.index_add(0, indices, grad), None
+
+
 class CPTokenDispatcher(Configurable):
     """The DSV4 CP token dispatcher (the ``BaseEPTokenDispatcher`` mirror):
     a plain ``Configurable`` — not an ``nn.Module`` — with no learnable
@@ -616,7 +634,7 @@ class CPTokenDispatcher(Configurable):
             send_splits,
             recv_splits,
         )
-        aug = torch.cat([x.flatten(0, 1), rows[ex.recv_offsets]], dim=0)[plan.gather_indices]
+        aug = torch.cat([x.flatten(0, 1), _GatherReceivedRows.apply(rows, ex.recv_offsets)], dim=0)[plan.gather_indices]
         return aug.view(1, -1, *x.shape[2:])
 
     def select(self, x: torch.Tensor, plan: CompressedBlockLayout) -> torch.Tensor:
