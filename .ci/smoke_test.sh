@@ -53,19 +53,23 @@ git -C "${TORCHTITAN_DIR}" checkout --detach --quiet "${TORCHTITAN_COMMIT}"
 "${PYTHON_BIN}" -m pip install --break-system-packages --no-deps --no-cache-dir -e "${TORCHTITAN_DIR}"
 "${PYTHON_BIN}" -m pip install --break-system-packages --no-deps --no-cache-dir -e "${PROJECT_ROOT}"
 
-# The image predates wheels added to requirements.txt; install only the missing wheel,
-# never the whole file, whose torch/torch_npu pins differ from the image build.
+# The image predates wheels added to requirements.txt; install only the missing
+# wheels, never the whole file, whose torch/torch_npu pins differ from the image
+# build.
 "${PYTHON_BIN}" -m pip install --break-system-packages --no-deps --no-cache-dir attn-gym==0.0.9
-
-"${PYTHON_BIN}" -m pip install --break-system-packages --no-deps --no-cache-dir \
-    torchvision==0.30.0.dev20260918 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
-"${PYTHON_BIN}" -c 'import torchtitan, torchtitan_npu'
+# The CI image supplies torch 2.15.0.dev; the matching torchvision nightly
+# is installed with --no-deps (resolving its torch pin would fight the image).
+"${PYTHON_BIN}" -m pip install --break-system-packages --no-deps --no-cache-dir --index-url https://download.pytorch.org/whl/nightly/cpu "torchvision==0.30.0.dev20260918"
+"${PYTHON_BIN}" -c 'import torchtitan, torchtitan_npu, torchvision'
 
 export MODULE="${MODULE:-torchtitan_npu.models.deepseek_v4}"
 export CONFIG="${CONFIG:-deepseek_v4_debugmodel}"
 export NGPU
 export LOG_RANK="${LOG_RANK:-0}"
 export PYTHON_BIN
+# The Qwen3.5 launcher resolves tokenizer and cc12m-test assets from the
+# torchtitan checkout; expose the clone location to child processes.
+export TORCHTITAN_DIR
 
 SMOKE_TESTS_START="$(date +%s)"
 "${PYTHON_BIN}" -m pytest -v --tb=short tests/smoke_tests
