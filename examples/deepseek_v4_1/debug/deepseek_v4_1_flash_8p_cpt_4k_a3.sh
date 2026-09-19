@@ -39,8 +39,8 @@ STEPS=40
 
 USE_GOLDEN="${USE_GOLDEN:-0}"
 DEBUG_ARGS="
-    --debug.no-moe-force-load-balance
     --debug.print-config
+    --debug.moe-force-load-balance
 "
 
 DATALOADER_ARGS=(--dataloader.dataset "${DATASET}")
@@ -95,7 +95,7 @@ OPTIMIZER_ARGS="
     --optimizer.muon-ns-steps 10
     --optimizer.muon-adjust-lr-fn match_rms_adamw
 "
-OPTIMIZER_OVERRIDES="torchtitan_npu.override.common.optimizer.virtual"
+OPTIMIZER_OVERRIDES="torchtitan_npu.override.common.optimizer.swap_optimizer"
 
 CHECKPOINT_ARGS="
     --checkpoint.no-enable

@@ -94,3 +94,28 @@ def test_grouped_mm_forward_preserves_layout_and_output(monkeypatch):
     torch.testing.assert_close(calls[-1][2]["group_list"], offs.long())
     assert calls[-1][2]["group_type"] == 0
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("rows", [0, 1])
+def test_grouped_mm_split_k_normalizes_degenerate_swiglu_cat_rows(monkeypatch, rows):
+    """The fused SwiGLU cat returns its gate/up backward slices with the
+    packed stride; for R=0/1 PyTorch treats the transposed slice as already
+    contiguous, so the wrapper must still materialize the split-K layout."""
+    module, calls = _load_grouped_mm(monkeypatch)
+    width = 4
+    gate = torch.randn(rows, width, dtype=torch.float64, requires_grad=True)
+    up = torch.randn(rows, width, dtype=torch.float64, requires_grad=True)
+    packed = torch.cat((gate, up), dim=-1)
+    grad_gate, _ = torch.autograd.grad(packed, (gate, up), torch.randn_like(packed))
+    x = grad_gate.T
+    n_out = 3
+    weight = torch.arange(rows * n_out, dtype=torch.float64).reshape(rows, n_out) / 16
+    offs = torch.tensor([rows], dtype=torch.int32)
+
+    actual = module._(x, weight, offs)
+
+    fixed_x = calls[-1][0][0]
+    assert fixed_x.shape == x.shape
+    assert fixed_x.stride() == (1, width)
+    torch.testing.assert_close(fixed_x, x)
+    torch.testing.assert_close(actual, (x @ weight).unsqueeze(0))

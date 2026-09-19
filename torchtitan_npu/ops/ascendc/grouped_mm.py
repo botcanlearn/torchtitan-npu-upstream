@@ -18,7 +18,9 @@ def _split_k_x(x: torch.Tensor) -> torch.Tensor:
     """
     if x.stride(-2) == 1 and x.stride(-1) == x.size(-2):
         return x
-    return x.transpose(-1, -2).contiguous().transpose(-1, -2)
+    # ``clone()`` alone keeps the degenerate layouts of R=0/1 inputs
+    # (PyTorch treats them as contiguous), so request the exact format.
+    return x.transpose(-1, -2).clone(memory_format=torch.contiguous_format).transpose(-1, -2)
 
 
 @torch.library.impl("aten::_grouped_mm", "PrivateUse1")
