@@ -243,3 +243,19 @@ Flash 多机 CPT 基线默认启用 `--checkpoint.load-only`，即只负责加�
 ```
 
 当 `checkpoint.folder` 已存在有效的 `step-*` checkpoint 时，TorchTitan 会优先 resume，该情况下 `checkpoint.initial-load-path` 不作为冷启动来源；要从 `initial-load-path` 冷启动，请使用新的或空的 `checkpoint.folder`。
+
+## LoRA 微调
+
+完整 Flash 模型的 BF16 LoRA 训练复用 A3 4K 公共入口，节点、数据和基座路径使用上面的环境变量：
+
+```sh
+NODE_IPS="${NODE_IPS}" \
+bash examples/deepseek_v4/deepseek_v4_flash_lora_4k_a3.sh \
+  --optimizer.name AdamW \
+  --training.steps 500 \
+  --checkpoint.interval 100
+```
+
+该入口使用 `deepseek_v4_flash_lora` recipe（dense/expert rank 16、alpha 32），并开启 checkpoint 保存。当前 LoRA 训练仅支持 AdamW；公共 A3 launcher 默认使用 Muon，因此运行时须显式传入 `--optimizer.name AdamW`。周期 checkpoint 用于续跑，最后一步导出 PEFT adapter。模型规模、并行配置和其余默认参数继承 A3 公共入口，命令末尾的 CLI 参数仍可覆盖默认值。LoRA 暂不支持量化基座。
+
+配置、部分参数训练、native checkpoint 恢复和 PEFT 导出见 [LoRA 功能指南](../../docs/feature_guides/deepseek_v4_lora.md)。

@@ -70,6 +70,8 @@ _HC_PARAM_INIT = {
 
 def _register_step_pre_hooks(optimizers, model_parts, parallel_dims) -> None:
     """Register MoE balancing and auxiliary-loss step hooks."""
+    if any(getattr(model, "lora_config", None) is not None for model in model_parts):
+        return
     register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
 
 

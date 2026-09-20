@@ -181,6 +181,7 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
         super().__init__(config)
         cfg = config
 
+        self.lora_config = getattr(config, "lora", None)
         self.compress_ratios = tuple(cfg.compress_ratios) + tuple(
             layer.attention.compress_ratio for layer in cfg.mtp_layers
         )

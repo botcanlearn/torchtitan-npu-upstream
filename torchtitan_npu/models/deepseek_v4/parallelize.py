@@ -97,7 +97,7 @@ def parallelize_deepseek_v4(
 ):
     """Apply DSV4 parallelism with per-parameter FP32 SmoE policies."""
     with policy_overrides(_dsv4_fp32_overrides(model, training)):
-        return parallelize_deepseekv3(
+        parallelized_model = parallelize_deepseekv3(
             model,
             parallel_dims=parallel_dims,
             training=training,
@@ -106,6 +106,11 @@ def parallelize_deepseek_v4(
             ac_config=ac_config,
             dump_folder=dump_folder,
         )
+    if getattr(parallelized_model, "lora_config", None) is not None:
+        for name, parameter in parallelized_model.named_parameters():
+            if "lora_" not in name:
+                parameter.requires_grad_(False)
+    return parallelized_model
 
 
 def annotate_deepseek_v4(model: GraphTrainerDeepSeekV4Model) -> None:

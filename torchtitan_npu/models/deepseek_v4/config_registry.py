@@ -30,6 +30,7 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
@@ -48,6 +49,7 @@ from . import (
     memory_policy,  # noqa: F401
     model_registry,
 )
+from .lora import DeepSeekV4LoRAConverter
 from .model import DeepSeekV4Model, GraphTrainerDeepSeekV4Model
 from .mtp import MTPChunkedLossWrapper
 from .parallelize import parallelize_graph_trainer_deepseek_v4
@@ -234,8 +236,9 @@ def _make_trainer_config(
     local_batch_size: int,
     seq_len: int,
     num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Trainer.Config:
-    model_spec = model_registry(flavor, num_mtp_layers=num_mtp_layers)
+    model_spec = model_registry(flavor, num_mtp_layers=num_mtp_layers, converters=converters)
     if num_mtp_layers > 0:
         loss = MTPChunkedLossWrapper.Config(
             mtp_scale=0.3,
@@ -249,7 +252,7 @@ def _make_trainer_config(
                 global_vocab_size=decoder_vocab_size(model_spec),
             ),
         )
-    return TrainerEx.Config(
+    config = TrainerEx.Config(
         loss=loss,
         profiler=CANNProfiler.Config(
             enable_profiling=False,
@@ -283,56 +286,88 @@ def _make_trainer_config(
             interval=100,
         ),
     )
+    if getattr(model_spec.model, "lora", None) is not None:
+        from .peft import DeepSeekV4PEFTCheckpointManager
+
+        config.checkpoint = DeepSeekV4PEFTCheckpointManager.Config(
+            **{item.name: getattr(config.checkpoint, item.name) for item in fields(config.checkpoint) if item.init},
+        )
+    return config
 
 
-def deepseek_v4_debugmodel(*, num_mtp_layers: int = 0) -> Trainer.Config:
+def deepseek_v4_debugmodel(
+    *,
+    num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> Trainer.Config:
     return _make_trainer_config(
         "debugmodel",
         local_batch_size=1,
         seq_len=2048,
         num_mtp_layers=num_mtp_layers,
+        converters=converters,
     )
 
 
-def deepseek_v4_flash(*, num_mtp_layers: int = 0) -> Trainer.Config:
+def deepseek_v4_flash(
+    *,
+    num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_flash",
         local_batch_size=1,
         seq_len=4096,
         num_mtp_layers=num_mtp_layers,
+        converters=converters,
+    )
+
+
+def deepseek_v4_flash_lora() -> Trainer.Config:
+    return deepseek_v4_flash(
+        converters=[DeepSeekV4LoRAConverter.Config(rank=16, alpha=32, rank_experts=16)],
     )
 
 
 def deepseek_v4_flash_43layers_16experts(
     *,
     num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_flash_43layers_16experts",
         local_batch_size=1,
         seq_len=4096,
         num_mtp_layers=num_mtp_layers,
+        converters=converters,
     )
 
 
-def deepseek_v4_pro(*, num_mtp_layers: int = 0) -> Trainer.Config:
+def deepseek_v4_pro(
+    *,
+    num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_pro",
         local_batch_size=1,
         seq_len=4096,
         num_mtp_layers=num_mtp_layers,
+        converters=converters,
     )
 
 
 def deepseek_v4_pro_61layers_32experts(
     *,
     num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Trainer.Config:
     return _make_trainer_config(
         "deepseek_v4_pro_61layers_32experts",
         local_batch_size=1,
         seq_len=4096,
         num_mtp_layers=num_mtp_layers,
+        converters=converters,
     )
 
 
