@@ -27,4 +27,11 @@ if [[ "${USE_GOLDEN:-0}" != "1" ]]; then
                                            torchtitan_npu.override.deepseek_v4_1.mhc.asc_sinkhorn}"
 fi
 
-exec bash "${SCRIPT_DIR}/deepseek_v4_1_flash_8p_cpt_4k_a3.sh" "$@"
+QUANTIZATION_ARGS=(
+    --extension.quantization.enable-quantized-training
+    --extension.quantization.recipe all_block_fp8
+)
+
+exec bash "${SCRIPT_DIR}/deepseek_v4_1_flash_8p_cpt_4k_a3.sh" \
+    "${QUANTIZATION_ARGS[@]}" \
+    "$@" \

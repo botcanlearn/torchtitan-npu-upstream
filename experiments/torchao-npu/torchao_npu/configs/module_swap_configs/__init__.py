@@ -5,9 +5,10 @@
 
 """Concrete module-swap quantization configs."""
 
-__all__ = ["QuantLightningIndexerConfig", "quant_mode_for_config"]
+__all__ = ["QuantLightningIndexerConfig", "QuantV41SparseAttentionConfig", "quant_mode_for_config"]
 
 from torchao_npu.configs.module_swap_configs.quant_lightning_indexer import (
     QuantLightningIndexerConfig,
     quant_mode_for_config,
 )
+from torchao_npu.configs.module_swap_configs.quant_v41_sparse_attention import QuantV41SparseAttentionConfig

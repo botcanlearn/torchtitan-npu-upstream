@@ -109,6 +109,7 @@ class QuantizationExtensionConfig:
     """
 
     enable_quantized_training: bool = False
+    enable_sparse_attention_quantization: bool = False
     recipe: QuantizationRecipe = "mix"
     enable_mxfp4_qat: bool = False
     li_quantization: LIQuantization | None = None

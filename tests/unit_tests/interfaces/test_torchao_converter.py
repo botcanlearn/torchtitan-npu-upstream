@@ -6,6 +6,7 @@
 """CPU coverage for converter selection and weight-wrapper dispatch to NPU ops."""
 
 import importlib
+import logging
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
@@ -139,6 +140,106 @@ def test_quantization_converter_preserves_li_metadata_replacement(converter_modu
     assert converted.index_topk == 512
     assert converted.li_kernel_config == source.li_kernel_config
     assert not quantization_calls
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expect_sparse_attention_converter"),
+    [("v4", False), ("v41", True)],
+)
+def test_recipe_converters_select_filters_for_model_type(
+    converter_module, model_type, expect_sparse_attention_converter
+):
+    converters = converter_module._recipe_converters(
+        "mix",
+        model_type=model_type,
+        enable_sparse_attention_quantization=True,
+        enable_mxfp4_qat=False,
+        dst_type_max=0.0,
+        fsdp_prequantize=False,
+        model_compile_enabled=False,
+    )
+
+    sparse_attention_converters = [
+        converter
+        for converter in converters
+        if converter.filter_fn is converter_module._DSV41_CONFIG_FILTERS["sparse_attention"]
+    ]
+    assert bool(sparse_attention_converters) is expect_sparse_attention_converter
+
+
+def test_recipe_converters_warn_when_sparse_attention_filter_is_unavailable(converter_module, caplog):
+    with caplog.at_level(logging.WARNING):
+        converters = converter_module._recipe_converters(
+            "mix",
+            model_type="v4",
+            enable_sparse_attention_quantization=True,
+            enable_mxfp4_qat=False,
+            dst_type_max=0.0,
+            fsdp_prequantize=False,
+            model_compile_enabled=False,
+        )
+
+    assert "model type v4 has no sparse_attention filter" in caplog.text
+    assert not any(
+        converter.filter_fn is converter_module._DSV41_CONFIG_FILTERS["sparse_attention"] for converter in converters
+    )
+
+
+def test_model_type_rejects_unknown_model_spec_name(converter_module):
+    with pytest.raises(ValueError, match=r"supports DeepSeek V4 and V4\.1 model specs"):
+        converter_module._model_type_for_spec(SimpleNamespace(name="deepseek_v3", model=object()))
+
+
+def test_model_type_comes_from_model_spec_name(converter_module):
+    assert converter_module._model_type_for_spec(SimpleNamespace(name="deepseek_v4", model=object())) == "v4"
+    assert converter_module._model_type_for_spec(SimpleNamespace(name="deepseek_v4_1", model=object())) == "v41"
+
+
+def test_recipe_converters_reject_unknown_model_type(converter_module):
+    with pytest.raises(ValueError, match="unsupported DeepSeek model type"):
+        converter_module._recipe_converters(
+            "mix",
+            model_type="v3",  # type: ignore[arg-type]
+            enable_mxfp4_qat=False,
+            dst_type_max=0.0,
+            fsdp_prequantize=False,
+            model_compile_enabled=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected_model_type"),
+    [("deepseek_v4", "v4"), ("deepseek_v4_1", "v41")],
+)
+def test_apply_quantization_converter_passes_model_type(converter_module, monkeypatch, model_name, expected_model_type):
+    @dataclass(frozen=True)
+    class FakeModelSpec:
+        name: str
+        model: object
+
+    quantization_config = SimpleNamespace(
+        enable_quantized_training=True,
+        enable_sparse_attention_quantization=False,
+        recipe="mix",
+        enable_mxfp4_qat=False,
+        dst_type_max=0.0,
+        fsdp_prequantize=False,
+        li_quantization=None,
+        validate=lambda: None,
+    )
+    calls = []
+    monkeypatch.setattr(converter_module, "_recipe_converters", lambda *args, **kwargs: calls.append(kwargs) or [])
+    monkeypatch.setattr(converter_module, "validate_converter_order", lambda converters: None)
+
+    model_spec = FakeModelSpec(name=model_name, model=object())
+    converted = converter_module.apply_quantization_converter(
+        model_spec,
+        quantization_config,
+        model_compile_enabled=False,
+    )
+
+    assert converted is not model_spec
+    assert calls[0]["model_type"] == expected_model_type
 
 
 def test_parameter_quantization_skips_li_metadata(converter_module, quantization_calls):

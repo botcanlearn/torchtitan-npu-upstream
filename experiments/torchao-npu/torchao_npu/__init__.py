@@ -3,12 +3,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchao_npu.configs import ModuleSwapConfig, ParamSwapConfig, QuantLightningIndexerConfig
+from torchao_npu.configs import (
+    ModuleSwapConfig,
+    ParamSwapConfig,
+    QuantLightningIndexerConfig,
+    QuantV41SparseAttentionConfig,
+)
 
 __all__ = [
     "ModuleSwapConfig",
     "ParamSwapConfig",
     "QuantLightningIndexerConfig",
+    "QuantV41SparseAttentionConfig",
 ]
 
 

@@ -20,7 +20,7 @@ wrappers and NPU kernels continue to come from the separately installed
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Annotated, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 
 import torch
 import tyro
@@ -46,6 +46,7 @@ from torchtitan_npu.models.common.metadata_extension import (
     LightningIndexerMetadata,
 )
 from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
+from torchtitan_npu.models.deepseek_v4_1.attention import CompressedSparseInnerAttention2
 from torchtitan_npu.override.common.swiglu_group.ascendc import AscGroupedExperts, _ensure_cann_ops_loaded
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
@@ -110,6 +111,7 @@ _DEFAULT_TARGET_CONFIG_TYPES = (
     GroupedExperts.Config,
     LightningIndexer.Config,
     LightningIndexerMetadata.Config,
+    CompressedSparseInnerAttention2.Config,
 )
 
 
@@ -269,8 +271,37 @@ _DSV4_CONFIG_FILTERS = {
     "lightning_indexer_metadata": match_config_fqn_suffix(".lightning_indexer_metadata"),
 }
 
+_DSV41_CONFIG_FILTERS = {
+    # V4.1 keeps the V4 attention and MoE config-tree suffixes for the dense
+    # parameter quantizers; only the sparse core has a new module boundary.
+    "dense": _DSV4_CONFIG_FILTERS["dense"],
+    "routed_expert": _DSV4_CONFIG_FILTERS["routed_expert"],
+    "sparse_attention": match_config_fqn_suffix(".attention.inner_attention"),
+}
+
+_ModelType = Literal["v4", "v41"]
+_CONFIG_FILTERS_BY_MODEL_TYPE: dict[_ModelType, dict[str, ConfigFilterFn]] = {
+    "v4": _DSV4_CONFIG_FILTERS,
+    "v41": _DSV41_CONFIG_FILTERS,
+}
+_MODEL_TYPE_BY_MODEL_NAME: dict[str, _ModelType] = {
+    "deepseek_v4": "v4",
+    "deepseek_v4_1": "v41",
+}
+
 
 _SUPPORTED_RECIPES = ("all_mxfp8", "mix", "all_block_fp8")
+
+
+def _model_type_for_spec(model_spec: ModelSpec) -> _ModelType:
+    """Return the quantization family recorded by the model registry."""
+    try:
+        return _MODEL_TYPE_BY_MODEL_NAME[model_spec.name]
+    except KeyError as exc:
+        raise ValueError(
+            "TorchAO-NPU quantization supports DeepSeek V4 and V4.1 model specs, "
+            f"got {getattr(model_spec, 'name', type(model_spec).__qualname__)!r}"
+        ) from exc
 
 
 def _prepare_quant_lightning_indexer_inputs(
@@ -433,6 +464,8 @@ def _quantization_converter(
 def _recipe_converters(
     recipe: str,
     *,
+    model_type: _ModelType,
+    enable_sparse_attention_quantization: bool = False,
     enable_mxfp4_qat: bool,
     dst_type_max: float,
     fsdp_prequantize: bool,
@@ -441,13 +474,17 @@ def _recipe_converters(
     li_kernel_config: LightningIndexerKernelConfig | None = None,
 ) -> list[QuantizationConverter.Config]:
     converters: list[QuantizationConverter.Config]
-    dense_filter = _DSV4_CONFIG_FILTERS["dense"]
+    try:
+        filters = _CONFIG_FILTERS_BY_MODEL_TYPE[model_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported DeepSeek model type {model_type!r}; expected 'v4' or 'v41'") from exc
+    dense_filter = filters["dense"]
 
     if recipe == "all_mxfp8":
         converters = [
             _quantization_converter(
                 _mxfp8_param_swap(),
-                any_config_filter(dense_filter, _DSV4_CONFIG_FILTERS["routed_expert"]),
+                any_config_filter(dense_filter, filters["routed_expert"]),
                 model_compile_enabled=model_compile_enabled,
             )
         ]
@@ -473,7 +510,7 @@ def _recipe_converters(
             ),
             _quantization_converter(
                 routed_config,
-                _DSV4_CONFIG_FILTERS["routed_expert"],
+                filters["routed_expert"],
                 model_compile_enabled=model_compile_enabled,
             ),
         ]
@@ -487,19 +524,36 @@ def _recipe_converters(
         converters.append(
             _quantization_converter(
                 li_config,
-                _DSV4_CONFIG_FILTERS["lightning_indexer"],
+                filters["lightning_indexer"],
                 model_compile_enabled=model_compile_enabled,
             )
         )
         converters.append(
             _quantization_converter(
                 None,
-                _DSV4_CONFIG_FILTERS["lightning_indexer_metadata"],
+                filters["lightning_indexer_metadata"],
                 model_compile_enabled=model_compile_enabled,
                 replacement_config_type=_QuantizedLightningIndexerMetadataAdapter.Config,
                 replacement_kwargs={"quant_mode": li_config.quant_mode},
             )
         )
+    if enable_sparse_attention_quantization:
+        if "sparse_attention" in filters:
+            from torchao_npu.configs import QuantV41SparseAttentionConfig
+
+            converters.append(
+                _quantization_converter(
+                    QuantV41SparseAttentionConfig(),
+                    filters["sparse_attention"],
+                    model_compile_enabled=model_compile_enabled,
+                )
+            )
+        else:
+            logger.warning(
+                "Sparse attention quantization is enabled, but model type %s has no "
+                "sparse_attention filter; skipping the sparse attention replacement.",
+                model_type,
+            )
     return converters
 
 
@@ -546,11 +600,16 @@ def apply_quantization_converter(
         return model_spec
     quantization_config.validate()
 
+    model_config = model_spec.model
+    model_type = _model_type_for_spec(model_spec)
+
     li_kernel_config = (
         _get_li_kernel_config(model_spec.model) if quantization_config.li_quantization is not None else None
     )
     converters = _recipe_converters(
         quantization_config.recipe,
+        model_type=model_type,
+        enable_sparse_attention_quantization=quantization_config.enable_sparse_attention_quantization,
         enable_mxfp4_qat=quantization_config.enable_mxfp4_qat,
         dst_type_max=quantization_config.dst_type_max,
         fsdp_prequantize=quantization_config.fsdp_prequantize,
@@ -560,13 +619,14 @@ def apply_quantization_converter(
     )
     validate_converter_order(converters)
 
-    model_config = model_spec.model
     for converter_config in converters:
         model_config = converter_config.build().convert(model_config)
 
     logger.info(
-        "Applied TorchAO-NPU recipe=%s, mxfp4_qat=%s, li_quantization=%s, dst_type_max=%s, fsdp_prequantize=%s",
+        "Applied TorchAO-NPU recipe=%s, sparse_attention_quantization=%s, mxfp4_qat=%s, "
+        "li_quantization=%s, dst_type_max=%s, fsdp_prequantize=%s",
         quantization_config.recipe,
+        quantization_config.enable_sparse_attention_quantization,
         quantization_config.enable_mxfp4_qat,
         quantization_config.li_quantization,
         quantization_config.dst_type_max,
