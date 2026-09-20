@@ -47,6 +47,9 @@ class TrainerEx(Trainer):
             # ``slots=True`` dataclasses are recreated by the decorator, so a
             # zero-argument ``super()`` can retain the pre-decoration class cell.
             Trainer.Config.__post_init__(self)
+            self._post_init_optimizer()
+
+        def _post_init_optimizer(self) -> None:
             self.optimizer.materialize()
             if self.optimizer.name == "Muon" and (
                 self.parallelism.tensor_parallel_degree > 1 or self.parallelism.pipeline_parallel_degree > 1

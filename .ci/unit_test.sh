@@ -52,6 +52,11 @@ fi
 git -C "${TORCHTITAN_DIR}" fetch --depth 1 origin "${TORCHTITAN_COMMIT}"
 git -C "${TORCHTITAN_DIR}" checkout --detach --quiet "${TORCHTITAN_COMMIT}"
 pip install --no-deps -e "${TORCHTITAN_DIR}"
+pip install \
+    --find-links https://cann-ai.obs.cn-north-4.myhuaweicloud.com/torchtitan-npu/simple/torchft/index.html \
+    "torch==$(python -c 'import torch; print(torch.__version__.split("+")[0])')" \
+    'torchft==0.2.0'
+pip install --no-deps -e .
 
 # The image predates wheels added to requirements.txt.  Install only those wheels:
 # the image pins a *different* torch/torch_npu build than requirements.txt does, so

@@ -17,6 +17,11 @@ multimodal = [
     "torchvision==0.29.0.dev20260720+cpu",
 ]
 
+[project.optional-dependencies]
+torchft = [
+    "torchft==0.2.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["torchtitan_npu*"]
 exclude = ["tests*", "CI*", "third_party*"]
@@ -38,6 +43,7 @@ ignore-missing-imports = [
     "torchao.*",
     "torchao_npu.*",
     "torchft",
+    "torchft.*",
     "cann_ops_transformer",
     "cann_ops_transformer.*",
     "tile_kernels",
