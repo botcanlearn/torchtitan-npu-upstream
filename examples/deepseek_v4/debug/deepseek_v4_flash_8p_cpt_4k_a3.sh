@@ -36,7 +36,7 @@ SPMD_BACKEND="spmd_types"
 
 # Training
 SEQ_LEN=4096
-MBS=1
+MBS="${MBS:-1}"
 GBS=64
 STEPS=100
 
