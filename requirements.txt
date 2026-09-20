@@ -17,3 +17,5 @@ ninja
 triton-ascend==3.2.1
 scipy==1.13.1
 safetensors==0.8.0
+# Engram builds its token map at runtime; pin the normalizer semantics.
+tokenizers==0.22.2

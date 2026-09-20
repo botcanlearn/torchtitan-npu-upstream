@@ -19,6 +19,7 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import derive, override
 from torchtitan.distributed.flex_shard.dist_muon import DistMuon
 
+from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.novaswap import swap_api
 
 _ADAMW_SWAP_BUCKET_TIMES = 16
@@ -272,10 +273,10 @@ def _make_swap(t: torch.Tensor) -> torch.Tensor:
     return _replace_local_tensor(t, out)
 
 
-def _swap_state_init_hook(optimizer, args, kwargs):
+def _initialize_swap_state(optimizer, *, only_with_grad=True):
     for group in optimizer.param_groups:
         for p in group["params"]:
-            if p.grad is None:
+            if only_with_grad and p.grad is None:
                 continue
             state = optimizer.state[p]
             if len(state) == 0:
@@ -286,6 +287,12 @@ def _swap_state_init_hook(optimizer, args, kwargs):
                 )
                 state["exp_avg"] = _make_swap(p).zero_()
                 state["exp_avg_sq"] = _make_swap(p).zero_()
+                if group.get("amsgrad"):
+                    state["max_exp_avg_sq"] = _make_swap(p).zero_()
+
+
+def _swap_state_init_hook(optimizer, args, kwargs):
+    _initialize_swap_state(optimizer)
 
 
 class VirtualOptimizersContainer(OptimizersContainer):
@@ -295,8 +302,42 @@ class VirtualOptimizersContainer(OptimizersContainer):
 
     def __init__(self, config: Config, *, model_parts):
         super().__init__(config=config, model_parts=model_parts)
-        for opt in self.optimizers:
+        for opt in self._swap_optimizers():
             opt.register_step_pre_hook(_swap_state_init_hook)
+
+    def _swap_optimizers(self):
+        return (opt for opt in self.optimizers if isinstance(opt, (torch.optim.Adam, torch.optim.AdamW)))
+
+    def state_dict(self):
+        # DCP also needs state for parameters that were unused in training.
+        for opt in self._swap_optimizers():
+            _initialize_swap_state(opt, only_with_grad=False)
+        return super().state_dict()
+
+    def load_state_dict(self, state_dict):
+        # Optimizer.load_state_dict may replace the moment tensors. Preserve
+        # swap-backed destinations even when loading ordinary checkpoint tensors.
+        destinations = []
+        for opt in self._swap_optimizers():
+            _initialize_swap_state(opt, only_with_grad=False)
+            for group in opt.param_groups:
+                for param in group["params"]:
+                    for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                        if key in opt.state[param]:
+                            destinations.append((opt, param, key, opt.state[param][key]))
+        super().load_state_dict(state_dict)
+        with torch.no_grad():
+            for opt, param, key, destination in destinations:
+                destination.copy_(opt.state[param][key])
+                opt.state[param][key] = destination
+
+
+class VirtualHostSparseOptimizersContainer(VirtualOptimizersContainer, HostSparseOptimizersContainer):
+    """Swap dense Adam states while retaining Host sparse-table lifecycle hooks."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HostSparseOptimizersContainer.Config, VirtualOptimizersContainer.Config):
+        pass
 
 
 @override(
@@ -305,7 +346,9 @@ class VirtualOptimizersContainer(OptimizersContainer):
 )
 def virtual(
     cfg: OptimizersContainer.Config,
-) -> VirtualOptimizersContainer.Config:
+) -> VirtualOptimizersContainer.Config | VirtualHostSparseOptimizersContainer.Config:
+    if isinstance(cfg, HostSparseOptimizersContainer.Config):
+        return derive(cfg, VirtualHostSparseOptimizersContainer.Config)
     return derive(cfg, VirtualOptimizersContainer.Config)
 
 
@@ -446,11 +489,25 @@ class OptimizerStateSwapContainer(OptimizersContainer):
         raise RuntimeError("Optimizer state swap v1 does not support optimizer checkpoint load")
 
 
+# Both branches inherit the same OptimizersContainer.step overloads; Python's
+# MRO selects HostSparse's implementation before their common base.
+class HostSparseOptimizerStateSwapContainer(  # pyrefly: ignore [inconsistent-inheritance]
+    OptimizerStateSwapContainer, HostSparseOptimizersContainer
+):
+    """Apply the upstream dense-state swap while retaining Host sparse updates."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HostSparseOptimizersContainer.Config, OptimizerStateSwapContainer.Config):
+        pass
+
+
 @override(
     target=OptimizersContainer.Config,
     description="Offload DistMuon and AdamW state by globally unique names",
 )
 def swap_optimizer(
     cfg: OptimizersContainer.Config,
-) -> OptimizerStateSwapContainer.Config:
+) -> OptimizerStateSwapContainer.Config | HostSparseOptimizerStateSwapContainer.Config:
+    if isinstance(cfg, HostSparseOptimizersContainer.Config):
+        return derive(cfg, HostSparseOptimizerStateSwapContainer.Config)
     return derive(cfg, OptimizerStateSwapContainer.Config)

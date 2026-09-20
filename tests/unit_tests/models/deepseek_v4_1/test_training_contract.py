@@ -7,16 +7,17 @@ import copy
 import importlib
 from dataclasses import replace
 
+import pytest
 import torch
 from torch.utils.checkpoint import DefaultDeviceType
 from torchtitan.distributed.activation_checkpoint import FullAC
 
+from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 from torchtitan_npu.models.deepseek_v4_1.vision_data import build_image_token_layout
 
-from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 
-
-def test_full_ac_preserves_image_routing(monkeypatch):
+@pytest.mark.parametrize("with_engram", [False, True], ids=["baseline", "engram"])
+def test_full_ac_preserves_image_routing(monkeypatch, with_engram):
     # CPU-only checkpoint inputs otherwise inherit the registered NPU backend.
     monkeypatch.setattr(DefaultDeviceType, "_default_device_type", "cpu")
     registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
@@ -41,6 +42,12 @@ def test_full_ac_preserves_image_routing(monkeypatch):
         ),
     )
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
+    if not with_engram:
+        for layer in config.layers:
+            layer.engram = None
+    for layer in config.layers:
+        if layer.engram is not None:
+            layer.engram.table.vocab_size = 64
     config.vocab_size = 64
     # The trainer's update_from_config fills the aux-loss denominators before the run.
     from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
@@ -49,8 +56,6 @@ def test_full_ac_preserves_image_routing(monkeypatch):
         loss_cfg.global_batch_size = 1
     config.tok_embeddings.num_embeddings = 64
     config.lm_head.out_features = 64
-    # The golden reference arithmetic is the native attention path; no
-    # class-swap overrides are needed for the CPU contract test.
     with torch.random.fork_rng(devices=[]):
         model = build_cpu_model(config)
     with torch.no_grad():
@@ -65,11 +70,11 @@ def test_full_ac_preserves_image_routing(monkeypatch):
     # Real image protocol without depending on the synthetic RNG fallback.
     ids, types, feature_ids = build_image_token_layout([(3, 3)], span_start=2, vocab_size=64)
     tokens = torch.arange(128).remainder(32).unsqueeze(0)
-    tokens[:, 2:ids.numel()] = ids[2:]
+    tokens[:, 2 : ids.numel()] = ids[2:]
     token_types = torch.full_like(tokens, -1)
-    token_types[:, :types.numel()] = types
+    token_types[:, : types.numel()] = types
     indices = torch.full_like(tokens, -1)
-    indices[:, :feature_ids.numel()] = feature_ids
+    indices[:, : feature_ids.numel()] = feature_ids
     inputs = dict(
         positions=torch.arange(128).unsqueeze(0),
         pixel_values=torch.linspace(-1, 1, 9 * 588).reshape(1, 9, 588),
@@ -84,6 +89,18 @@ def test_full_ac_preserves_image_routing(monkeypatch):
         mask = kwargs.get("image_mask")
         route_calls.append((None if mask is None else mask.clone(), output[1].detach().clone()))
 
+    engram_calls = []
+    engram_handles = []
+    if with_engram:
+
+        def capture_engram(module, args, kwargs, output):
+            torch.testing.assert_close(kwargs["image_mask"], expected_mask)
+            torch.testing.assert_close(output[expected_mask], args[0][expected_mask], rtol=0, atol=0)
+            engram_calls.append(module)
+
+        for layer in checkpointed.layers.values():
+            if layer.engram is not None:
+                engram_handles.append(layer.engram.register_forward_hook(capture_engram, with_kwargs=True))
     handle = checkpointed.layers["0"].moe.router.register_forward_hook(capture_route, with_kwargs=True)
     try:
         _, _, kwargs = model.build_attention_masks(tokens, tokens, dict(inputs))
@@ -100,17 +117,26 @@ def test_full_ac_preserves_image_routing(monkeypatch):
         actual.square().mean().backward()
         for mask, _ in route_calls:
             torch.testing.assert_close(mask, expected_mask)
-        for expected_parameter, actual_parameter in zip(
-            model.parameters(), checkpointed.parameters(), strict=True
-        ):
+        for expected_parameter, actual_parameter in zip(model.parameters(), checkpointed.parameters(), strict=True):
             assert (expected_parameter.grad is None) == (actual_parameter.grad is None)
             if expected_parameter.grad is not None:
-                torch.testing.assert_close(
-                    actual_parameter.grad, expected_parameter.grad, rtol=1e-5, atol=1e-7
-                )
+                torch.testing.assert_close(actual_parameter.grad, expected_parameter.grad, rtol=1e-5, atol=1e-7)
+        if with_engram:
+            assert engram_calls
+            for index in ("1", "14"):
+                table = model.layers[index].engram.table
+                actual_table = checkpointed.layers[index].engram.table
+                expected_grad = table.pending_sparse_grad().to_dense()
+                actual_grad = actual_table.pending_sparse_grad().to_dense()
+                assert torch.count_nonzero(expected_grad) > 0
+                torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-5, atol=1e-7)
+            for hook in engram_handles:
+                hook.remove()
         route_calls.clear()
         _, _, kwargs = checkpointed.build_attention_masks(tokens, tokens, {"positions": inputs["positions"]})
         checkpointed(tokens, **kwargs)
         assert route_calls[0][0] is None
     finally:
         handle.remove()
+        for hook in engram_handles:
+            hook.remove()

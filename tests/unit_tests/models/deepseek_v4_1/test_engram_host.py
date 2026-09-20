@@ -1,0 +1,142 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Host Engram sparse updates, clipping and checkpoint restoration."""
+
+import copy
+
+import pytest
+import torch
+from torch.utils.checkpoint import checkpoint, DefaultDeviceType
+
+from torchtitan_npu.extensions.components import optimizer as host_mod
+from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+
+pytestmark = pytest.mark.cpu
+_DIM = 128
+
+
+def table_config():
+    return HostEngramTable.Config(
+        vocab_size=16,
+        layer_id=0,
+        ngram_orders=(2,),
+        num_heads=1,
+        head_vocab_sizes=(11,),
+        embedding_dim=4,
+        num_embeddings=12,
+        require_token_id_map=False,
+        pin_memory=False,
+    )
+
+
+@pytest.mark.parametrize("recompute", [False, True], ids=["eager", "full_ac"])
+def test_local_sparse_training_and_checkpoint_match_embedding(monkeypatch, recompute):
+    # CPU-only inputs otherwise inherit the registered NPU checkpoint backend.
+    monkeypatch.setattr(DefaultDeviceType, "_default_device_type", "cpu")
+    table = table_config().build()
+    with torch.no_grad():
+        table.weight.copy_(torch.arange(48).view(12, 4) / 16)
+    reference = torch.nn.Embedding.from_pretrained(table.weight.detach().clone(), freeze=False, sparse=True)
+    optimizer = torch.optim.SparseAdam([table.weight], lr=0.05)
+    ref_optimizer = torch.optim.SparseAdam(reference.parameters(), lr=0.05)
+    for step, rows in enumerate(([0, 7, 7, 11], [1, 7, 1], [0, 7, 2])):
+        ids = torch.tensor(rows)
+        output = (
+            checkpoint(table._distributed_lookup, ids, use_reentrant=False)
+            if recompute
+            else table._distributed_lookup(ids)
+        )
+        expected = reference(ids)
+        torch.testing.assert_close(output, expected, rtol=0, atol=0)
+        grad = torch.arange(output.numel()).reshape_as(output).float() + 1
+        output.backward(grad)
+        expected.backward(grad)
+        pending = table.pending_sparse_grad()
+        assert table.weight.grad is None and pending.is_sparse
+        torch.testing.assert_close(pending.to_dense(), reference.weight.grad.to_dense(), rtol=0, atol=0)
+        table.prepare_sparse_optimizer_step()
+        optimizer.step()
+        ref_optimizer.step()
+        torch.testing.assert_close(table.weight, reference.weight, rtol=0, atol=0)
+        table.clear_sparse_gradient()
+        ref_optimizer.zero_grad(set_to_none=True)
+        if step == 1:
+            weights, states = copy.deepcopy(table.state_dict()), copy.deepcopy(optimizer.state_dict())
+            table = table_config().build()
+            table.load_state_dict(weights)
+            optimizer = torch.optim.SparseAdam([table.weight], lr=0.05)
+            optimizer.load_state_dict(states)
+
+
+def _ramp(rows):
+    return torch.arange(rows * _DIM, dtype=torch.float32).reshape(rows, _DIM)
+
+
+def _host_table_config():
+    return HostEngramTable.Config(
+        vocab_size=16,
+        layer_id=0,
+        ngram_orders=(2,),
+        num_heads=1,
+        head_vocab_sizes=(7,),
+        embedding_dim=_DIM,
+        num_embeddings=10,
+        require_token_id_map=False,
+        pin_memory=False,
+    )
+
+
+def test_host_offload_model_state_uses_rank_specific_shard_key():
+    table = HostEngramTable(_host_table_config())
+    table.weight = torch.nn.Parameter(_ramp(5))
+    table._ep_rank = 1
+    table._ep_size = 2
+    table._mark_host_weight()
+
+    state = table.state_dict()
+    assert "weight" not in state
+    assert list(state) == ["weight.ep_shard_00001_of_00002"]
+
+    restored = HostEngramTable(_host_table_config())
+    restored.weight = torch.nn.Parameter(torch.zeros(5, _DIM))
+    restored._ep_rank = 1
+    restored._ep_size = 2
+    restored._mark_host_weight()
+    restored.load_state_dict(state)
+    torch.testing.assert_close(restored.weight, table.weight)
+
+
+def test_trainer_clip_owns_only_its_tables(monkeypatch):
+    from torchtitan.distributed import utils as dist_utils
+
+    from torchtitan_npu.models.deepseek_v4_1.config_registry import DeepSeekV41Trainer
+
+    table = HostEngramTable(_host_table_config())
+    values = torch.zeros(1, _DIM)
+    values[0, 0] = 4
+    table.accumulate_sparse_gradient(torch.tensor([0]), values)
+    model = torch.nn.Module()
+    model.add_module("table", table)
+    optimizer = object.__new__(host_mod.HostSparseOptimizersContainer)
+    optimizer.model_parts = [model]
+    trainer = object.__new__(DeepSeekV41Trainer)
+    trainer.optimizers = optimizer
+    other = object.__new__(DeepSeekV41Trainer)
+    other.optimizers = object()
+
+    def dense_clip(parameters, max_norm, norm_type=2.0, **kwargs):
+        return torch.nn.utils.clip_grad_norm_(parameters, max_norm, norm_type, foreach=False)
+
+    monkeypatch.setattr(dist_utils, "clip_grad_norm_", dense_clip)
+    dense = torch.nn.Parameter(torch.zeros(1))
+    dense.grad = torch.tensor([3.0])
+    assert trainer.clip_grad_norm([dense], 1.0).item() == pytest.approx(5.0)
+    assert dense.grad.item() == pytest.approx(0.6, rel=1e-5)
+    assert table.pending_sparse_grad().values()[0, 0].item() == pytest.approx(0.8, rel=1e-5)
+    dense.grad = torch.tensor([3.0])
+    assert other.clip_grad_norm([dense], 1.0).item() == pytest.approx(3.0)
+    assert dense.grad.item() == pytest.approx(1.0, rel=1e-5)
+    assert dist_utils.clip_grad_norm_ is dense_clip

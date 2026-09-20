@@ -33,6 +33,7 @@ selection masks are precomputed from it once per forward.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,7 @@ import torch
 from torch import nn
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
+from .engram import Engram  # noqa: TC001
 from .indexer import IndexerMode, indexer_selection_masks
 from .mhc import HcPost, HcPre
 from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings  # noqa: TC001
@@ -94,6 +96,7 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
+        engram: Engram.Config | None = None
 
     def __init__(self, config: Config):
         super().__init__()
@@ -106,6 +109,7 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
         self.hc_attn_pre = cfg.hc_attn_pre.build()
         self.hc_ffn_pre = cfg.hc_ffn_pre.build()
         self.hc_post = cfg.hc_post.build()
+        self.engram = cfg.engram.build() if cfg.engram is not None else None
 
     def forward(
         self,
@@ -135,6 +139,8 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
         ``pre_mix`` is the attention-input coefficient the next block must consume, and
         the shared attention tensors are this block's contribution to the chain.
         """
+        if self.engram is not None:
+            x = self.engram(x, input_ids, positions, image_mask=image_mask)
         residual = x
         x, attn_pre, post, comb = self.hc_attn_pre(x, pre_mix)
         x, cmp_k, idx_k, topk_indices, topk_scores, candidates = self.attention(
@@ -242,6 +248,32 @@ class V41Model(Decoder):
                 seq_len = config.training.seq_len
                 for _, rope_cfg, _, _ in self.traverse(RoPE.Config):
                     setattr(rope_cfg, "max_seq_len", seq_len)  # noqa: B010
+
+            engram_configs = [layer.engram for layer in self.layers if layer.engram is not None]
+            ep_degree = max(1, parallelism.expert_parallel_degree)
+            for engram_cfg in engram_configs:
+                table_cfg = engram_cfg.table
+                if (
+                    table_cfg.require_token_id_map
+                    and table_cfg.token_id_map_path is None
+                    and table_cfg.tokenizer_path is None
+                ):
+                    if config.hf_assets_path is None:
+                        raise ValueError(
+                            "Engram tokenizer compression is required, but neither "
+                            "table.token_id_map_path nor hf_assets_path is configured."
+                        )
+                    table_cfg.tokenizer_path = os.path.join(
+                        config.hf_assets_path,
+                        "tokenizer.json",
+                    )
+                if table_cfg.num_embeddings % ep_degree != 0:
+                    raise ValueError(
+                        f"Engram physical table size ({table_cfg.num_embeddings}) must "
+                        f"be divisible by EP degree ({ep_degree}). Increase "
+                        "EngramArgs.table_padding_multiple without changing it "
+                        "between checkpoints."
+                    )
 
             from .sharding import set_deepseek_v4_1_sharding_config
 
@@ -456,7 +488,7 @@ class V41Model(Decoder):
         other layer returns what it was handed.
         """
         if pixel_values is None:
-            image_mask = None
+            image_mask = token_types.ge(0) if token_types is not None else None
             embeds = input_embeds
         else:
             if image_grid is None or (image_spans is None and image_feature_indices is None):

@@ -7,32 +7,14 @@
 
 from __future__ import annotations
 
-import sys
 import types
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import torchtitan.config as torchtitan_config
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 
+from torchtitan_npu.override.common import optimizer as product_optimizer
 
-with (
-    patch.dict(
-        sys.modules,
-        {
-            "torch_npu": MagicMock(),
-            "torchtitan_npu.compile": MagicMock(),
-            "torchtitan_npu.patches": MagicMock(),
-        },
-    ),
-    patch.multiple(
-        torchtitan_config,
-        derive=lambda cfg, target: target,
-        override=lambda **kwargs: lambda function: function,
-        create=True,
-    ),
-):
-    from torchtitan_npu.override.common import optimizer as product_optimizer
 
 make_swap = vars(product_optimizer)["_make_swap"]
 swap_state_init_hook = vars(product_optimizer)["_swap_state_init_hook"]
@@ -101,6 +83,12 @@ def test_swap_state_hook_initializes_only_missing_states_with_gradients(
 
 
 def test_virtual_derives_optimizer_config():
-    cfg = object()
+    cfg = OptimizersContainer.Config(
+        implementation="for-loop",
+        param_groups=[ParamGroupConfig(pattern=".*", optimizer_name="AdamW", optimizer_kwargs={"lr": 0.03})],
+    )
+    result = product_optimizer.virtual(cfg)
 
-    assert product_optimizer.virtual(cfg) is product_optimizer.VirtualOptimizersContainer.Config
+    assert isinstance(result, product_optimizer.VirtualOptimizersContainer.Config)
+    assert result.implementation == "for-loop"
+    assert result.param_groups[0].optimizer_kwargs["lr"] == 0.03

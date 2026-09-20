@@ -3,10 +3,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING, cast
+import copy
+from dataclasses import dataclass
+from typing import cast
 
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import ParamGroupConfig, default_adamw
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.distributed.flex_shard import (
@@ -19,14 +21,49 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.protocols.model_spec import ModelSpec
 
 from torchtitan_npu.config import MuonOptimizerProfile, OptimizerConfig
+from torchtitan_npu.extensions.components.gradient_clipping import GradientClippingTrainer
+from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.trainer import TrainerEx
 from torchtitan_npu.models.common.muon import make_expert_layout, make_owned_layout
 
 from . import model_registry
 from .dataloader import DeepSeekV41DataLoader
+from .model import V41Model
 
-if TYPE_CHECKING:
-    from .model import V41Model
+
+@dataclass(kw_only=True)
+class EngramTableParamGroupConfig(ParamGroupConfig):
+    """The recipe-owned table group, distinct from user-defined groups."""
+
+
+class DeepSeekV41Trainer(GradientClippingTrainer, TrainerEx):
+    """V4.1 training with instance-owned Host sparse gradient clipping."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TrainerEx.Config):
+        """Expose the model switch while ModelSpec is suppressed from the CLI."""
+
+        engram_enabled: bool = True
+
+        def __post_init__(self) -> None:
+            assert self.model_spec is not None and isinstance(self.model_spec.model, V41Model.Config)
+            if not self.engram_enabled:
+                model_spec = copy.deepcopy(self.model_spec)
+                self.model_spec = model_spec
+                model = model_spec.model
+                assert isinstance(model, V41Model.Config)
+                self.optimizer = copy.deepcopy(self.optimizer)
+                for layer in model.layers:
+                    layer.engram = None
+                self.optimizer.param_groups = [
+                    group for group in self.optimizer.param_groups if not isinstance(group, EngramTableParamGroupConfig)
+                ]
+            TrainerEx.Config.__post_init__(self)
+
+    def clip_grad_norm(self, parameters, max_norm, **kwargs):
+        if isinstance(self.optimizers, HostSparseOptimizersContainer):
+            return self.optimizers.clip_grad_norm(parameters, max_norm, **kwargs)
+        return super().clip_grad_norm(parameters, max_norm, **kwargs)
 
 
 def _document_alignment(model_spec) -> int:
@@ -144,8 +181,22 @@ def _v41_optimizer_config(model_spec: ModelSpec) -> OptimizerConfig:
     does not alter the default recipe.
     """
     adamw = default_adamw(lr=1e-5, eps=1e-6)
-    return OptimizerConfig(
-        param_groups=adamw.param_groups,
+    has_engram = any(
+        getattr(layer, "engram", None) is not None for layer in cast("V41Model.Config", model_spec.model).layers
+    )
+    optimizer_type = HostSparseOptimizersContainer.Config if has_engram else OptimizerConfig
+    groups = adamw.param_groups
+    if has_engram:
+        groups = [
+            EngramTableParamGroupConfig(
+                pattern=r".*\.engram\.table\.weight$",
+                optimizer_name="SparseAdam",
+                optimizer_kwargs={"lr": 5e-5, "betas": (0.9, 0.95), "eps": 1e-6},
+            ),
+            *groups,
+        ]
+    return optimizer_type(
+        param_groups=groups,
         implementation=adamw.implementation,
         optimizer_factory_kwargs_by_name=adamw.optimizer_factory_kwargs_by_name,
         _muon_profile=_v41_muon_profile(model_spec),
@@ -157,7 +208,7 @@ def _v41_trainer_config(flavor: str) -> TrainerEx.Config:
     if model_spec.model.n_layers != len(model_spec.model.layers):  # pyrefly: ignore [missing-attribute]
         raise ValueError("registered V4.1 model does not describe every configured layer")
 
-    return TrainerEx.Config(
+    return DeepSeekV41Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),

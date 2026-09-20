@@ -43,6 +43,66 @@ if TYPE_CHECKING:
     from torchtitan.protocols.model import ModelConfigConverter
 
 
+@dataclass(frozen=True, kw_only=True)
+class EngramArgs:
+    """Model-flavor arguments for attaching Engram to selected layers.
+
+    ``vocab_size_per_ngram`` gives the target rows per hash head for each
+    N-gram order; the actual sizes are distinct primes at least that large.
+    ``n_embed_per_ngram`` is the concatenated width of all hash heads for one
+    order. For example, 640 with 8 heads produces 80 values per fetched row
+    and a total memory width of 1280 for orders 2 and 3.
+    """
+
+    layer_ids: tuple[int, ...]
+    vocab_size_per_ngram: tuple[int, ...]
+    n_embed_per_ngram: int
+    ngram_orders: tuple[int, ...] = (2, 3)
+    num_heads_per_ngram: int = 8
+    pad_id: int = 0
+    hash_seed: int = 0
+    norm_eps: float = 1e-5
+    # A fixed model-shape alignment. The runtime EP degree must divide it;
+    # this avoids changing checkpoint tensor shapes when EP changes. Published
+    # V4.1 table sizes are logical row counts; this training layout adds padding
+    # without changing the hash bucket ranges.
+    table_padding_multiple: int = 2048
+    token_id_map_path: str | None = None
+    require_token_id_map: bool = True
+    # When set, the compressed vocabulary the tokenizer map must produce. The
+    # compressed size bounds the hash multipliers, so a map from a different
+    # tokenizer silently changes every row ID; checking it turns that into a
+    # startup error.
+    compressed_vocab_size: int | None = None
+
+
+# Published DeepSeek-V4.1-Flash text_config, revision 2bc89ac599031fa673cab993f1df02fc4a98c673:
+# https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/tree/2bc89ac599031fa673cab993f1df02fc4a98c673
+_ENGRAM_V41_FLASH_GEOMETRY = EngramArgs(
+    layer_ids=(1, 14),
+    ngram_orders=(2, 3, 4),
+    vocab_size_per_ngram=(16_000_000, 16_000_000, 16_000_000),
+    n_embed_per_ngram=2048,
+    num_heads_per_ngram=8,
+    pad_id=2,
+    norm_eps=1e-20,
+    require_token_id_map=True,
+    compressed_vocab_size=99_092,
+)
+
+
+_ENGRAM_DEBUG_GEOMETRY = EngramArgs(
+    layer_ids=(1, 14),
+    ngram_orders=(2, 3, 4),
+    vocab_size_per_ngram=(1024, 1024, 1024),
+    n_embed_per_ngram=256,
+    num_heads_per_ngram=2,
+    pad_id=2,
+    norm_eps=1e-20,
+    require_token_id_map=False,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _V41Widths:
     """Per-flavor width set."""
@@ -688,7 +748,7 @@ def deepseek_v4_1_flash_40layers_16experts_vision_config(
     non_blocking_capacity_factor: float | None = None,
 ):
     """Full 40-layer V4.1 backbone with the single-node 16-expert crop."""
-    return _make_v41_config(
+    config = _make_v41_config(
         n_layers=40,
         compress_ratios=V41_FULL_COMPRESS_RATIOS,
         kv_source_layers=V41_KV_SOURCE_LAYERS,
@@ -698,6 +758,8 @@ def deepseek_v4_1_flash_40layers_16experts_vision_config(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
 
+    return _attach_engram(config, _ENGRAM_V41_FLASH_GEOMETRY)
+
 
 def deepseek_v4_1_debugmodel_config(
     *,
@@ -705,7 +767,7 @@ def deepseek_v4_1_debugmodel_config(
     non_blocking_capacity_factor: float | None = None,
 ):
     """Reduced-width shape retaining the real 40-layer compression topology."""
-    return _make_v41_config(
+    config = _make_v41_config(
         n_layers=40,
         compress_ratios=V41_FULL_COMPRESS_RATIOS,
         kv_source_layers=V41_KV_SOURCE_LAYERS,
@@ -715,6 +777,24 @@ def deepseek_v4_1_debugmodel_config(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         widths=_DEBUG_WIDTHS,
     )
+
+    return _attach_engram(config, _ENGRAM_DEBUG_GEOMETRY)
+
+
+def _attach_engram(config, engram):
+    from .engram_config import _make_engram_configs
+
+    if any(layer_id >= len(config.layers) or layer_id < 0 for layer_id in engram.layer_ids):
+        raise ValueError("Engram layer IDs must lie inside the decoder")
+    configs = _make_engram_configs(
+        hidden_size=config.dim,
+        hc_mult=config.hc_mult,
+        vocab_size=config.vocab_size,
+        engram=engram,
+    )
+    for layer_id, engram_config in configs.items():
+        config.layers[layer_id].engram = engram_config
+    return config
 
 
 deepseek_v4_1_configs = {

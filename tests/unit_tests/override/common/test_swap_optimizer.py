@@ -85,7 +85,8 @@ def test_virtual_optimizer_override_replaces_optimizer_config() -> None:
 
 def test_virtual_optimizers_container_registers_state_init_hook(monkeypatch) -> None:
     hooks = []
-    optimizer = SimpleNamespace(register_step_pre_hook=hooks.append)
+    optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))])
+    monkeypatch.setattr(optimizer, "register_step_pre_hook", hooks.append)
 
     def initialize_container(self, *, config, model_parts):
         self.optimizers = [optimizer]
@@ -629,3 +630,71 @@ def test_optimizer_state_swap_prefetches_plan_before_a2a_and_defers_offload(monk
         product_swap.make_swap_state_name("optimizer_state", 0, "b", "momentum_buffer"),
         product_swap.make_swap_state_name("optimizer_state", 0, "c", "momentum_buffer"),
     ]
+
+
+@pytest.mark.parametrize("override_name", ["virtual", "swap_optimizer"])
+def test_swap_preserves_host_sparse_update(monkeypatch, override_name):
+    from torchtitan.components.optimizer import ParamGroupConfig
+
+    from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+    from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
+
+    allocations = []
+
+    def allocate(parameter):
+        result = torch.empty_like(parameter)
+        allocations.append(result)
+        return result
+
+    monkeypatch.setattr(product_swap, "_make_swap", allocate)
+    # CPU allocations replace only the external NovaSwap storage/transfer API.
+    _patch_container_swap_api(monkeypatch, SimpleNamespace(
+        register_tensor=lambda *_args, **_kwargs: None,
+        execute=lambda *_args, **_kwargs: None,
+    ))
+
+    def build():
+        model = torch.nn.Module()
+        model.register_parameter("dense", torch.nn.Parameter(torch.ones(4)))
+        model.add_module("table", HostEngramTable.Config(
+            vocab_size=16, layer_id=0, ngram_orders=(2,), num_heads=1,
+            head_vocab_sizes=(11,), embedding_dim=4, num_embeddings=12,
+            require_token_id_map=False, pin_memory=False,
+        ).build())
+        with torch.no_grad():
+            model.table.weight.copy_(torch.arange(48).reshape(12, 4) / 16)
+        root = _Root.Config(optimizer=HostSparseOptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(pattern=r"table\.weight$", optimizer_name="SparseAdam", optimizer_kwargs={"lr": 0.05}),
+                ParamGroupConfig(pattern=r".*", optimizer_name="AdamW", optimizer_kwargs={"lr": 0.01}),
+            ],
+        ))
+        apply_overrides(OverrideConfig(imports=[f"torchtitan_npu.override.common.optimizer.{override_name}"]), root)
+        optimizer = root.optimizer.build(model_parts=[model])
+        assert isinstance(optimizer, HostSparseOptimizersContainer)
+        return model, optimizer
+
+    def step(model, optimizer, ids):
+        optimizer.zero_grad()
+        (model.table._distributed_lookup(ids).sum() + model.dense.sum()).backward()
+        assert model.table.weight.grad is None
+        optimizer.step()
+
+    model, optimizer = build()
+    reference_dense = torch.nn.Parameter(model.dense.detach().clone())
+    reference_table = torch.nn.Embedding.from_pretrained(model.table.weight.detach().clone(), freeze=False, sparse=True)
+    dense_opt = torch.optim.AdamW([reference_dense], lr=0.01, foreach=False, fused=False)
+    sparse_opt = torch.optim.SparseAdam(reference_table.parameters(), lr=0.05)
+    ids = torch.tensor([0, 7, 7, 11])
+    step(model, optimizer, ids)
+    (reference_table(ids).sum() + reference_dense.sum()).backward()
+    dense_opt.step()
+    sparse_opt.step()
+    torch.testing.assert_close(model.dense, reference_dense, rtol=0, atol=0)
+    torch.testing.assert_close(model.table.weight, reference_table.weight, rtol=0, atol=0)
+    if override_name == "virtual":
+        assert len(allocations) == 2  # Only dense AdamW moments use swap storage.
+    optimizer.zero_grad()
+    assert model.table.pending_sparse_grad() is None
+    assert model.table.weight.grad is None

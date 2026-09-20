@@ -11,6 +11,7 @@ assembly wires only what the supported matrix needs.  The decoder FSDP
 wrapper is the generic (non-MTP) helper.
 """
 
+import torch
 from torchtitan.config import (
     TORCH_DTYPE_MAP,
     CompileConfig,
@@ -19,8 +20,32 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, resolve_sparse_fsdp_mesh, validate_config
+
+from torchtitan_npu.extensions.distributed.fsdp import apply_fsdp_to_decoder
+
+from .engram_host import HostEngramTable
+
+
+def _shard_engram_tables(
+    model,
+    *,
+    edp_mesh,
+    edp_mesh_dims,
+    training: TrainingConfig,
+) -> set[torch.nn.Parameter]:
+    """Exclude CPU tables from FSDP and initialize their replica/backend state."""
+    assert edp_mesh is not None
+    ignored_params: set[torch.nn.Parameter] = set()
+    for module in model.modules():
+        if isinstance(module, HostEngramTable):
+            ignored_params.add(module.weight)
+            # A table FSDP does not manage still has replicas along the sparse
+            # data-parallel axes, and their gradients have to be summed.
+            wire_replicas = getattr(module, "wire_sparse_grad_replicas", None)
+            if wire_replicas is not None:
+                wire_replicas(edp_mesh=edp_mesh, edp_mesh_dims=edp_mesh_dims)
+    return ignored_params
 
 
 def apply_activation_checkpointing(model, ac_config, dump_folder):
@@ -70,9 +95,16 @@ def parallelize_deepseek_v4_1(
         parallel_dims=parallel_dims,
     )
 
+    ignored_params = _shard_engram_tables(
+        model,
+        edp_mesh=edp_mesh if parallel_dims.ep_enabled else dp_mesh,
+        edp_mesh_dims=edp_mesh_dims if parallel_dims.ep_enabled else dp_mesh_dims,
+        training=training,
+    )
     apply_fsdp_to_decoder(
         model,
         dp_mesh,
+        ignored_params=ignored_params,
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         pp_enabled=parallel_dims.pp_enabled,

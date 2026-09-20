@@ -43,8 +43,7 @@ class TestDefaultRecipe:
     def test_default_is_adamw(self):
         cfg = deepseek_v4_1_flash_40layers_16experts_multimodal()
         assert cfg.optimizer.name == "AdamW"
-        assert len(cfg.optimizer.param_groups) == 1
-        assert cfg.optimizer.param_groups[0].optimizer_name == "AdamW"
+        assert [group.optimizer_name for group in cfg.optimizer.param_groups] == ["SparseAdam", "AdamW"]
 
 
 class TestMuonPlacement:
@@ -150,6 +149,7 @@ class TestRealModelReconciliation:
                 fqn.startswith(("vision_encoder", "tok_embeddings", "lm_head", "norm.", "image_marker_embeddings"))
                 or fqn.endswith((".attn_sink", "_norm.weight", ".norm.weight", ".hc_base", ".hc_scale", ".bias_vl"))
                 or ".indexer." in fqn
+                or ".engram." in fqn
             )
         }
         assert not unexpected, sorted(unexpected)[:5]
@@ -160,8 +160,12 @@ class TestRealModelReconciliation:
         trainer.optimizer.lr = 1.23e-4
         trainer.optimizer.materialize()
         groups = trainer.optimizer.param_groups
-        assert [group.optimizer_name for group in groups] == ["DistMuon", "AdamW"]
-        distmuon, adamw = groups
+        assert [group.optimizer_name for group in groups] == ["SparseAdam", "DistMuon", "AdamW"]
+        sparse, distmuon, adamw = groups
+        assert sparse.optimizer_kwargs["lr"] == 5e-5
+        trainer.optimizer.materialize()
+        assert trainer.optimizer.param_groups[0] is sparse
+        assert len(trainer.optimizer.param_groups) == 3
         assert distmuon.pattern == trainer.optimizer._muon_profile.muon_pattern
         assert adamw.pattern == r".*"
         # Top-level CLI hyperparams land in both factories (param-groups.0
