@@ -2,22 +2,52 @@
 
 """CPU contracts for the explicit optimizer-state swap override policy."""
 
+import importlib
+import os
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
+import torch.multiprocessing as mp
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+from torch.distributed.tensor import DTensor, Shard
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, OverrideConfig, apply_overrides
 
 from torchtitan_npu.extensions.novaswap import swap_api as product_swap_api
-from torchtitan_npu.extensions.novaswap.swap_engine import SwapEngine
 from torchtitan_npu.override.common import optimizer as product_swap
 from torchtitan_npu.override.common.optimizer import OptimizerStateSwapContainer
 
 pytestmark = pytest.mark.cpu
+
+
+def _supports_checkpointable_tensor_protocol() -> bool:
+    try:
+        protocol = getattr(
+            importlib.import_module("torch.distributed.checkpoint.protocol"),
+            "CheckpointableTensor",
+        )
+    except (ImportError, AttributeError):
+        return False
+
+    probe = torch.empty(0)
+    vars(probe).update(
+        global_shape=(0,),
+        global_offsets=((0,),),
+        local_offsets=((0,),),
+        local_sizes=((0,),),
+    )
+    try:
+        return isinstance(probe, protocol)
+    except TypeError:
+        return False
 
 
 def _patch_container_global(monkeypatch, name: str, value) -> None:
@@ -40,6 +70,145 @@ def _patch_container_swap_api(monkeypatch, swap_api) -> None:
     monkeypatch.setattr(product_swap, "swap_api", swap_api)
     _patch_container_global(monkeypatch, "swap_api", swap_api)
     monkeypatch.setitem(product_swap._NovaSwapAdamW._submit.__globals__, "swap_api", swap_api)
+
+
+def _install_adamw_swap(optimizer: torch.optim.AdamW) -> None:
+    getattr(OptimizerStateSwapContainer, "_swap_adamw")(optimizer)
+
+
+def _patch_fake_swap_runtime(
+    monkeypatch,
+) -> tuple[dict[str, torch.Tensor], dict[str, tuple[SimpleNamespace]]]:
+    registered: dict[str, torch.Tensor] = {}
+    handles: dict[str, tuple[SimpleNamespace]] = {}
+
+    def register_tensor(tensor, name) -> None:
+        registered[name] = tensor
+
+    def execute(name, action) -> None:
+        if action == "D2H":
+            handles[name] = (
+                SimpleNamespace(
+                    swap_event=None,
+                    is_completed=False,
+                    tensor_cpu=registered[name].detach().view(torch.uint8).clone(),
+                ),
+            )
+        elif action == "H2D":
+            registered[name].view(torch.uint8).copy_(handles[name][0].tensor_cpu)
+
+    def get_d2h_cpu_buffer(name):
+        return handles[name][0].tensor_cpu
+
+    _patch_container_swap_api(
+        monkeypatch,
+        SimpleNamespace(
+            register_tensor=register_tensor,
+            execute=execute,
+            get_d2h_cpu_buffer=get_d2h_cpu_buffer,
+        ),
+    )
+    return registered, handles
+
+
+def test_swap_api_get_d2h_cpu_buffer_waits_for_live_handle(monkeypatch) -> None:
+    tensor_cpu = torch.arange(8, dtype=torch.uint8)
+    handle = SimpleNamespace(transfer="D2H", tensor_cpu=tensor_cpu)
+    waited = []
+    api = product_swap_api
+    engine = api.SwapEngine
+    wait_globals = getattr(getattr(engine.get_d2h_cpu_buffer, "__func__"), "__globals__")
+    monkeypatch.setitem(engine._handles, "optimizer_state", (handle,))
+    monkeypatch.setitem(wait_globals, "_wait", waited.append)
+
+    result = api.get_d2h_cpu_buffer("optimizer_state")
+
+    assert result is tensor_cpu
+    assert waited == [handle]
+
+
+def _build_checkpoint_model(seed: int):
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 3),
+            torch.nn.GELU(),
+            torch.nn.Linear(3, 2),
+        )
+    named_parameters = list(model.named_parameters())
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": [parameter for _, parameter in named_parameters],
+                "param_names": [name for name, _ in named_parameters],
+            }
+        ],
+        lr=0.03,
+        foreach=False,
+    )
+    _install_adamw_swap(optimizer)
+    container = object.__new__(OptimizerStateSwapContainer)
+    container.optimizers = [optimizer]
+    return model, optimizer, container
+
+
+def _build_single_parameter_container(parameter: torch.nn.Parameter, lr: float):
+    optimizer = torch.optim.AdamW(
+        [{"params": [parameter], "param_names": ["weight"]}],
+        lr=lr,
+        foreach=False,
+    )
+    _install_adamw_swap(optimizer)
+    container = object.__new__(OptimizerStateSwapContainer)
+    container.optimizers = [optimizer]
+    return optimizer, container
+
+
+def _named_optimizer_parameters(optimizer):
+    for group in optimizer.param_groups:
+        yield from zip(group["params"], group["param_names"], strict=True)
+
+
+def _clone_flat_tensor_state(optimizer) -> dict[str, torch.Tensor]:
+    result = {}
+    for parameter, fqn in _named_optimizer_parameters(optimizer):
+        for state_name, value in optimizer.state[parameter].items():
+            if isinstance(value, torch.Tensor):
+                result[f"state.{fqn}.{state_name}"] = value.detach().clone()
+    return result
+
+
+def _swapped_tensor_identities(optimizer) -> dict[tuple[torch.Tensor, str], torch.Tensor]:
+    result = {}
+    state_names = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
+    for parameter, state in optimizer.state.items():
+        for state_name, value in state.items():
+            if state_name in state_names:
+                result[(parameter, state_name)] = value
+    return result
+
+
+def _assert_checkpoint_views(optimizer, flat_state, handles) -> None:
+    parameter_fqns = dict(_named_optimizer_parameters(optimizer))
+    locations = getattr(optimizer, "_torchtitan_npu_checkpoint_locations")
+    for (parameter, state_name), (tensor_name, byte_offset) in locations.items():
+        view = flat_state[f"state.{parameter_fqns[parameter]}.{state_name}"]
+        raw = handles[tensor_name][0].tensor_cpu
+        assert view.data_ptr() == raw.data_ptr() + byte_offset
+        assert view.global_shape == tuple(view.shape)
+        assert view.global_offsets == (tuple(0 for _ in view.shape),)
+        assert view.local_offsets == (tuple(0 for _ in view.shape),)
+        assert view.local_sizes == (tuple(view.shape),)
+
+
+def _set_model_gradients(model, value: float) -> None:
+    for parameter in model.parameters():
+        parameter.grad = torch.full_like(parameter, value)
+
+
+def _assert_named_tensors(actual: dict[str, torch.Tensor], expected: dict[str, torch.Tensor]) -> None:
+    for name, expected_tensor in expected.items():
+        torch.testing.assert_close(actual[name], expected_tensor, rtol=0, atol=0)
 
 
 class _Root(Configurable):
@@ -117,12 +286,376 @@ def test_optimizer_state_swap_conflicts_with_virtual_optimizer_override() -> Non
         )
 
 
-def test_optimizer_state_swap_rejects_optimizer_state_dict_access() -> None:
-    optimizers = object.__new__(OptimizerStateSwapContainer)
-    with pytest.raises(RuntimeError, match="does not support optimizer checkpoint save"):
-        optimizers.state_dict()
-    with pytest.raises(RuntimeError, match="does not support optimizer checkpoint load"):
-        optimizers.load_state_dict({})
+def test_optimizer_state_swap_async_dcp_round_trip(monkeypatch, tmp_path) -> None:
+    registered, handles = _patch_fake_swap_runtime(monkeypatch)
+    source_model, source_optimizer, source_container = _build_checkpoint_model(seed=7)
+    inputs = torch.arange(8, dtype=torch.float32).reshape(2, 4).div(7)
+    source_model(inputs).square().sum().backward()
+    source_optimizer.step()
+    source_optimizer.param_groups[0]["lr"] = 0.017
+
+    expected_parameters = {name: parameter.detach().clone() for name, parameter in source_model.named_parameters()}
+    expected_state = _clone_flat_tensor_state(source_optimizer)
+    source_flat_state = source_container.state_dict()
+    _assert_checkpoint_views(source_optimizer, source_flat_state, handles)
+    original_cpu_buffers = {name: handle[0].tensor_cpu.clone() for name, handle in handles.items()}
+
+    checkpoint_dir = tmp_path / "dcp"
+    future = dcp.async_save(
+        {"model": source_model, "optimizer": source_container},
+        checkpoint_id=checkpoint_dir,
+        no_dist=True,
+    )
+    for handle in handles.values():
+        handle[0].tensor_cpu.fill_(0xFF)
+    future.result()
+
+    for name, raw in original_cpu_buffers.items():
+        handles[name][0].tensor_cpu.copy_(raw)
+    _set_model_gradients(source_model, 0.125)
+    source_optimizer.step()
+    expected_next_parameters = {name: parameter.detach().clone() for name, parameter in source_model.named_parameters()}
+
+    del source_flat_state
+    registered.clear()
+    handles.clear()
+    del source_container, source_optimizer, source_model
+
+    target_model, target_optimizer, target_container = _build_checkpoint_model(seed=19)
+    target_container.state_dict()
+    target_state_tensors = _swapped_tensor_identities(target_optimizer)
+    dcp.load(
+        {"model": target_model, "optimizer": target_container},
+        checkpoint_id=checkpoint_dir,
+        no_dist=True,
+    )
+
+    assert target_optimizer.param_groups[0]["lr"] == 0.017
+    for key, tensor in target_state_tensors.items():
+        assert target_optimizer.state[key[0]][key[1]] is tensor
+
+    target_parameters = dict(target_model.named_parameters())
+    _assert_named_tensors(target_parameters, expected_parameters)
+    target_state = target_container.state_dict()
+    _assert_named_tensors(target_state, expected_state)
+    _set_model_gradients(target_model, 0.125)
+    target_optimizer.step()
+    _assert_named_tensors(target_parameters, expected_next_parameters)
+
+
+def test_optimizer_state_swap_direct_state_dict_round_trip(monkeypatch) -> None:
+    _patch_fake_swap_runtime(monkeypatch)
+    source_parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    source_optimizer, source_container = _build_single_parameter_container(source_parameter, lr=0.03)
+    source_parameter.grad = torch.tensor([0.25, -0.5])
+    source_optimizer.step()
+    source_optimizer.param_groups[0]["lr"] = 0.017
+    expected_state = {name: value.detach().clone() for name, value in source_optimizer.state[source_parameter].items()}
+    source_state = deepcopy(source_container.state_dict())
+
+    target_parameter = torch.nn.Parameter(source_parameter.detach().clone())
+    target_optimizer, target_container = _build_single_parameter_container(target_parameter, lr=0.5)
+    target_container.state_dict()
+    target_identities = {
+        name: value
+        for name, value in target_optimizer.state[target_parameter].items()
+        if name in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
+    }
+
+    target_container.load_state_dict(source_state)
+
+    assert target_optimizer.param_groups[0]["lr"] == 0.017
+    for name, tensor in target_identities.items():
+        assert target_optimizer.state[target_parameter][name] is tensor
+    target_state = target_container.state_dict()
+    for name, expected in expected_state.items():
+        torch.testing.assert_close(target_state[f"state.weight.{name}"], expected, rtol=0, atol=0)
+
+    gradient = torch.tensor([-0.125, 0.375])
+    source_parameter.grad = gradient.clone()
+    target_parameter.grad = gradient.clone()
+    source_optimizer.step()
+    target_optimizer.step()
+
+    torch.testing.assert_close(target_parameter, source_parameter, rtol=0, atol=0)
+    for name, source_value in source_optimizer.state[source_parameter].items():
+        torch.testing.assert_close(
+            target_optimizer.state[target_parameter][name],
+            source_value,
+            rtol=0,
+            atol=0,
+        )
+
+
+def test_optimizer_state_swap_materializes_only_missing_adamw_state(
+    monkeypatch,
+) -> None:
+    _patch_fake_swap_runtime(monkeypatch)
+    initialized = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    missing = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": [initialized, missing],
+                "param_names": ["initialized", "missing"],
+            }
+        ],
+        lr=0.03,
+        foreach=False,
+    )
+    _install_adamw_swap(optimizer)
+    container = object.__new__(OptimizerStateSwapContainer)
+    container.optimizers = [optimizer]
+
+    initialized.grad = torch.tensor([0.25, -0.5])
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    initialized_state = {
+        name: value.detach().clone()
+        for name, value in optimizer.state[initialized].items()
+    }
+    assert not optimizer.state[missing]
+
+    flat_state = container.state_dict()
+
+    for name, expected in initialized_state.items():
+        torch.testing.assert_close(
+            optimizer.state[initialized][name], expected, rtol=0, atol=0
+        )
+    assert set(optimizer.state[missing]) == {"step", "exp_avg", "exp_avg_sq"}
+    assert optimizer.state[missing]["step"].item() == 1
+    assert missing.grad is None
+    for state_name in ("exp_avg", "exp_avg_sq"):
+        assert f"state.initialized.{state_name}" in flat_state
+        assert f"state.missing.{state_name}" in flat_state
+    locations = vars(optimizer)["_torchtitan_npu_checkpoint_locations"]
+    assert (initialized, "exp_avg") in locations
+    assert (missing, "exp_avg") in locations
+
+
+def test_optimizer_state_swap_muon_produces_and_consumes_checkpoint_location(
+    monkeypatch,
+) -> None:
+    registered, handles = _patch_fake_swap_runtime(monkeypatch)
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+
+    class FakeMuon(torch.optim.Optimizer):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    {
+                        "params": [parameter],
+                        "param_names": ["weight"],
+                        "lr": 0.2,
+                    }
+                ],
+                defaults={},
+            )
+            self._redistribution_runtime = SimpleNamespace(
+                _enqueue_storage_to_compute=lambda *args, **kwargs: None
+            )
+
+        def _momentum(self, compute_layout, grad):
+            momentum = grad.detach().clone()
+            self.state[compute_layout.param]["momentum_buffer"] = momentum
+            return momentum
+
+        def _prepare_local(self, compute_layout, out) -> None:
+            return None
+
+    optimizer = FakeMuon()
+    _patch_container_global(monkeypatch, "DistMuon", FakeMuon)
+    OptimizerStateSwapContainer._swap_muon(optimizer, model_part=0)
+    layout = SimpleNamespace(param=parameter, fqn="weight")
+    momentum = optimizer._momentum(layout, torch.tensor([3.0, 4.0]))
+    container = object.__new__(OptimizerStateSwapContainer)
+    container.optimizers = [optimizer]
+
+    flat_state = container.state_dict()
+
+    tensor_name = "optimizer_state.0.weight.momentum_buffer"
+    locations = vars(optimizer)["_torchtitan_npu_checkpoint_locations"]
+    assert registered[tensor_name] is momentum
+    assert locations[(parameter, "momentum_buffer")] == (tensor_name, 0)
+    checkpoint_view = flat_state["state.weight.momentum_buffer"]
+    assert checkpoint_view.data_ptr() == handles[tensor_name][0].tensor_cpu.data_ptr()
+    torch.testing.assert_close(checkpoint_view, momentum, rtol=0, atol=0)
+    assert flat_state["param_groups.weight.lr"] == 0.2
+
+
+def _init_two_rank_cpu_mesh(rank: int, rendezvous: str) -> DeviceMesh:
+    dist.init_process_group(
+        "gloo",
+        init_method=f"file://{rendezvous}",
+        rank=rank,
+        world_size=2,
+    )
+    return init_device_mesh("cpu", (2,), mesh_dim_names=("dp_shard",))
+
+
+def _checkpointable_local_copy(
+    local: torch.Tensor,
+    metadata: dict[str, Any],
+    *,
+    zero: bool = False,
+) -> torch.Tensor:
+    value = torch.zeros_like(local) if zero else local.clone()
+    raw = value.view(torch.uint8).reshape(-1)
+    return product_swap.make_checkpointable_view(
+        raw,
+        byte_offset=0,
+        dtype=local.dtype,
+        shape=tuple(local.shape),
+        stride=tuple(local.stride()),
+        **metadata,
+    )
+
+
+def _empty_optimizer_checkpoint_view(tensor: DTensor) -> torch.Tensor:
+    parameter = torch.nn.Parameter(torch.empty(0))
+    optimizer = torch.optim.AdamW(
+        [{"params": [parameter], "param_names": ["weight"]}]
+    )
+    optimizer.state[parameter]["exp_avg"] = tensor
+    vars(optimizer)["_torchtitan_npu_checkpoint_locations"] = {}
+    flat_state = {"state.weight.exp_avg": tensor}
+
+    OptimizerStateSwapContainer._replace_swapped_states_with_checkpoint_views(
+        optimizer,
+        flat_state,
+    )
+    view = flat_state["state.weight.exp_avg"]
+    assert view.device.type == "cpu"
+    assert view.numel() == 0
+    assert view.untyped_storage().nbytes() == 0
+    assert vars(view)["global_shape"] == (1,)
+    assert vars(view)["global_offsets"] == ((1,),)
+    assert vars(view)["local_offsets"] == ((0,),)
+    assert vars(view)["local_sizes"] == ((0,),)
+    return view
+
+
+def _empty_dtensor_checkpoint_worker(
+    rank: int,
+    rendezvous: str,
+    checkpoint_dir: str,
+    result_prefix: str,
+) -> None:
+    mesh = _init_two_rank_cpu_mesh(rank, rendezvous)
+    try:
+        global_tensor = torch.tensor([7.0])
+        local = global_tensor.narrow(0, rank, 1) if rank == 0 else global_tensor.narrow(0, 1, 0)
+        tensor = DTensor.from_local(
+            local.clone(),
+            mesh,
+            (Shard(0),),
+            shape=global_tensor.shape,
+            stride=global_tensor.stride(),
+            run_check=False,
+        )
+        local = tensor.to_local()
+        metadata = product_swap._checkpoint_metadata(tensor, local)
+
+        if rank == 0:
+            source_view = _checkpointable_local_copy(local, metadata)
+        else:
+            source_view = _empty_optimizer_checkpoint_view(tensor)
+
+        dcp.save({"state": source_view}, checkpoint_id=checkpoint_dir)
+
+        target_view = (
+            _checkpointable_local_copy(local, metadata, zero=True)
+            if rank == 0
+            else source_view
+        )
+
+        dcp.load({"state": target_view}, checkpoint_id=checkpoint_dir)
+        torch.testing.assert_close(target_view, local, rtol=0, atol=0)
+        Path(f"{result_prefix}.{rank}").write_text("ok")
+    finally:
+        dist.destroy_process_group()
+
+
+def test_optimizer_state_swap_replaces_empty_dtensor_shard(tmp_path) -> None:
+    if not _supports_checkpointable_tensor_protocol():
+        pytest.skip(
+            "requires PyTorch DCP CheckpointableTensor protocol",
+        )
+
+    rendezvous = os.fspath(tmp_path / "empty-dtensor-rendezvous")
+    checkpoint_dir = os.fspath(tmp_path / "empty-dtensor-checkpoint")
+    result_prefix = os.fspath(tmp_path / "empty-dtensor-result")
+
+    mp.spawn(
+        _empty_dtensor_checkpoint_worker,
+        args=(rendezvous, checkpoint_dir, result_prefix),
+        nprocs=2,
+        join=True,
+        start_method="spawn",
+    )
+
+    assert Path(f"{result_prefix}.0").read_text() == "ok"
+    assert Path(f"{result_prefix}.1").read_text() == "ok"
+
+
+def _dtensor_checkpoint_worker(
+    rank: int,
+    rendezvous: str,
+    checkpoint_dir: str,
+    result_prefix: str,
+) -> None:
+    mesh = _init_two_rank_cpu_mesh(rank, rendezvous)
+    try:
+        global_tensor = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+        local = global_tensor.narrow(0, rank * 3, 3).clone()
+        tensor = DTensor.from_local(
+            local,
+            mesh,
+            (Shard(0),),
+            shape=global_tensor.shape,
+            stride=global_tensor.stride(),
+            run_check=False,
+        )
+        metadata = product_swap._checkpoint_metadata(tensor, local)
+        assert metadata == {
+            "global_shape": (6, 2),
+            "global_offsets": ((rank * 3, 0),),
+            "local_offsets": ((0, 0),),
+            "local_sizes": ((3, 2),),
+        }
+        source_view = _checkpointable_local_copy(local, metadata)
+
+        dcp.save({"state": source_view}, checkpoint_id=checkpoint_dir)
+
+        target_view = _checkpointable_local_copy(local, metadata, zero=True)
+        dcp.load({"state": target_view}, checkpoint_id=checkpoint_dir)
+
+        torch.testing.assert_close(target_view, local, rtol=0, atol=0)
+        Path(f"{result_prefix}.{rank}").write_text("ok")
+    finally:
+        dist.destroy_process_group()
+
+
+def test_checkpoint_view_preserves_two_rank_dtensor_shards(tmp_path) -> None:
+    if not _supports_checkpointable_tensor_protocol():
+        pytest.skip(
+            "requires PyTorch DCP CheckpointableTensor protocol",
+        )
+
+    rendezvous = os.fspath(tmp_path / "dtensor-rendezvous")
+    checkpoint_dir = os.fspath(tmp_path / "dtensor-checkpoint")
+    result_prefix = os.fspath(tmp_path / "dtensor-result")
+
+    mp.spawn(
+        _dtensor_checkpoint_worker,
+        args=(rendezvous, checkpoint_dir, result_prefix),
+        nprocs=2,
+        join=True,
+        start_method="spawn",
+    )
+
+    assert Path(f"{result_prefix}.0").read_text() == "ok"
+    assert Path(f"{result_prefix}.1").read_text() == "ok"
 
 
 def test_optimizer_state_swap_has_no_unowned_cleanup_facade() -> None:
@@ -142,14 +675,15 @@ def test_novaswap_wait_for_device_release_keeps_handle_and_filters_npu(monkeypat
         def wait_for_name(self, name, *, release_target=None) -> None:
             calls.append((name, release_target))
 
-    monkeypatch.setattr(SwapEngine, "_ready", True)
-    monkeypatch.setattr(SwapEngine, "_release_worker", ReleaseWorker())
-    monkeypatch.setattr(SwapEngine, "_handles", {"state": ()})
+    engine = product_swap_api.SwapEngine
+    monkeypatch.setattr(engine, "_ready", True)
+    monkeypatch.setattr(engine, "_release_worker", ReleaseWorker())
+    monkeypatch.setattr(engine, "_handles", {"state": ()})
 
     product_swap_api.wait_for_device_release("state")
 
     assert calls == [("state", "npu")]
-    assert SwapEngine._handles == {"state": ()}
+    assert engine._handles == {"state": ()}
 
 
 def test_optimizer_state_swap_adamw_pipelines_novaswap_buckets(monkeypatch) -> None:

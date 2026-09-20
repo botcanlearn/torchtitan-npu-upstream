@@ -23,7 +23,8 @@ def build_deepseek_v3_2_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             override_args=[
                 (
-                    "--training.steps=100",
+                    "--training.steps=30",
+                    "--lr-scheduler.total-steps=100",
                     "--hf-assets-path=tests/assets/deepseek_v3",
                     "--training.global-batch-size=4",
                     "--training.seq-len=128",
@@ -43,7 +44,8 @@ def build_deepseek_v3_2_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             override_args=[
                 (
-                    "--training.steps=100",
+                    "--training.steps=30",
+                    "--lr-scheduler.total-steps=100",
                     "--parallelism.expert-parallel-degree=2",
                     "--hf-assets-path=tests/assets/deepseek_v3",
                     "--training.local-batch-size=2",

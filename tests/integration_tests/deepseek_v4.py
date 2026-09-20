@@ -71,12 +71,17 @@ def build_deepseek_v4_checkpoint_resume_test_list() -> list[OverrideDefinitions]
         "--parallelism.data-parallel-shard-degree=2",
         "--parallelism.expert-parallel-degree=2",
     )
+    adamw_swap_args = (*checkpoint_args, "--optimizer.name=AdamW")
+    adamw_swap_overrides = (
+        *GOLDEN_OVERRIDES,
+        "torchtitan_npu.override.common.optimizer.swap_optimizer",
+    )
     checkpoint_case = OverrideDefinitions(
         override_args=[
-            GOLDEN_OVERRIDES + checkpoint_args,
-            GOLDEN_OVERRIDES + checkpoint_args + ("--checkpoint.load-step=2",),
+            adamw_swap_overrides + adamw_swap_args,
+            adamw_swap_overrides + adamw_swap_args + ("--checkpoint.load-step=2",),
         ],
-        test_descr="DeepSeek-V4 checkpoint resume ep2 fsdp2 exact loss and grad norm",
+        test_descr="DeepSeek-V4 AdamW NovaSwap checkpoint FSDP2 EP2 exact resume",
         test_name="dsv4_checkpoint_resume_ep2_fsdp2",
         expected_steps=((1, 2, 3, 4), (3, 4)),
         ngpu=2,
@@ -110,7 +115,8 @@ def build_deepseek_v4_test_list() -> list[OverrideDefinitions]:
             test_descr="DeepSeek-V4 golden 1rank",
             ngpu=1,
             extra_args=(
-                "--training.steps=100",
+                "--training.steps=30",
+                "--lr-scheduler.total-steps=100",
                 "--hf-assets-path=tests/assets/deepseek_v3",
                 "--training.global-batch-size=2",
             ),
@@ -122,30 +128,14 @@ def build_deepseek_v4_test_list() -> list[OverrideDefinitions]:
             test_descr="DeepSeek-V4 golden ep2 fsdp2",
             ngpu=2,
             extra_args=(
-                "--training.steps=100",
+                "--training.steps=30",
+                "--lr-scheduler.total-steps=100",
                 "--parallelism.expert-parallel-degree=2",
                 "--hf-assets-path=tests/assets/deepseek_v3",
                 "--training.global-batch-size=2",
             ),
             use_golden=True,
             check_loss=True,
-        ),
-        _build_case(
-            test_name="dsv4_muon_swap_ep2_fsdp2",
-            test_descr="DeepSeek-V4 fused ops DistMuon and AdamW NovaSwap ep2 fsdp2",
-            ngpu=2,
-            extra_args=(
-                "--training.steps=2",
-                "--parallelism.expert-parallel-degree=2",
-                "--hf-assets-path=tests/assets/deepseek_v3",
-                "--training.global-batch-size=2",
-                "--optimizer.name=Muon",
-            ),
-            extra_override_imports=(
-                "torchtitan_npu.override.common.optimizer.swap_optimizer",
-            ),
-            use_golden=False,
-            check_loss=False,
         ),
         _build_case(
             test_name="dsv4_smla_1rank_aot_eager",

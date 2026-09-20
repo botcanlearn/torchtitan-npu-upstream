@@ -6,15 +6,22 @@
 
 """Overrides for NPU swap-backed optimizer states and their checkpoints."""
 
+import math
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from types import MethodType
-from typing import Any
+from typing import Any, TypedDict
 
 import torch
 import torch_npu
 from torch.distributed._tensor import DTensor
 from torch.optim.optimizer import Optimizer, _get_scalar_dtype, _use_grad_for_differentiable
+from torchtitan.components.checkpoint_utils import (
+    get_flat_optim_state_dict,
+    init_optim_state,
+    load_flat_optim_state_dict,
+)
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import derive, override
 from torchtitan.distributed.flex_shard.dist_muon import DistMuon
@@ -24,6 +31,91 @@ from torchtitan_npu.extensions.novaswap import swap_api
 
 _ADAMW_SWAP_BUCKET_TIMES = 16
 _ADAMW_SWAP_RESIDENT_TARGET_BUCKETS = 3
+
+
+class _CheckpointMetadata(TypedDict):
+    global_shape: tuple[int, ...]
+    global_offsets: tuple[tuple[int, ...], ...]
+    local_offsets: tuple[tuple[int, ...], ...]
+    local_sizes: tuple[tuple[int, ...], ...]
+
+
+def make_checkpointable_view(
+    tensor_cpu: torch.Tensor,
+    *,
+    byte_offset: int,
+    dtype: torch.dtype,
+    shape: tuple[int, ...],
+    stride: tuple[int, ...],
+    global_shape: tuple[int, ...],
+    global_offsets: tuple[tuple[int, ...], ...],
+    local_offsets: tuple[tuple[int, ...], ...],
+    local_sizes: tuple[tuple[int, ...], ...],
+) -> torch.Tensor:
+    """Expose a logical tensor inside one raw NovaSwap CPU buffer to DCP."""
+    if tensor_cpu.device.type != "cpu" or tensor_cpu.dtype != torch.uint8:
+        raise TypeError("checkpoint view requires a CPU uint8 swap buffer")
+
+    logical_nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+    if byte_offset < 0 or byte_offset + logical_nbytes > tensor_cpu.numel():
+        raise ValueError(
+            f"checkpoint view byte range [{byte_offset}, {byte_offset + logical_nbytes}) "
+            f"exceeds the {tensor_cpu.numel()}-byte swap buffer"
+        )
+
+    raw_view = tensor_cpu.narrow(0, byte_offset, logical_nbytes)
+    view = raw_view.view(dtype).as_strided(shape, stride)
+    if not view.is_contiguous():
+        raise ValueError("checkpoint view requires a compact contiguous NovaSwap layout")
+
+    setattr(view, "global_shape", global_shape)  # noqa: B010
+    setattr(view, "global_offsets", global_offsets)  # noqa: B010
+    setattr(view, "local_offsets", local_offsets)  # noqa: B010
+    setattr(view, "local_sizes", local_sizes)  # noqa: B010
+    return view
+
+
+def get_checkpoint_view(
+    tensor_name: str,
+    tensor: torch.Tensor,
+    *,
+    byte_offset: int = 0,
+) -> torch.Tensor:
+    """Build a zero-copy DCP view of one swapped optimizer-state tensor."""
+    tensor_cpu = swap_api.get_d2h_cpu_buffer(tensor_name)
+    local = tensor.to_local() if isinstance(tensor, DTensor) else tensor
+    return make_checkpointable_view(
+        tensor_cpu,
+        byte_offset=byte_offset,
+        dtype=local.dtype,
+        shape=tuple(local.shape),
+        stride=tuple(local.stride()),
+        **_checkpoint_metadata(tensor, local),
+    )
+
+
+def _checkpoint_metadata(tensor: torch.Tensor, local: torch.Tensor) -> _CheckpointMetadata:
+    if isinstance(tensor, DTensor):
+        chunks = tensor.__create_chunk_list__()
+        if len(chunks) != 1:
+            raise RuntimeError(
+                f"CheckpointableTensor currently requires exactly one local DTensor chunk, got {len(chunks)}"
+            )
+        chunk = chunks[0]
+        global_offsets = (tuple(chunk.offsets),)
+        local_sizes = (tuple(chunk.sizes),)
+        global_shape = tuple(tensor.shape)
+    else:
+        global_offsets = (tuple(0 for _ in local.shape),)
+        local_sizes = (tuple(local.shape),)
+        global_shape = tuple(local.shape)
+
+    return {
+        "global_shape": global_shape,
+        "global_offsets": global_offsets,
+        "local_offsets": (tuple(0 for _ in local.shape),),
+        "local_sizes": local_sizes,
+    }
 
 
 def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -57,6 +149,9 @@ class _AdamWSwapBucket:
     flat: torch.Tensor | None = None
 
 
+_SwappedState = tuple[torch.Tensor, str, str, torch.Tensor]
+
+
 class _NovaSwapAdamW:
     """Run stock AdamW state through NovaSwap with a bucket-level pipeline."""
 
@@ -66,10 +161,34 @@ class _NovaSwapAdamW:
         self._buckets: list[_AdamWSwapBucket] = []
         self._target_bucket_bytes = 1
         self._largest_bucket_bytes = 1
+        self.checkpoint_locations: dict[tuple[torch.Tensor, str], tuple[str, int]] = {}
 
     @staticmethod
     def _submit(bucket: _AdamWSwapBucket, action: str) -> None:
         swap_api.execute(bucket.state_name, action)
+
+    @staticmethod
+    def _state_keys(group: dict[str, Any]) -> tuple[str, ...]:
+        if group["amsgrad"]:
+            return "exp_avg", "exp_avg_sq", "max_exp_avg_sq"
+        return "exp_avg", "exp_avg_sq"
+
+    @staticmethod
+    def _initialize_step(group: dict[str, Any], device: torch.device) -> torch.Tensor:
+        if group["differentiable"]:
+            raise ValueError("AdamW NovaSwap only supports differentiable=False")
+        if group["foreach"]:
+            raise ValueError("AdamW NovaSwap only supports foreach=False")
+        # Match AdamW._init_group: fused/capturable paths keep step on-device;
+        # otherwise the scalar remains on CPU. Only the moment allocation is
+        # replaced by the bucket flat storage above.
+        if group["capturable"] or group["fused"]:
+            return torch.zeros(
+                (),
+                dtype=_get_scalar_dtype(is_fused=group["fused"]),
+                device=device,
+            )
+        return torch.tensor(0.0, dtype=_get_scalar_dtype(), device="cpu")
 
     def step(self, closure=None):
         loss = None
@@ -127,14 +246,58 @@ class _NovaSwapAdamW:
             pending_releases.append(bucket)
         return loss
 
-    def _plan_uninitialized_buckets(self) -> list[_AdamWSwapBucket]:
+    def ensure_all_state(self) -> None:
+        """Create only missing state, one bucket at a time, for checkpoint I/O."""
+        new_buckets = self._plan_uninitialized_buckets(include_without_grad=True)
+        if not new_buckets:
+            return
+
+        # A checkpoint is a synchronization point. Retire prior D2H storage
+        # before allocating a missing-state bucket so the device peak stays bounded.
+        for bucket in self._buckets:
+            swap_api.wait_for_device_release(bucket.state_name)
+
+        for bucket in new_buckets:
+            original_group = bucket.group
+            original_grads = [(parameter, parameter.grad) for parameter in bucket.parameters]
+            lr = original_group["lr"]
+            bucket.group = {
+                **original_group,
+                "lr": torch.zeros_like(lr) if isinstance(lr, torch.Tensor) else 0.0,
+            }
+            try:
+                for parameter in bucket.parameters:
+                    parameter.grad = torch.zeros_like(parameter)
+                self._initialize_bucket_state(bucket)
+                self._update_bucket(bucket)
+            finally:
+                bucket.group = original_group
+                for parameter, grad in original_grads:
+                    parameter.grad = grad
+
+            self._submit(bucket, "D2H")
+            swap_api.wait_for_device_release(bucket.state_name)
+            self._buckets.append(bucket)
+
+    def refresh_bucket_groups(self) -> None:
+        group_by_parameter = {
+            id(parameter): group for group in self.optimizer.param_groups for parameter in group["params"]
+        }
+        for bucket in self._buckets:
+            bucket.group = group_by_parameter[id(bucket.parameters[0])]
+
+    def _plan_uninitialized_buckets(
+        self,
+        *,
+        include_without_grad: bool = False,
+    ) -> list[_AdamWSwapBucket]:
         """Plan only states that PyTorch AdamW would lazily create this step."""
-        uninitialized = [
-            (group, parameter)
-            for group in self.optimizer.param_groups
-            for parameter in group["params"]
-            if parameter.grad is not None and not self.optimizer.state[parameter]
-        ]
+        uninitialized = []
+        for group in self.optimizer.param_groups:
+            for parameter in group["params"]:
+                should_initialize = parameter.grad is not None or (include_without_grad and parameter.requires_grad)
+                if should_initialize and not self.optimizer.state[parameter]:
+                    uninitialized.append((group, parameter))
         if not uninitialized:
             return []
 
@@ -189,31 +352,8 @@ class _NovaSwapAdamW:
         append_bucket()
         return buckets
 
-    @staticmethod
-    def _state_keys(group: dict[str, Any]) -> tuple[str, ...]:
-        if group["amsgrad"]:
-            return "exp_avg", "exp_avg_sq", "max_exp_avg_sq"
-        return "exp_avg", "exp_avg_sq"
-
     def _state_numel(self, group: dict[str, Any], parameter: torch.Tensor) -> int:
         return len(self._state_keys(group)) * _local_tensor(parameter).numel()
-
-    @staticmethod
-    def _initialize_step(group: dict[str, Any], device: torch.device) -> torch.Tensor:
-        if group["differentiable"]:
-            raise ValueError("AdamW NovaSwap only supports differentiable=False")
-        if group["foreach"]:
-            raise ValueError("AdamW NovaSwap only supports foreach=False")
-        # Match AdamW._init_group: fused/capturable paths keep step on-device;
-        # otherwise the scalar remains on CPU. Only the moment allocation is
-        # replaced by the bucket flat storage above.
-        if group["capturable"] or group["fused"]:
-            return torch.zeros(
-                (),
-                dtype=_get_scalar_dtype(is_fused=group["fused"]),
-                device=device,
-            )
-        return torch.tensor(0.0, dtype=_get_scalar_dtype(), device="cpu")
 
     def _initialize_bucket_state(self, bucket: _AdamWSwapBucket) -> None:
         """Install flat NPU state views before the first stock AdamW update."""
@@ -234,6 +374,10 @@ class _NovaSwapAdamW:
             for state_key in state_keys:
                 view = flat.narrow(0, offset, local_parameter.numel()).view_as(local_parameter)
                 state[state_key] = _replace_local_tensor(parameter, view)
+                self.checkpoint_locations[(parameter, state_key)] = (
+                    bucket.state_name,
+                    int(view.storage_offset()) * view.element_size(),
+                )
                 offset += local_parameter.numel()
         if offset != bucket.state_numel:
             raise RuntimeError("AdamW swap bucket state size does not match its planned layout")
@@ -353,6 +497,8 @@ def virtual(
 
 
 class OptimizerStateSwapContainer(OptimizersContainer):
+    supports_async_with_pinned_mem = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
         pass
@@ -382,6 +528,8 @@ class OptimizerStateSwapContainer(OptimizersContainer):
 
     @staticmethod
     def _swap_muon(optimizer: DistMuon, model_part: int) -> None:
+        checkpoint_locations: dict[tuple[torch.Tensor, str], tuple[str, int]] = {}
+        setattr(optimizer, "_torchtitan_npu_checkpoint_locations", checkpoint_locations)  # noqa: B010
         original_momentum = optimizer._momentum
         original_prepare_local = optimizer._prepare_local
         runtime = optimizer._redistribution_runtime
@@ -394,11 +542,15 @@ class OptimizerStateSwapContainer(OptimizersContainer):
             result = original_momentum(compute_layout, grad)
             if not created:
                 return result
-            local = result.to_local()
+            local = _local_tensor(result)
             if local.numel() == 0:
                 return result
             name = make_swap_state_name("optimizer_state", model_part, compute_layout.fqn, "momentum_buffer")
             swap_api.register_tensor(local, name)
+            checkpoint_locations[(compute_layout.param, "momentum_buffer")] = (
+                name,
+                0,
+            )
             swap_api.execute(name, "D2H")
             return result
 
@@ -473,6 +625,8 @@ class OptimizerStateSwapContainer(OptimizersContainer):
         if any(state for state in optimizer.state.values()):
             raise ValueError("AdamW NovaSwap must be installed before AdamW initializes optimizer state")
         swap = _NovaSwapAdamW(optimizer)
+        setattr(optimizer, "_torchtitan_npu_checkpoint_locations", swap.checkpoint_locations)  # noqa: B010
+        setattr(optimizer, "_torchtitan_npu_swap_adapter", swap)  # noqa: B010
 
         @Optimizer.profile_hook_step
         @_use_grad_for_differentiable
@@ -482,11 +636,132 @@ class OptimizerStateSwapContainer(OptimizersContainer):
         # Install the intentional instance-level AdamW bucket-swap wrapper.
         optimizer.step = MethodType(step, optimizer)  # pyrefly: ignore [bad-override]
 
+    @staticmethod
+    def _replace_swapped_states_with_checkpoint_views(
+        optimizer: torch.optim.Optimizer,
+        flat_state: dict[str, Any],
+    ) -> None:
+        locations = getattr(optimizer, "_torchtitan_npu_checkpoint_locations")  # noqa: B009
+        for parameter, fqn, state_name, tensor in _swapped_state_tensors(optimizer):
+            key = f"state.{fqn}.{state_name}"
+            local = _local_tensor(tensor)
+            if local.numel() == 0:
+                flat_state[key] = make_checkpointable_view(
+                    torch.empty(0, dtype=torch.uint8),
+                    byte_offset=0,
+                    dtype=local.dtype,
+                    shape=tuple(local.shape),
+                    stride=tuple(local.stride()),
+                    **_checkpoint_metadata(tensor, local),
+                )
+                continue
+            location = locations.get((parameter, state_name))
+            if location is None:
+                raise RuntimeError(f"missing NovaSwap checkpoint location for optimizer state {key}")
+            tensor_name, byte_offset = location
+            flat_state[key] = get_checkpoint_view(
+                tensor_name,
+                tensor,
+                byte_offset=byte_offset,
+            )
+
+    @staticmethod
+    def _state_for_optimizer(
+        state_dict: dict[str, Any],
+        checkpoint_views: dict[str, Any],
+        originals: list[_SwappedState],
+    ) -> dict[str, Any]:
+        state_for_optimizer = dict(state_dict)
+        for _parameter, fqn, state_name, tensor in originals:
+            key = f"state.{fqn}.{state_name}"
+            incoming = state_dict.get(key)
+            target_view = checkpoint_views[key]
+            if incoming is not None and _local_tensor(tensor).numel() != 0:
+                if not isinstance(incoming, torch.Tensor):
+                    raise TypeError(f"optimizer state {key} must be a Tensor")
+                # DCP has already populated the view when both references share an address.
+                if incoming.data_ptr() != target_view.data_ptr():
+                    target_view.copy_(incoming)
+            # Keep the optimizer bound to its original NovaSwap NPU/DTensor object.
+            state_for_optimizer[key] = tensor
+        return state_for_optimizer
+
+    @staticmethod
+    def _restore_optimizer_references(
+        optimizer: torch.optim.Optimizer,
+        originals: list[_SwappedState],
+        param_names: list[Any],
+    ) -> None:
+        for parameter, _fqn, state_name, tensor in originals:
+            optimizer.state[parameter][state_name] = tensor
+        for group, names in zip(optimizer.param_groups, param_names, strict=True):
+            if names is not None:
+                group["param_names"] = names
+
     def state_dict(self) -> dict[str, Any]:
-        raise RuntimeError("Optimizer state swap v1 does not support optimizer checkpoint save")
+        result: dict[str, Any] = {}
+        for optimizer in self.optimizers:
+            _ensure_all_optim_state(optimizer)
+            flat_state = get_flat_optim_state_dict(optimizer)
+            self._replace_swapped_states_with_checkpoint_views(optimizer, flat_state)
+            result.update(flat_state)
+        return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        raise RuntimeError("Optimizer state swap v1 does not support optimizer checkpoint load")
+        for optimizer in self.optimizers:
+            self._load_optimizer_state(optimizer, state_dict)
+
+    def _load_optimizer_state(self, optimizer: torch.optim.Optimizer, state_dict: dict[str, Any]) -> None:
+        _ensure_all_optim_state(optimizer)
+        originals = list(_swapped_state_tensors(optimizer))
+        # DCP writes these target CPU views in place; direct load copies into them below.
+        checkpoint_views = get_flat_optim_state_dict(optimizer)
+        self._replace_swapped_states_with_checkpoint_views(optimizer, checkpoint_views)
+        state_for_optimizer = self._state_for_optimizer(state_dict, checkpoint_views, originals)
+        param_names = [group.get("param_names") for group in optimizer.param_groups]
+        try:
+            load_flat_optim_state_dict(optimizer, state_for_optimizer)
+        finally:
+            self._restore_optimizer_references(optimizer, originals, param_names)
+
+        swap = getattr(optimizer, "_torchtitan_npu_swap_adapter", None)
+        if isinstance(swap, _NovaSwapAdamW):
+            swap.refresh_bucket_groups()
+
+
+def _ensure_all_optim_state(optimizer: torch.optim.Optimizer) -> None:
+    swap = getattr(optimizer, "_torchtitan_npu_swap_adapter", None)
+    if isinstance(swap, _NovaSwapAdamW):
+        swap.ensure_all_state()
+    else:
+        init_optim_state(optimizer)
+
+
+def _named_optimizer_parameters(
+    optimizer: torch.optim.Optimizer,
+) -> Iterator[tuple[torch.Tensor, str]]:
+    for group in optimizer.param_groups:
+        yield from zip(group["params"], group["param_names"], strict=True)
+
+
+def _swapped_state_names(optimizer: torch.optim.Optimizer) -> tuple[str, ...]:
+    if isinstance(optimizer, DistMuon):
+        return ("momentum_buffer",)
+    if isinstance(optimizer, torch.optim.AdamW):
+        return ("exp_avg", "exp_avg_sq", "max_exp_avg_sq")
+    return ()
+
+
+def _swapped_state_tensors(
+    optimizer: torch.optim.Optimizer,
+) -> Iterator[_SwappedState]:
+    state_names = _swapped_state_names(optimizer)
+    for parameter, fqn in _named_optimizer_parameters(optimizer):
+        state = optimizer.state.get(parameter, {})
+        for state_name in state_names:
+            tensor = state.get(state_name)
+            if tensor is not None:
+                yield parameter, fqn, state_name, tensor
 
 
 # Both branches inherit the same OptimizersContainer.step overloads; Python's

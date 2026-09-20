@@ -352,6 +352,21 @@ class SwapEngine:
         return phase
 
     @classmethod
+    def get_d2h_cpu_buffer(cls, tensor_name: str) -> torch.Tensor:
+        handles = cls._handles.get(tensor_name)
+        if handles is None:
+            raise RuntimeError(f"No live swap handle for {tensor_name!r}")
+        if len(handles) != 1:
+            raise RuntimeError(f"Expected one swap handle for {tensor_name!r}, got {len(handles)}")
+        handle = handles[0]
+        if handle.transfer != "D2H":
+            raise RuntimeError(f"CPU buffer for {tensor_name!r} requires D2H phase, got {handle.transfer}")
+        _wait(handle)
+        if handle.tensor_cpu is None:
+            raise RuntimeError(f"D2H CPU buffer is unavailable for {tensor_name!r}")
+        return handle.tensor_cpu
+
+    @classmethod
     def wait_for_device_release(cls, tensor_name: str) -> None:
         """Wait for a D2H-retired NPU storage while retaining its host handle."""
         if not cls._ready:

@@ -74,6 +74,10 @@ def get_handle_phase(tensor_name: str) -> str | None:
     return SwapEngine.handle_phase(tensor_name)
 
 
+def get_d2h_cpu_buffer(tensor_name: str) -> torch.Tensor:
+    return SwapEngine.get_d2h_cpu_buffer(tensor_name)
+
+
 def wait_for_device_release(tensor_name: str) -> None:
     """Wait until a D2H operation has retired this tensor's NPU storage."""
     SwapEngine.wait_for_device_release(tensor_name)

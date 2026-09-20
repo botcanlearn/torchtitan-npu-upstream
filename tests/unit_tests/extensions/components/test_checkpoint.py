@@ -29,6 +29,8 @@ class _CheckpointManager:
     @dataclass(kw_only=True, slots=True)
     class Config:
         interval: int = 1
+        enable: bool = True
+        async_mode: str = "disabled"
 
     def __init__(self, config, **kwargs):
         self.config = config
@@ -112,6 +114,29 @@ def test_manager_reads_hash_manifest_extension_config():
     manager = product_checkpoint.CheckpointManager(config)
 
     assert manager.verify_hash_manifest is True
+
+
+def test_manager_rejects_pinned_async_for_swap_optimizer():
+    config = product_checkpoint.CheckpointManager.Config(
+        async_mode="async_with_pinned_mem"
+    )
+    optimizers = types.SimpleNamespace(supports_async_with_pinned_mem=False)
+
+    with pytest.raises(
+        ValueError,
+        match=r"async_with_pinned_mem.*unsupported.*swap_optimizer",
+    ):
+        product_checkpoint.CheckpointManager(config, optimizers=optimizers)
+
+
+def test_manager_keeps_pinned_async_for_native_optimizer():
+    config = product_checkpoint.CheckpointManager.Config(
+        async_mode="async_with_pinned_mem"
+    )
+
+    manager = product_checkpoint.CheckpointManager(config, optimizers=object())
+
+    assert manager.config is config
 
 
 def test_save_marks_pending_before_save_and_writes_manifest_afterward():
