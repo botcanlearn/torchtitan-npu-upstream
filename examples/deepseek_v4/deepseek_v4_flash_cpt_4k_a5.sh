@@ -21,11 +21,12 @@ export HCCL_ASYNC_ERROR_HANDLING="${HCCL_ASYNC_ERROR_HANDLING:-0}"
 # Override this for the host topology reported by `npu-smi info -t topo`.
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
 
-# Partial RoPE fuses through the asc_partial override.
-# swiglu_group fuses SwiGLU for routed and shared experts.
-export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
-                                       torchtitan_npu.override.common.swiglu_group.asc \
-                                       torchtitan_npu.override.common.swiglu_group.asc_shared_experts}"
+# A5-only fused ops; USE_GOLDEN=1 keeps the pure reference list.
+if [[ "${USE_GOLDEN:-0}" != "1" ]]; then
+    export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
+                                           torchtitan_npu.override.common.swiglu_group.asc \
+                                           torchtitan_npu.override.common.swiglu_group.asc_shared_experts}"
+fi
 
 NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, \
                       xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"

@@ -136,6 +136,7 @@ OPTIMIZER_ARGS="
 OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then
+    DEFAULT_CLI_OVERRIDES=""
     NPU_OPS_OVERRIDES=(
         torchtitan_npu.override.common.rope.workaround
         torchtitan_npu.override.deepseek_v4.sparse_attn.golden

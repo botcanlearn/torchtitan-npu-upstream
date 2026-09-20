@@ -154,7 +154,7 @@ else
     NPU_OPS_OVERRIDES=(
         # Attention / DSA
         torchtitan_npu.override.common.rms_norm.asc
-        torchtitan_npu.override.common.rope.asc_complex
+        torchtitan_npu.override.common.rope.asc_partial
 
         torchtitan_npu.override.deepseek_v4.sparse_attn.asc_li_metadata
         torchtitan_npu.override.deepseek_v4.sparse_attn.asc_li
@@ -166,6 +166,9 @@ else
         torchtitan_npu.override.deepseek_v4.mhc.asc_hc_post
         # MoE token dispatcher
         torchtitan_npu.override.common.token_dispatcher.asc
+        # MoE SwiGLU Group
+        torchtitan_npu.override.common.swiglu_group.asc
+        torchtitan_npu.override.common.swiglu_group.asc_shared_experts
     )
 fi
 
