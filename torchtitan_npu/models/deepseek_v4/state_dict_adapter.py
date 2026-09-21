@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 import torch
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Shard
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
@@ -143,6 +144,16 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         f"layers.{layer_id}.ffn.gate.tid2eid": (f"layers.{layer_id}.moe.router.tid2eid"),
                     }
                 )
+
+    def get_hf_storage_reader(self, path: str, from_quantized: bool = False) -> HuggingFaceStorageReader:
+        if from_quantized:
+            from torchtitan_npu.extensions.mx_storage_reader.hf_storage import MXHuggingFaceStorageReader
+
+            reader = MXHuggingFaceStorageReader(path)
+            reader.read_metadata()
+            if reader._mx_tensors:
+                return reader
+        return super().get_hf_storage_reader(path, from_quantized)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
