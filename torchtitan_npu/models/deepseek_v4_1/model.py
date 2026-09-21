@@ -229,12 +229,9 @@ class V41Model(Decoder):
                 raise NotImplementedError(f"DeepSeek V4.1 currently supports CP=1 only; got CP={cp}")
             if pp != 1:
                 raise NotImplementedError(f"DeepSeek V4.1 does not support pipeline parallelism; got PP={pp}")
-            compile_config = getattr(config, "compile", None)
-            if compile_config is not None and getattr(compile_config, "enable", False):
-                raise NotImplementedError(
-                    "DeepSeek V4.1 does not support torch.compile yet; "
-                    "CSA2 cross-layer state is currently an eager-only runtime contract"
-                )
+            # compile (aot_eager / inductor) is supported: the cross-layer
+            # state is threaded explicitly and the sparse core is the
+            # traceable selected_attention reference implementation.
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
             if len(self.compress_ratios) != self.n_layers:

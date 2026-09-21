@@ -2,7 +2,21 @@
 
 V4.1 的模型、图像路由、压缩 attention、metadata 和并行化均由 `torchtitan_npu/models/deepseek_v4_1` 持有，不依赖 V4 模型或其专属 override。模型默认算子是 Attention Gym 的 eager `selected_attention`（`CompressedSparseInnerAttention2`）、公共 MoE 工厂与上游默认的 indexer 蒸馏损失 `IndexerDistillLoss`（coeff=0.01）。
 
-当前支持 **FSDP + EP、TP1 / CP1 / PP1、eager 执行**，保留 FullAC 与图文输入。启动方式与 DSV4 一致：A3 脚本组织公共实验参数与融合列表，A5 调用 A3 并追加 CPU 亲和性、partial 文本 RoPE、两项 SwiGLUGroup、sparse attention 与 mHC Sinkhorn；两种入口均通过 `USE_GOLDEN=1` 选择 reference。A3 默认融合包含 RMSNorm、文本（`asc_complex`）与视觉 RoPE、MoE token dispatcher 和 mHC post；A5 将文本 RoPE 换为 `asc_partial` 并追加 routed/shared SwiGLUGroup、sparse 与 Sinkhorn。routed experts 的 grouped GEMM 是 reference 与融合共用的公共路径，不再作为独立融合开关。不支持量化、ngram、MTP、GraphTrainer；不支持的 TP、CP、PP 和 compile 配置在入口拒绝。
+当前支持 **FSDP + EP、TP1 / CP1 / PP1、eager 执行与 torch.compile**，保留 FullAC 与图文输入。启动方式与 DSV4 一致：A3 脚本组织公共实验参数与融合列表，A5 调用 A3 并追加 CPU 亲和性、partial 文本 RoPE、两项 SwiGLUGroup、sparse attention 与 mHC Sinkhorn；两种入口均通过 `USE_GOLDEN=1` 选择 reference。A3 默认融合包含 RMSNorm、文本（`asc_complex`）与视觉 RoPE、MoE token dispatcher 和 mHC post；A5 将文本 RoPE 换为 `asc_partial` 并追加 routed/shared SwiGLUGroup、sparse 与 Sinkhorn。routed experts 的 grouped GEMM 是 reference 与融合共用的公共路径，不再作为独立融合开关。不支持量化、ngram、MTP、GraphTrainer；TP/CP/PP 仍限 1（更高并行度在入口拒绝）。
+
+**torch.compile 已支持**（每个 TransformerBlock 整图编译，跨层状态为显式前向参数），通过脚本 `"$@"` 透传超参开启：
+
+```sh
+# aot_eager 整图（fullgraph=True）
+bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
+    --compile.enable --compile.components model --compile.backend aot_eager
+
+# inductor
+bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
+    --compile.enable --compile.components model --compile.backend inductor
+```
+
+编译态按 MoE 路由形态二分：负载均衡路由（A3/A5 脚本默认）下 inductor 保持整图（含 MoE 通信）；数据依赖路由（显式 `--debug.no-moe-force-load-balance`）时 MoE 通信在编译图外执行。
 
 单机 8 卡入口（默认读取仓内上游 CC12M 测试 tar；数据源可通过标准 CLI 覆盖）：
 

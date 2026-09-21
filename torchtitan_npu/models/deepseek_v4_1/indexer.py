@@ -253,7 +253,11 @@ class ScoreAndSelect(Module):
                 scores_BLN = scores_BLN.masked_fill(~candidates_BLN, -torch.inf)
 
             topk = min(self.index_topk, scores_BLN.size(-1))
-            selected_BLK = scores_BLN.topk(topk, dim=-1, sorted=False).indices.sort(dim=-1).values
+            # aten sort does not survive dynamo fake-eval under the spmd patch
+            # stack; the selected slot ids are distinct, so a full-width
+            # topk(largest=False, sorted=True) is the identical ascending sort.
+            selected_BLK = scores_BLN.topk(topk, dim=-1, sorted=False).indices
+            selected_BLK = selected_BLK.topk(topk, dim=-1, largest=False, sorted=True).values
             # Entries the query cannot see yet, or that a pool excluded, come back as -1,
             # which the sparse attention and the loss both skip.
             topk_indices_BLK = torch.where(visible_BLN.gather(-1, selected_BLK), selected_BLK, -1)

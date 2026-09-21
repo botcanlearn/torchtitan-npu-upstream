@@ -97,14 +97,28 @@ def test_upstream_dispatcher_config_rejects_absorption_option():
 def test_standard_dispatchers_reuse_torchtitan_helpers():
     assert issubclass(LocalTokenDispatcher, dispatcher_patch.TorchTitanLocalTokenDispatcher)
     assert issubclass(AllToAllTokenDispatcher, dispatcher_patch.TorchTitanAllToAllTokenDispatcher)
-    assert LocalTokenDispatcher._local_reorder is dispatcher_patch.TorchTitanLocalTokenDispatcher._local_reorder
+    # The traceable stable-argsort workaround now lives in
+    # override/common/token_dispatcher and is opted in at compile time only,
+    # so the patch keeps the upstream _local_reorder verbatim.
+    assert (
+        LocalTokenDispatcher._local_reorder
+        is dispatcher_patch.TorchTitanLocalTokenDispatcher._local_reorder
+    )
+    assert (
+        AllToAllTokenDispatcher._local_reorder
+        is dispatcher_patch.TorchTitanAllToAllTokenDispatcher._local_reorder
+    )
     assert (
         AllToAllTokenDispatcher._token_count_exchange
         is dispatcher_patch.TorchTitanAllToAllTokenDispatcher._token_count_exchange
     )
+    # Patch override: _sync_token_count_exchange forces synchronous D2H
+    # copies for the split lists (non_blocking=False) -- under torch.compile
+    # the inductor scheduler may hoist the non-blocking input_splits reads
+    # above the blocking output_splits copy and read uninitialized memory.
     assert (
         AllToAllTokenDispatcher._sync_token_count_exchange
-        is dispatcher_patch.TorchTitanAllToAllTokenDispatcher._sync_token_count_exchange
+        is not dispatcher_patch.TorchTitanAllToAllTokenDispatcher._sync_token_count_exchange
     )
     assert (
         AllToAllTokenDispatcher._dispatch_token_exchange
@@ -116,6 +130,35 @@ def test_standard_dispatchers_reuse_torchtitan_helpers():
     )
     assert AllToAllTokenDispatcher._permute is not dispatcher_patch.TorchTitanAllToAllTokenDispatcher._permute
     assert AllToAllTokenDispatcher._unpermute is dispatcher_patch.TorchTitanAllToAllTokenDispatcher._unpermute
+
+
+def test_compile_friendly_local_reorder_matches_upstream():
+    """The compile-time opt-in reorder is the exact upstream permutation."""
+    pytest.importorskip("torch_npu")
+    from torchtitan_npu.override.common.token_dispatcher import (
+        apply_compile_friendly_local_reorder,
+    )
+
+    fake_self = SimpleNamespace(num_experts=4, top_k=2)
+    x_TD = torch.randn(8, 3)
+    scores_TK = torch.rand(8, 2)
+    expert_ids_TK = torch.tensor([[3, 1], [0, 0], [2, 1], [1, 3], [0, 2], [3, 3], [1, 0], [2, 2]])
+
+    saved = (
+        LocalTokenDispatcher._local_reorder,
+        AllToAllTokenDispatcher._local_reorder,
+    )
+    try:
+        apply_compile_friendly_local_reorder()
+        for cls in (LocalTokenDispatcher, AllToAllTokenDispatcher):
+            upstream = dispatcher_patch.TorchTitanLocalTokenDispatcher._local_reorder(
+                fake_self, x_TD, scores_TK, expert_ids_TK
+            )
+            patched = cls._local_reorder(fake_self, x_TD, scores_TK, expert_ids_TK)
+            for got, want in zip(patched, upstream, strict=True):
+                torch.testing.assert_close(got, want)
+    finally:
+        LocalTokenDispatcher._local_reorder, AllToAllTokenDispatcher._local_reorder = saved
 
 
 def test_ep_dispatch_transports_scores_in_router_dtype(monkeypatch):

@@ -59,6 +59,7 @@ from torchtitan_npu.patches.torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     LocalDispatchMetadata,
+    LocalTokenDispatcher,
 )
 
 if TYPE_CHECKING:
@@ -70,6 +71,59 @@ if TYPE_CHECKING:
         DispatchHandle,
         ElasticBufferHandle,
     )
+
+
+def _stable_argsort_expert_ids(values_1d: torch.Tensor, num_experts: int) -> torch.Tensor:
+    """Exact stable argsort for expert ids in ``[0, num_experts)``.
+
+    ``torch.argsort(..., stable=True)`` does not survive dynamo fake-eval
+    under the spmd_types patch stack (aten sort kernels fail inside
+    FakeTensor evaluation).  The composite key ``expert_id * N + position``
+    is strictly ordered by ``(expert, position)``, so an ascending
+    full-width topk over the keys yields the identical stable permutation
+    in O(N) time and memory (no ``[N, E]`` one-hot).
+    """
+    n = values_1d.numel()
+    keys = values_1d.to(torch.int64) * n + torch.arange(n, device=values_1d.device)
+    return keys.topk(n, largest=False, sorted=True).indices
+
+
+def _compile_friendly_local_reorder(
+    self,
+    x_TD: torch.Tensor,
+    topk_scores_TK: torch.Tensor,
+    topk_expert_ids_TK: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Traceable replacement for the dispatcher ``_local_reorder``.
+
+    Upstream uses ``torch.argsort(stable=True)``, which does not trace
+    under fullgraph=True with the spmd_types stack.  One shared body for
+    the Local and AllToAll dispatchers (identical upstream); the returned
+    permutation matches upstream exactly, so eager and compiled runs stay
+    bit-exact.
+    """
+    token_indices_experts_sorted_N = _stable_argsort_expert_ids(
+        topk_expert_ids_TK.view(-1).to(torch.int64), self.num_experts
+    )
+    topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[token_indices_experts_sorted_N]
+    token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
+    routed_input_ND = x_TD[token_indices_experts_sorted_N]
+    return (
+        routed_input_ND,
+        token_indices_experts_sorted_N,
+        topk_scores_experts_sorted_N,
+    )
+
+
+def apply_compile_friendly_local_reorder() -> None:
+    """Opt the dispatchers into the traceable stable reorder (compile only).
+
+    Called by the V4.1 compile assembly (models/deepseek_v4_1/parallelize)
+    when torch.compile is enabled; eager runs keep the upstream
+    ``torch.argsort(stable=True)`` helper.
+    """
+    LocalTokenDispatcher._local_reorder = _compile_friendly_local_reorder
+    AllToAllTokenDispatcher._local_reorder = _compile_friendly_local_reorder
 
 
 class AscAllToAllTokenDispatcher(AllToAllTokenDispatcher):

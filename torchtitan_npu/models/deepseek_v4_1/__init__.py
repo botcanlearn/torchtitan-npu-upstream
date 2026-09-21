@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
@@ -767,7 +768,20 @@ def deepseek_v4_1_flash_40layers_16experts_vision_config(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
     )
 
-    return _attach_engram(config, _ENGRAM_V41_FLASH_GEOMETRY)
+    # Debug knob: shrink host-side engram tables for single-node runs.
+    # SparseAdam materializes dense exp_avg/exp_avg_sq (zeros_like) on the
+    # first step, so production 16M-row tables need ~2.4TB host RAM across
+    # 8 ranks. TORCHTITAN_ENGRAM_TABLE_ROWS scales only the per-order row
+    # count; width/heads/token-map semantics are unchanged. Unset keeps
+    # the published V4.1-Flash geometry.
+    table_rows = os.environ.get("TORCHTITAN_ENGRAM_TABLE_ROWS")
+    engram_geometry = _ENGRAM_V41_FLASH_GEOMETRY
+    if table_rows is not None:
+        engram_geometry = dataclasses.replace(
+            _ENGRAM_V41_FLASH_GEOMETRY,
+            vocab_size_per_ngram=(int(table_rows),) * len(_ENGRAM_V41_FLASH_GEOMETRY.vocab_size_per_ngram),
+        )
+    return _attach_engram(config, engram_geometry)
 
 
 def deepseek_v4_1_debugmodel_config(

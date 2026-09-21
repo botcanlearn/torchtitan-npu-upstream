@@ -122,6 +122,43 @@ class LocalTokenDispatcher(TorchTitanLocalTokenDispatcher):
 class AllToAllTokenDispatcher(TorchTitanAllToAllTokenDispatcher):
     """Standard EP dispatcher with optional pre-W2 router-score absorption."""
 
+    def _sync_token_count_exchange(  # pyrefly: ignore [bad-override]
+        self,
+        num_local_tokens_per_expert_E: torch.Tensor,
+        num_global_tokens_per_local_expert_EP_e: torch.Tensor,
+        ep_size: int,
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        # Patch override: upstream copies input_splits to CPU with
+        # non_blocking=True and relies on the later blocking output_splits
+        # copy to sync the stream. Under torch.compile the scheduler may
+        # hoist the input_splits reads above the blocking copy (no data
+        # dependency between them), so the reads race with the async D2H
+        # copy and return uninitialized memory -- garbage split sizes make
+        # the compiled backward fail with "Split sizes doesn't match total
+        # dim 0 size" at the variable-size data all-to-all. Copy each split
+        # list synchronously; the extra sync is negligible because the
+        # output_splits copy already blocks.
+        num_global_tokens_per_local_expert_EP_e = torch.ops._c10d_functional.wait_tensor(
+            num_global_tokens_per_local_expert_EP_e
+        )
+        num_global_tokens_per_local_expert_E = num_global_tokens_per_local_expert_EP_e.reshape(-1)
+        input_splits = (
+            num_local_tokens_per_expert_E.view(ep_size, -1).sum(dim=1).to(torch.device("cpu"), non_blocking=False)
+        )
+        output_splits = (
+            num_global_tokens_per_local_expert_E.view(ep_size, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=False)
+        )
+        input_splits_list = input_splits.tolist()
+        output_splits_list = output_splits.tolist()
+
+        return (
+            num_global_tokens_per_local_expert_E,
+            input_splits_list,
+            output_splits_list,
+        )
+
     @dataclass(kw_only=True, slots=True)
     class Config(TorchTitanAllToAllTokenDispatcher.Config):
         # Patch override: retain router scores for pre-W2 absorption.

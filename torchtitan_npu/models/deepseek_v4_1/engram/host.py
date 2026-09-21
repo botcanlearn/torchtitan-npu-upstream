@@ -12,10 +12,20 @@ from typing import cast
 
 import torch
 import torch.distributed as dist
+
+try:  # torch builds differ in the opaque-object custom-class API surface
+    from torch._library.opaque_object import (  # pyrefly: ignore [missing-module-attribute]
+        CustomClassBase,  # pyrefly: ignore [missing-module-attribute]
+        register_opaque_type,  # pyrefly: ignore [missing-module-attribute]
+    )
+
+    _HAS_OPAQUE_OBJECT_API = True
+except ImportError:  # torch build without the opaque-object custom-class API
+    _HAS_OPAQUE_OBJECT_API = False
 from torchtitan.tools.logging import logger
 
 from .core import EngramTable
-from .lookup import HostEngramLookup
+from .lookup import HostEngramLookup, _lookup_grad_rows, _lookup_rows
 
 
 class HostEngramTable(EngramTable):
@@ -36,6 +46,10 @@ class HostEngramTable(EngramTable):
         self._grad_keepalive = torch.zeros((), requires_grad=True)
         self._replica_group: dist.ProcessGroup | None = None
         self._replica_size = 1
+        # Opaque custom-op handles may not be created inside a compiled
+        # region, so materialize one per table up front and reuse it. On torch
+        # builds without the opaque-object API the legacy lookup runs instead.
+        self._host_lookup_handle = HostEngramTableHandle(self) if _HAS_OPAQUE_OBJECT_API else None
         self._mark_host_weight()
 
     def forward(
@@ -191,8 +205,8 @@ class HostEngramTable(EngramTable):
         for replica in range(self._replica_size):
             rows = int(counts[replica])
             if rows:
-                ids_parts.append(gathered_ids[replica][:rows].to(device="cpu"))
-                values_parts.append(gathered_values[replica][:rows].to(device="cpu"))
+                ids_parts.append(gathered_ids[replica][:rows].to(device="cpu", copy=True))
+                values_parts.append(gathered_values[replica][:rows].to(device="cpu", copy=True))
 
         self._pending_sparse_grad = torch.sparse_coo_tensor(
             torch.cat(ids_parts).unsqueeze(0),
@@ -346,9 +360,172 @@ class HostEngramTable(EngramTable):
         ).coalesce()
 
     def _distributed_lookup(self, row_ids_N: torch.Tensor) -> torch.Tensor:
-        if torch.compiler.is_compiling():
-            raise RuntimeError("Torch Host Engram lookup currently supports eager training only.")
-        return HostEngramLookup.apply(self.weight, row_ids_N, self, self._grad_keepalive)
+        if not _HAS_OPAQUE_OBJECT_API:
+            # Torch builds without the opaque-object API keep the legacy
+            # autograd lookup: eager training only.
+            if torch.compiler.is_compiling():
+                raise RuntimeError("Torch Host Engram lookup currently supports eager training only.")
+            return HostEngramLookup.apply(self.weight, row_ids_N, self, self._grad_keepalive)
+        # The host lookup runs behind a custom-op boundary so torch.compile
+        # fullgraph treats it as an opaque node instead of tracing the
+        # data-dependent all_to_all / CPU row access. The same op serves the
+        # eager path, so numerics are identical in both modes.
+        return _host_engram_lookup(
+            self.weight,
+            row_ids_N,
+            self._grad_keepalive,
+            self._ep_size > 1,
+            self._host_lookup_handle,
+        )[0]
+
+
+class _OpCtx:
+    """Adapter that lets the module-level lookup helpers save state on a
+    plain namespace when they run inside the custom-op implementations."""
+
+    def __init__(self) -> None:
+        self.saved_tensors: tuple = ()
+        self.send_splits: list | None = None
+        self.recv_splits: list | None = None
+        self.group = None
+
+    def save_for_backward(self, *tensors) -> None:
+        self.saved_tensors = tensors
+
+
+# The opaque-handle custom-op machinery below is only definable on torch
+# builds that expose torch._library.opaque_object's custom-class API;
+# otherwise HostEngramTable falls back to the legacy eager lookup above.
+if _HAS_OPAQUE_OBJECT_API:
+
+    class HostEngramTableHandle(CustomClassBase):
+        """Opaque reference to a ``HostEngramTable`` across custom-op boundaries."""
+
+        def __init__(self, value: HostEngramTable):
+            self.value: HostEngramTable = value
+
+        def __eq__(self, other):
+            return isinstance(other, HostEngramTableHandle) and self.value is other.value
+
+        def __hash__(self):
+            return id(self.value)
+
+    register_opaque_type(HostEngramTableHandle, typ="reference")  # pyrefly: ignore [unbound-name]
+
+    @torch.library.custom_op("torchtitan_npu::host_engram_lookup", mutates_args=())
+    def _host_engram_lookup(
+        weight: torch.Tensor,
+        row_ids: torch.Tensor,
+        keepalive: torch.Tensor,
+        distributed: bool,
+        table: HostEngramTableHandle,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Opaque host-table lookup so fullgraph torch.compile never traces the
+        data-dependent all_to_all / CPU row access. Returns ``rows`` plus the
+        tensors the backward op needs at runtime."""
+        if distributed:
+            ctx = _OpCtx()
+            group = table.value.ep_mesh.get_group()  # pyrefly: ignore [missing-attribute]
+            rows = _lookup_rows(ctx, weight, row_ids, group)
+            inverse, received_ids = ctx.saved_tensors
+            return (
+                rows,
+                inverse,
+                received_ids,
+                torch.tensor(ctx.send_splits, dtype=torch.int64),
+                torch.tensor(ctx.recv_splits, dtype=torch.int64),
+            )
+        local_ids = row_ids.reshape(-1).to(device="cpu", copy=True)
+        rows = weight.index_select(0, local_ids).to(device=row_ids.device).view(*row_ids.shape, weight.shape[1])
+        # Custom-op outputs may not alias each other, so hand out distinct
+        # placeholder tensors for the unused backward slots.
+        e1 = row_ids.new_empty((0,), dtype=torch.int64)
+        e2 = row_ids.new_empty((0,), dtype=torch.int64)
+        e3 = row_ids.new_empty((0,), dtype=torch.int64)
+        return rows, e1, local_ids, e2, e3
+
+    @_host_engram_lookup.register_fake
+    def _host_engram_lookup_fake(weight, row_ids, keepalive, distributed, table):
+        # The auxiliary outputs are consumed only by the equally opaque backward
+        # op, so placeholder shapes suffice; ``rows`` mirrors the real lookup.
+        e1 = row_ids.new_empty((0,), dtype=torch.int64)
+        e2 = row_ids.new_empty((0,), dtype=torch.int64)
+        e3 = row_ids.new_empty((0,), dtype=torch.int64)
+        e4 = row_ids.new_empty((0,), dtype=torch.int64)
+        rows = row_ids.new_empty((*row_ids.shape, weight.shape[1]), dtype=weight.dtype)
+        return rows, e1, e2, e3, e4
+
+    def _engram_lookup_setup_context(ctx, inputs, output) -> None:
+        _weight, row_ids, _keepalive, distributed, table = inputs
+        _rows, inverse, received_ids, send_counts, recv_counts = output
+        ctx.table = table
+        ctx.distributed = distributed
+        ctx.anchor_device = inputs[2].device
+        ctx.anchor_dtype = inputs[2].dtype
+        if distributed:
+            ctx.save_for_backward(inverse, received_ids, send_counts, recv_counts)
+        else:
+            ctx.save_for_backward(row_ids)
+
+    def _engram_lookup_backward(ctx, grad_rows, _g_inverse, _g_received, _g_send, _g_recv):
+        if ctx.distributed:
+            inverse, received_ids, send_counts, recv_counts = ctx.saved_tensors
+            g_keepalive = _host_engram_lookup_backward(
+                grad_rows, inverse, received_ids, send_counts, recv_counts, grad_rows, True, ctx.table
+            )
+        else:
+            (row_ids,) = ctx.saved_tensors
+            g_keepalive = _host_engram_lookup_backward(
+                grad_rows, grad_rows, grad_rows, grad_rows, grad_rows, row_ids, False, ctx.table
+            )
+        # Sparse grads reach the host table via ``accumulate_sparse_gradient``
+        # inside the backward op. The op's scalar output becomes the keepalive
+        # gradient, which forces the compiled backward graph to keep (and run)
+        # the op; a constant zeros grad would let it be DCEd away.
+        return None, None, g_keepalive, None, None
+
+    torch.library.register_autograd(
+        "torchtitan_npu::host_engram_lookup",
+        _engram_lookup_backward,
+        setup_context=_engram_lookup_setup_context,
+    )
+
+    @torch.library.custom_op("torchtitan_npu::host_engram_lookup_backward", mutates_args=())
+    def _host_engram_lookup_backward(
+        grad_rows: torch.Tensor,
+        inverse: torch.Tensor,
+        received_ids: torch.Tensor,
+        send_counts: torch.Tensor,
+        recv_counts: torch.Tensor,
+        row_ids: torch.Tensor,
+        distributed: bool,
+        table: HostEngramTableHandle,
+    ) -> torch.Tensor:
+        """Runtime side effect: reduce grad rows and accumulate host sparse grads."""
+        if distributed:
+            ctx = _OpCtx()
+            ctx.saved_tensors = (inverse, received_ids)
+            ctx.send_splits = send_counts.tolist()
+            ctx.recv_splits = recv_counts.tolist()
+            ctx.group = table.value.ep_mesh.get_group()  # pyrefly: ignore [missing-attribute]
+            grad_local_rows, local_ids = _lookup_grad_rows(ctx, grad_rows)
+        else:
+            local_ids = row_ids.reshape(-1).to(device="cpu", copy=True)
+            grad_local_rows = grad_rows.reshape(-1, grad_rows.shape[-1])
+        table.value.accumulate_sparse_gradient(local_ids, grad_local_rows)
+        # Returned as the keepalive gradient so the compiled backward graph
+        # must execute this op (and its accumulate side effect) instead of DCEing
+        # it as an unused node.
+        return grad_rows.new_zeros((), dtype=torch.float32)
+
+    @_host_engram_lookup_backward.register_fake
+    def _host_engram_lookup_backward_fake(
+        grad_rows, inverse, received_ids, send_counts, recv_counts, row_ids, distributed, table
+    ):
+        # Returned as the keepalive gradient so the compiled backward graph
+        # must execute this op (and its accumulate side effect) instead of DCEing
+        # it as an unused node.
+        return grad_rows.new_zeros((), dtype=torch.float32)
 
 
 __all__ = ["HostEngramTable"]

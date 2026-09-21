@@ -5,5 +5,6 @@
 
 from . import (
     determinism,  # noqa: F401
+    gather_lowering_dtypes,  # noqa: F401
     inductor_runtime_estimation,  # noqa: F401
 )
