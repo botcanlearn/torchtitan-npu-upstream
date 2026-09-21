@@ -19,5 +19,6 @@ exec bash "${SCRIPT_DIR}/deepseek_v4_flash_cpt_4k_a5.sh" \
     --parallelism.data-parallel-shard-degree 1 \
     --parallelism.data-parallel-replicate-degree 1 \
     --training.seq-len 1048576 \
+    --training.local-batch-size 1 \
     --training.global-batch-size 8 \
     "$@"

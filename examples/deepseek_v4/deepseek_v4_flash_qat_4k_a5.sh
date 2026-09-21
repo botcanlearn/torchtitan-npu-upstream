@@ -16,7 +16,6 @@ NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.
                       xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"
 NGPU="${NGPU:-8}"
 export NODE_IPS NGPU
-export MBS="${MBS:-2}"
 
 #Introduction of relevant parameters, please refer to docs/user-guides/quickstart.md.
 QUANTIZATION_ARGS=(
