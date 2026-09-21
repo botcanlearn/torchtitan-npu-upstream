@@ -21,7 +21,7 @@ from torchtitan_npu.models.deepseek_v4_1 import (
 from torchtitan_npu.models.deepseek_v4_1.config_registry import (
     deepseek_v4_1_debugmodel_multimodal,
 )
-from torchtitan_npu.models.deepseek_v4_1.engram_config import _make_engram_configs
+from torchtitan_npu.models.deepseek_v4_1.engram.config import _make_engram_configs
 from torchtitan_npu.models.deepseek_v4_1.state_dict_adapter import (
     DeepSeekV41StateDictAdapter,
 )

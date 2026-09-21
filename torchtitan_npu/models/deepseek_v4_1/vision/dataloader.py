@@ -21,7 +21,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import HuggingFaceMultiModalD
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 from torchtitan.hf_datasets.multimodal.utils.packing import MMSamplePacker
 
-from .vision_data import TEXT, ImagePatchProcessor, build_image_token_layout
+from .data import TEXT, ImagePatchProcessor, build_image_token_layout
 
 
 def _process_mm_sample(sample, tokenizer, *, document_alignment: int = 1, **kwargs):

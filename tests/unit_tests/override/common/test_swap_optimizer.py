@@ -1170,7 +1170,7 @@ def test_optimizer_state_swap_prefetches_plan_before_a2a_and_defers_offload(monk
 def test_swap_preserves_host_sparse_update(monkeypatch, override_name):
     from torchtitan.components.optimizer import ParamGroupConfig
 
-    from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+    from torchtitan_npu.models.deepseek_v4_1.engram.host import HostEngramTable
     from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 
     allocations = []

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from torchtitan.config import derive, override
 
-from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+from torchtitan_npu.models.deepseek_v4_1.engram.host import HostEngramTable
 
 if TYPE_CHECKING:
     from .ascendc import HostOffloadEngramTable

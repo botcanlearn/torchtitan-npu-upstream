@@ -15,9 +15,9 @@ from PIL import Image
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-from torchtitan_npu.models.deepseek_v4_1 import vision_language_dataset as dataset_module
-from torchtitan_npu.models.deepseek_v4_1.vision_data import ImagePatchProcessor
-from torchtitan_npu.models.deepseek_v4_1.vision_language_dataset import (
+from torchtitan_npu.models.deepseek_v4_1.vision import language_dataset as dataset_module
+from torchtitan_npu.models.deepseek_v4_1.vision.data import ImagePatchProcessor
+from torchtitan_npu.models.deepseek_v4_1.vision.language_dataset import (
     DeepSeekV41VisionLanguageDataLoader,
     DeepSeekV41VisionLanguageProcessor,
 )

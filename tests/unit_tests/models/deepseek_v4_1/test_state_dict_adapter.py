@@ -9,7 +9,7 @@ import torch
 
 from torchtitan_npu.models.deepseek_v4_1 import deepseek_v4_1_debugmodel_config
 from torchtitan_npu.models.deepseek_v4_1.state_dict_adapter import DeepSeekV41StateDictAdapter
-from torchtitan_npu.models.deepseek_v4_1.vision_state_dict import DeepSeekV41VisionStateDictAdapter
+from torchtitan_npu.models.deepseek_v4_1.vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
 
 
 def _build_model_config():

@@ -791,7 +791,7 @@ def deepseek_v4_1_debugmodel_config(
 
 
 def _attach_engram(config, engram):
-    from .engram_config import _make_engram_configs
+    from .engram.config import _make_engram_configs
 
     if any(layer_id >= len(config.layers) or layer_id < 0 for layer_id in engram.layer_ids):
         raise ValueError("Engram layer IDs must lie inside the decoder")

@@ -13,7 +13,7 @@ from torch.utils.checkpoint import DefaultDeviceType
 from torchtitan.distributed.activation_checkpoint import FullAC
 
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
-from torchtitan_npu.models.deepseek_v4_1.vision_data import build_image_token_layout
+from torchtitan_npu.models.deepseek_v4_1.vision.data import build_image_token_layout
 
 
 @pytest.mark.parametrize("with_engram", [False, True], ids=["baseline", "engram"])

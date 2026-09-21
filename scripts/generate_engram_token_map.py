@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from tokenizers import Tokenizer
 
-from torchtitan_npu.models.deepseek_v4_1.token_map import build_token_id_map
+from torchtitan_npu.models.deepseek_v4_1.engram.token_map import build_token_id_map
 
 
 def parse_args() -> argparse.Namespace:

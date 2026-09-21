@@ -20,9 +20,9 @@ from torch.nn.utils.rnn import pad_sequence
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
+from .data import TEXT, ImagePatchProcessor, build_image_token_layout
 from .dataloader import _MultiModalDataset
-from .vision_data import TEXT, ImagePatchProcessor, build_image_token_layout
-from .vision_language_encoder import (
+from .language_encoder import (
     DeepSeekV41VisionLanguageEncoder,
     ReasoningEffort,
     ThinkingMode,

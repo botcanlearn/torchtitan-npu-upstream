@@ -45,7 +45,7 @@ from .engram import Engram  # noqa: TC001
 from .indexer import IndexerMode, indexer_selection_masks
 from .mhc import HcPost, HcPre
 from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings  # noqa: TC001
-from .vision_data import scatter_image_features
+from .vision.data import scatter_image_features
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

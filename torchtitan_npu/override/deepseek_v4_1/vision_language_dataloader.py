@@ -7,9 +7,9 @@
 
 from torchtitan.config import derive, override
 
-from torchtitan_npu.models.deepseek_v4_1.dataloader import DeepSeekV41DataLoader
-from torchtitan_npu.models.deepseek_v4_1.vision_language_dataset import DeepSeekV41VisionLanguageDataLoader
-from torchtitan_npu.models.deepseek_v4_1.vision_language_encoder import ReasoningEffort, ThinkingMode
+from torchtitan_npu.models.deepseek_v4_1.vision.dataloader import DeepSeekV41DataLoader
+from torchtitan_npu.models.deepseek_v4_1.vision.language_dataset import DeepSeekV41VisionLanguageDataLoader
+from torchtitan_npu.models.deepseek_v4_1.vision.language_encoder import ReasoningEffort, ThinkingMode
 
 
 @override(

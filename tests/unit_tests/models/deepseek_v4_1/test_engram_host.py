@@ -12,7 +12,7 @@ import torch
 from torch.utils.checkpoint import checkpoint, DefaultDeviceType
 
 from torchtitan_npu.extensions.components import optimizer as host_mod
-from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+from torchtitan_npu.models.deepseek_v4_1.engram.host import HostEngramTable
 
 pytestmark = pytest.mark.cpu
 _DIM = 128

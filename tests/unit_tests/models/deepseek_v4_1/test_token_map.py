@@ -13,8 +13,8 @@ import torch
 from tokenizers import Tokenizer
 
 from torchtitan_npu.models.deepseek_v4_1 import EngramArgs
-from torchtitan_npu.models.deepseek_v4_1.engram_config import _make_engram_configs
-from torchtitan_npu.models.deepseek_v4_1.token_map import build_token_id_map, normalize_token
+from torchtitan_npu.models.deepseek_v4_1.engram.config import _make_engram_configs
+from torchtitan_npu.models.deepseek_v4_1.engram.token_map import build_token_id_map, normalize_token
 
 pytestmark = pytest.mark.cpu
 

@@ -24,7 +24,7 @@ from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, resolve_spars
 
 from torchtitan_npu.extensions.distributed.fsdp import apply_fsdp_to_decoder
 
-from .engram_host import HostEngramTable
+from .engram.host import HostEngramTable
 
 
 def _shard_engram_tables(

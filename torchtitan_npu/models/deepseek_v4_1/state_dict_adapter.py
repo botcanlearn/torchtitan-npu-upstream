@@ -19,7 +19,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 from .indexer import REUSE
-from .vision_state_dict import DeepSeekV41VisionStateDictAdapter
+from .vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
 
 
 class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):

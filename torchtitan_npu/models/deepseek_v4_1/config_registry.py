@@ -27,8 +27,8 @@ from torchtitan_npu.extensions.trainer import TrainerEx
 from torchtitan_npu.models.common.muon import make_expert_layout, make_owned_layout
 
 from . import model_registry
-from .dataloader import DeepSeekV41DataLoader
 from .model import V41Model
+from .vision.dataloader import DeepSeekV41DataLoader
 
 
 @dataclass(kw_only=True)

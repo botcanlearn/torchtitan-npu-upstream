@@ -14,8 +14,8 @@ import torch
 import torch.distributed as dist
 from torchtitan.tools.logging import logger
 
-from .engram import EngramTable
-from .engram_lookup import HostEngramLookup
+from .core import EngramTable
+from .lookup import HostEngramLookup
 
 
 class HostEngramTable(EngramTable):

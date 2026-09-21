@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 from torch.profiler import record_function
 
-from torchtitan_npu.models.deepseek_v4_1.engram_host import HostEngramTable
+from torchtitan_npu.models.deepseek_v4_1.engram.host import HostEngramTable
 
 _ENGRAM_ALIGNMENT = 128
 _INT32_MAX = torch.iinfo(torch.int32).max

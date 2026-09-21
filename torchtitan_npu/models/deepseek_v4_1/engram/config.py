@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING
 
 import torch.nn as nn
 
-from .engram import Engram, EngramContextGate
-from .engram_host import HostEngramTable
+from .core import Engram, EngramContextGate
+from .host import HostEngramTable
 
 if TYPE_CHECKING:
-    from . import EngramArgs
+    from .. import EngramArgs
 
 _ENGRAM_TABLE_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _ENGRAM_GATE_INIT = {

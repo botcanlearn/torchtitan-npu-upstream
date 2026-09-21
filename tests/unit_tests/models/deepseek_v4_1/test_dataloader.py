@@ -13,9 +13,9 @@ import pytest
 import torch
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-from torchtitan_npu.models.deepseek_v4_1.dataloader import DeepSeekV41DataLoader
+from torchtitan_npu.models.deepseek_v4_1.vision.dataloader import DeepSeekV41DataLoader
 from torchtitan_npu.models.deepseek_v4_1.model import V41Model
-from torchtitan_npu.models.deepseek_v4_1.vision_data import IMAGE_END, IMAGE_START, ImagePatchProcessor
+from torchtitan_npu.models.deepseek_v4_1.vision.data import IMAGE_END, IMAGE_START, ImagePatchProcessor
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets"
 
