@@ -100,11 +100,29 @@ def test_prequantized_wrapper_can_prequantize_falls_back_when_disabled():
 
 
 def test_prequantized_wrapper_can_prequantize_requires_block_alignment():
-    """_can_prequantize requires 32-aligned trailing dims."""
+    """_can_prequantize requires a 32-aligned last dim."""
     wrapper = _make_prequantized_wrapper(shape=(64, 128), fsdp_prequantize=True)
     # Non-32-aligned last dim -> cannot prequantize.
     wrapper._data = torch.randn(64, 100).to(torch.float8_e4m3fn)
     assert wrapper._can_prequantize(None) is False
+
+
+def test_prequantized_wrapper_can_prequantize_requires_scale_pack_alignment():
+    """The FSDP-sharded quantized dim (axis=-2) must be 64-aligned.
+
+    Block MX packs two adjacent 32-block scales along the quantized dim, so a
+    shard aligned to 32 but not 64 rounds its own K-dim scale count up. After
+    all-gather the K-dim scale has more rows than the globally quantized one
+    and the dgrad ``npu_quant_matmul`` fails the "k dimension of scale and
+    pertoken_scale must be equal" meta check (16P wkv: N=512, shard 32 rows).
+    """
+    wrapper = _make_prequantized_wrapper(shape=(64, 128), fsdp_prequantize=True)
+    # 32-aligned but not 64-aligned axis=-2 -> fall back to BF16 all-gather.
+    wrapper._data = torch.randn(32, 128).to(torch.float8_e4m3fn)
+    assert wrapper._can_prequantize(None) is False
+    # 64-aligned axis=-2 -> pre-quantize path is taken.
+    wrapper._data = torch.randn(64, 128).to(torch.float8_e4m3fn)
+    assert wrapper._can_prequantize(None) is True
 
 
 @pytest.mark.parametrize("device", target_devices)

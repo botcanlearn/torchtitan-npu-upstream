@@ -35,10 +35,16 @@ from torchao_npu.wrapper_tensors.base_wrapper_tensor import (
     _ops_to_preserve_subclass,
 )
 
-# Block MX quantizes in 32x32 blocks; the FSDP shard's quantized dim (and the
-# full N dim) must be a multiple of this for local-quantize + all-gather to
-# reconstruct the global quantized weight correctly.
+# Block MX quantizes in 32x32 blocks and packs two adjacent block scales along
+# the quantized dim (scale trailing pack dim of 2). Local-quantize + all-gather
+# reconstructs the global quantized weight correctly only when the FSDP shard's
+# quantized dim is a multiple of the scale packing granularity (2 * 32 = 64):
+# a shard aligned to 32 but not 64 rounds its own scale count up, so the
+# gathered K-dim scale has more rows than the globally-quantized one and the
+# ``npu_quant_matmul`` meta check fails with
+# "k dimension of scale and pertoken_scale must be equal".
 _BLOCK_SIZE = 32
+_SCALE_PACK = 2
 
 
 class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
@@ -221,7 +227,7 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
         - ``fsdp_prequantize`` is disabled;
         - there is no FSDP sharding (``mesh.size()==1``, e.g. EFSDP=1 MoE);
         - the local storage is not allocated (backward reconstruction phase);
-        - the shard is not block-aligned (32-row / 32-col multiples).
+        - the shard is not aligned to the quantization/packing granularity.
         """
         if not self.weight_config.fsdp_prequantize:  # pyrefly: ignore [missing-attribute]
             return False
@@ -229,10 +235,11 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
             return False
         if self._data.data_ptr() == 0:
             return False
-        # Block MX requires both the quantized dim (axis=-2) and the last dim
-        # to be multiples of 32 so local-quantize + all-gather reconstructs the
-        # global quantized weight correctly.
-        if self._data.shape[-2] % _BLOCK_SIZE != 0:
+        # The FSDP-sharded quantized dim (axis=-2) needs 2-block scale packing
+        # alignment (64): a 32- but not 64-aligned shard rounds its own K-dim
+        # scale count up, so the gathered ``B_s2`` has more scale rows than the
+        # global one and the dgrad ``npu_quant_matmul`` meta check fails.
+        if self._data.shape[-2] % (_BLOCK_SIZE * _SCALE_PACK) != 0:
             return False
         return self._data.shape[-1] % _BLOCK_SIZE == 0
 
