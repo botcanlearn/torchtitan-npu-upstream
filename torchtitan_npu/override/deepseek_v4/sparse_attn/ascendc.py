@@ -776,3 +776,11 @@ class AscCompressedSparseInnerAttention(CompressedSparseInnerAttention):
             hooks,
         )
         return output.reshape(batch_size, seqlen, *output.shape[1:])
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # Device declared at the creation point instead of an ambient device
+        # context; ``buffer_device=None`` keeps the to_empty() protocol (the
+        # emptied buffer already records the target device).
+        self._indexer_loss_acc = torch.zeros(
+            (), dtype=torch.float32, device=buffer_device or self._indexer_loss_acc.device
+        )

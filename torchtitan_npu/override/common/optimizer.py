@@ -8,12 +8,14 @@
 
 import math
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import partial
 from types import MethodType
 from typing import Any, TypedDict
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch.distributed._tensor import DTensor
 from torch.optim.optimizer import Optimizer, _get_scalar_dtype, _use_grad_for_differentiable
@@ -27,6 +29,12 @@ from torchtitan.config import derive, override
 from torchtitan.distributed.flex_shard.dist_muon import DistMuon
 
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
+from torchtitan_npu.extensions.cpu_offload import runtime as clip_state
+from torchtitan_npu.extensions.cpu_offload.cpu_offload_adamw import CpuOffloadAdamW
+from torchtitan_npu.extensions.cpu_offload.cpu_offload_muon import (
+    build_cpu_offload_distributed_muon,
+)
+from torchtitan_npu.extensions.cpu_offload.staging import CpuStaging
 from torchtitan_npu.extensions.novaswap import swap_api
 
 _ADAMW_SWAP_BUCKET_TIMES = 16
@@ -496,6 +504,142 @@ def virtual(
     return derive(cfg, VirtualOptimizersContainer.Config)
 
 
+def _build_cpu_offload_adamw(params, **kwargs: Any) -> CpuOffloadAdamW:
+    """Adapt master optimizer implementation flags to the CPU-offload kernel."""
+    # The master container always adds ``fused``/``foreach`` according to
+    # ``optimizer.implementation``.  CPU-offload uses a staged functional
+    # update and therefore owns those implementation choices internally.
+    kwargs.pop("fused", None)
+    kwargs.pop("foreach", None)
+    params = (params,) if isinstance(params, dict) else params
+    normalized_params = [
+        {key: value for key, value in group.items() if key not in {"fused", "foreach"}}
+        if isinstance(group, dict)
+        else group
+        for group in params
+    ]
+    return CpuOffloadAdamW(normalized_params, **kwargs)
+
+
+class CpuOffloadOptimizersContainer(OptimizersContainer):
+    """Keep canonical optimizer tensors on CPU and compute updates on NPU."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(OptimizersContainer.Config):
+        pass
+
+    def __init__(self, config: Config, *, model_parts) -> None:
+        # The CPU-offload override is the single owner of the FSDP and
+        # gradient-clip patches: they are imported and installed only when
+        # the user selects ``cpu_offload``. Unselected runs never import
+        # these modules and keep pristine upstream behavior.
+        from torchtitan_npu.extensions.distributed import grad_accum, grad_clip
+
+        grad_accum.install()
+        grad_accum.register_cpu_offload_hooks()
+        grad_clip.install()
+        self._compute_device = torch.device(  # pyrefly: ignore [read-only]
+            "npu",
+            torch_npu.npu.current_device(),
+        )
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        self._staging = CpuStaging(
+            self._compute_device,
+            owner=f"optimizer.rank{rank}",
+        )
+        # The channel is the explicit clip->optimizer handoff: injected into
+        # the optimizers below and exposed to the patched clip through the
+        # module-level active handle (see GradientClipChannel).
+        self._clip_channel = clip_state.GradientClipChannel()
+        clip_state.set_active_channel(self._clip_channel)
+        self._closed = False
+        super().__init__(config=config, model_parts=model_parts)
+        for optimizer in self.optimizers:
+            materialize = getattr(optimizer, "materialize_state", None)
+            if materialize is not None:
+                materialize()
+        if self.optimizers:
+            self._clip_channel.register_consumer()
+
+    def __del__(self) -> None:
+        if not getattr(self, "_closed", True):
+            self.close()
+
+    def close(self) -> None:
+        """Release every CPU-offload runtime resource owned here.
+
+        The container is the single owner: its staging lane, the clip
+        channel, and the module-level FSDP and clip pipelines. Idempotent;
+        the trainer teardown calls this on both normal and exception paths,
+        ``__del__`` is only a fallback.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        from torchtitan_npu.extensions.distributed import grad_accum, grad_clip
+
+        self._clip_channel.close()
+        clip_state.set_active_channel(None)
+        self._staging.close()
+        grad_accum.clear()
+        grad_clip.clear()
+        grad_accum.unregister_cpu_offload_hooks()
+
+    def state_dict(self) -> dict[str, Any]:
+        self._staging.wait()
+        result = super().state_dict()
+        self._staging.wait()
+        return result
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        self._clip_channel.clear_pending()
+        self._staging.wait()
+        super().load_state_dict(state_dict)
+        self._staging.wait()
+
+    def step(self, closure: Callable[[], float] | None = None) -> float | None:  # type: ignore[override]
+        try:
+            return super().step(closure)
+        finally:
+            self._clip_channel.clear_pending()
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        self._clip_channel.clear_pending()
+        self._staging.wait()
+        super().zero_grad(set_to_none=set_to_none)
+
+    def _resolve_optimizer_factory(self, name: str) -> Callable[..., Optimizer]:
+        if name in {"DistributedMuon", "DistMuon"}:
+            return partial(
+                build_cpu_offload_distributed_muon,
+                staging=self._staging,
+                clip_channel=self._clip_channel,
+            )
+        if name == "AdamW":
+            return partial(
+                _build_cpu_offload_adamw,
+                staging=self._staging,
+                clip_channel=self._clip_channel,
+            )
+        raise ValueError(f"CPU-offload optimizer does not support {name}")
+
+
+@override(
+    target=OptimizersContainer.Config,
+    description="Keep optimizer canonical state on CPU and execute updates on NPU",
+)
+def cpu_offload(
+    cfg: OptimizersContainer.Config,
+) -> CpuOffloadOptimizersContainer.Config:
+    if not getattr(cfg, "_cpu_offload", False):
+        raise ValueError(
+            "The cpu_offload optimizer override requires --training.enable-cpu-offload; "
+            "without it FSDP keeps parameters on NPU, the CPU-offload optimizers cannot "
+            "run, and gradients would clip through the bounded fallback path"
+        )
+    return derive(cfg, CpuOffloadOptimizersContainer.Config)
+
+
 class OptimizerStateSwapContainer(OptimizersContainer):
     supports_async_with_pinned_mem = False
 
@@ -778,11 +922,16 @@ class HostSparseOptimizerStateSwapContainer(  # pyrefly: ignore [inconsistent-in
 
 @override(
     target=OptimizersContainer.Config,
-    description="Offload DistMuon and AdamW state by globally unique names",
+    description=(
+        "Optimizer offload strategy: CPU-offload container when "
+        "--training.enable-cpu-offload is set, else optimizer state swap"
+    ),
 )
 def swap_optimizer(
     cfg: OptimizersContainer.Config,
-) -> OptimizerStateSwapContainer.Config | HostSparseOptimizerStateSwapContainer.Config:
+) -> OptimizersContainer.Config:
+    if getattr(cfg, "_cpu_offload", False):
+        return derive(cfg, CpuOffloadOptimizersContainer.Config)
     if isinstance(cfg, HostSparseOptimizersContainer.Config):
         return derive(cfg, HostSparseOptimizerStateSwapContainer.Config)
     return derive(cfg, OptimizerStateSwapContainer.Config)

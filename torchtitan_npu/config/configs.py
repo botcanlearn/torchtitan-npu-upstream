@@ -52,6 +52,10 @@ class OptimizerConfig(OptimizersContainer.Config):
     )
     muon_eps: float = 1e-7
     _muon_profile: Annotated[MuonOptimizerProfile | None, tyro.conf.Suppress] = None
+    _cpu_offload: Annotated[bool, tyro.conf.Suppress] = False
+    """Carrier for ``--training.enable-cpu-offload``, set by the trainer
+    config so the optimizer-container override can branch on it; not a
+    user-facing switch."""
 
     def materialize(self) -> None:
         """Turn an explicit Muon selection into upstream optimizer groups.

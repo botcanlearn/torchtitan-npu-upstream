@@ -47,6 +47,14 @@ class TrainerEx(Trainer):
             # ``slots=True`` dataclasses are recreated by the decorator, so a
             # zero-argument ``super()`` can retain the pre-decoration class cell.
             Trainer.Config.__post_init__(self)
+            # Single switch: ``--training.enable-cpu-offload`` drives both the
+            # FSDP offload policy (read by parallelize) and, through this
+            # carrier field, the optimizer-container selection in the
+            # swap_optimizer override branch (applied inside Trainer.__init__).
+            # Only our OptimizerConfig carries the _cpu_offload carrier
+            # field; upstream containers (e.g. TorchFT) do not.
+            if hasattr(self.optimizer, "_cpu_offload"):
+                self.optimizer._cpu_offload = self.training.enable_cpu_offload
             self._post_init_optimizer()
 
         def _post_init_optimizer(self) -> None:
@@ -77,12 +85,30 @@ class TrainerEx(Trainer):
             )
 
         set_allow_hf32(config.training.extension.allow_hf32)
+        if getattr(config.training, "enable_cpu_offload", False):
+            # CPU DTensor parameters need NPU-side initialization during
+            # model materialization: Module._init_param fires inside
+            # init_weights (after parallelize_fn applies the offload
+            # policy), which is earlier than the optimizer container
+            # exists. Without CPU offload the module is never imported.
+            from torchtitan_npu.patches.torch_npu import cpu_dtensor_init
+
+            cpu_dtensor_init.install()
         super().__init__(config)
         self._sdc = config.sdc.build(
             trainer_config=config,
             model_parts=self.model_parts,
             gradient_accumulation_steps=self.gradient_accumulation_steps,
         )
+        if getattr(config.training, "enable_cpu_offload", False):
+            from torchtitan_npu.override.common.optimizer import CpuOffloadOptimizersContainer
+
+            if not isinstance(self.optimizers, CpuOffloadOptimizersContainer):
+                raise ValueError(
+                    "--training.enable-cpu-offload requires the CPU-offload optimizer "
+                    "container: list torchtitan_npu.override.common.optimizer.swap_optimizer "
+                    "(auto-selects it) in --override.imports"
+                )
 
     def forward_backward_step(self, *args: Any, **kwargs: Any) -> Any:
         result = super().forward_backward_step(*args, **kwargs)
@@ -90,6 +116,15 @@ class TrainerEx(Trainer):
         # accumulation window, so post-processing is intentionally success-only.
         self._sdc.finalize_sdc_step()
         return result
+
+    def close(self) -> None:
+        super().close()
+        # ``train.py`` calls ``trainer.close()`` on both the normal and the
+        # exception path; give optimizer containers (e.g. the CPU-offload
+        # runtime owner) a chance to release their resources there.
+        optimizers = getattr(self, "optimizers", None)
+        if optimizers is not None and hasattr(optimizers, "close"):
+            optimizers.close()
 
 
 config_manager.register_config_converter(
