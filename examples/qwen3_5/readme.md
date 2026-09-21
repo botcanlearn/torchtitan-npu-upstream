@@ -58,7 +58,7 @@ override，用于消融或定位问题。
 `torchtitan.train`。上游目录按以下优先级解析：
 
 1. `TORCHTITAN_REPO`；
-2. `TORCHTITAN_DIR`（`.ci/smoke_test.sh` 会导出此变量指向 third_party 克隆）；
+2. `TORCHTITAN_DIR`（`.ci/common.sh` 会导出此变量指向 third_party 克隆）；
 3. 仓库同级的 `../torchtitan`。
 
 数据和路径也可以覆盖：`HF_ASSETS_PATH` 默认为

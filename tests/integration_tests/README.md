@@ -75,11 +75,15 @@ state 的 NovaSwap 路径。该 case 同样只检查训练完成，不读取 gol
 
 ## 入口
 
-CI 通过以下脚本启动测试：
+CI 通过以下脚本启动本目录的 integration ST：
 
 ```bash
-.ci/smoke_test.sh
+.ci/integration_test.sh
 ```
+
+`.ci/smoke_test.sh` 只负责 `tests/smoke_tests` 的 smoke 阶段，不再触发本目录的 ST。
+两个入口都先 source `.ci/common.sh`，由它完成 CANN 环境、解释器 shim 和 torchtitan
+checkout 准备。
 
 或直接运行 Python 入口：
 

@@ -90,8 +90,8 @@ stages:
   stage4:
     name: PreSmoke
     jobs:
-      PreSmoke_A3:
-        name: PreSmoke_A3
+      PreSmoke_A3_part1:
+        name: PreSmoke_A3_part1
         steps:
           -
             name: Checkout
@@ -116,7 +116,7 @@ stages:
               path: ${{ steps.process_checkout.outputs.path }}
           -
             name: smoke executor
-            timeout-minutes: 30
+            timeout-minutes: 15
             run: |
               set -e
               export WORKSPACE=${{ steps.process_checkout.outputs.path }}
@@ -127,6 +127,47 @@ stages:
               export AK=${{secrets.AK}}
               export SK=${{secrets.SK}}
               bash ${{ steps.process_checkout.outputs.path }}/torchtitan-npu_smoke.sh
+        if: env.TARGET_BRANCH == 'master'
+        runs-on: ['self-hosted','npu=4','smoke=301']
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.PreSmoke_A900_npupool }}
+      PreSmoke_A3_part2:
+        name: PreSmoke_A3_part2
+        steps:
+          -
+            name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              allow-unsafe-pr-checkout: true
+          -
+            name: download pr files
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              key: |
+                ${{ env.obs_path }}/pr_filelist.txt
+                ${{ env.obs_path }}/pr_filelist_mod.txt
+                ${{ env.obs_path }}/update_file_detail.txt
+                ${{ env.obs_path }}/torchtitan-npu_smoke.sh
+              path: ${{ steps.process_checkout.outputs.path }}
+          -
+            name: integration executor
+            timeout-minutes: 15
+            run: |
+              set -e
+              export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              export repo_name=${{env.repo_name}}
+              export obs_path=${{env.obs_path}}
+              export obs_smoke_path=${{ env.obs_smoke_path }}
+              export pr_id=${{ env.MERGE_ID }}
+              export AK=${{secrets.AK}}
+              export SK=${{secrets.SK}}
+              bash ${{ steps.process_checkout.outputs.path }}/.ci/integration_test.sh
         if: env.TARGET_BRANCH == 'master'
         runs-on: ['self-hosted','npu=4','smoke=301']
         container:

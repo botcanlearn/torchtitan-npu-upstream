@@ -10,9 +10,9 @@ ST 审查只回答一个问题：现有 `tests/integration_tests` 是否覆盖�
 
 ### 2. 建立现有 integration testcase 清单
 
-读取目标分支的 [`tests/integration_tests/README.md`](../../../../tests/integration_tests/README.md)，再读取同目录的 `run_tests.py`、相关模型 case 定义和 `tests/assets/losses`。最后读取 `.ci/smoke_test.sh`，确认 suite 注册、case 选择、NPU 数量和 CI 入口。README 只提供测试意图和矩阵说明，实际覆盖仍以代码和入口为准；README 中没有在代码和入口中落地的描述不能单独作为覆盖证据。
+读取目标分支的 [`tests/integration_tests/README.md`](../../../../tests/integration_tests/README.md)，再读取同目录的 `run_tests.py`、相关模型 case 定义和 `tests/assets/losses`。最后读取 `.ci/integration_test.sh` 及它 source 的 `.ci/common.sh`，确认 suite 注册、case 选择、NPU 数量和 CI 入口。README 只提供测试意图和矩阵说明，实际覆盖仍以代码和入口为准；README 中没有在代码和入口中落地的描述不能单独作为覆盖证据。
 
-`.ci/smoke_test.sh` 是既有测试框架入口。审查或更新某个 PR 时不得为它追加一次性模型命令、kernel pytest、selector 或其它默认流程；需要新模型时，应沿用现有 integration runner，把模型 case 接入 `run_tests.py` 的 `build_models_test_list`（并按需登记独立 suite），由 `OverrideDefinitions` 提供模型、配置、override、并行和资产参数。
+`.ci/integration_test.sh` 是既有 integration 执行入口，`.ci/smoke_test.sh` 只跑 `tests/smoke_tests` 的 smoke 阶段。审查或更新某个 PR 时不得为它们追加一次性模型命令、kernel pytest、selector 或其它默认流程；需要新模型时，应沿用现有 integration runner，把模型 case 接入 `run_tests.py` 的 `build_models_test_list`（并按需登记独立 suite），由 `OverrideDefinitions` 提供模型、配置、override、并行和资产参数。
 
 ### 3. 对照改动判断复用、调整或新增
 
@@ -26,7 +26,7 @@ ST 审查只回答一个问题：现有 `tests/integration_tests` 是否覆盖�
 
 ### 1. Testcase 来源
 
-ST testcase 只能来自 `tests/integration_tests` 的注册和执行链路。默认从 `.ci/smoke_test.sh` 追踪到 `tests.integration_tests.run_tests`，再追踪到 `build_*_test_list` 和具体 `OverrideDefinitions`；被 `disabled`、suite 未注册或入口不会选择的 case 不算覆盖。
+ST testcase 只能来自 `tests/integration_tests` 的注册和执行链路。默认从 `.ci/integration_test.sh` 追踪到 `tests.integration_tests.run_tests`，再追踪到 `build_*_test_list` 和具体 `OverrideDefinitions`；被 `disabled`、suite 未注册或入口不会选择的 case 不算覆盖。
 
 ### 2. 覆盖判定
 
@@ -44,7 +44,7 @@ ST testcase 只能来自 `tests/integration_tests` 的注册和执行链路。�
 
 只有在现有 case 无法进入 PR 的新生产路径时才新增 testcase。新增 case 必须使用现有 `run_tests.py`、`OverrideDefinitions`、suite 注册、启动脚本和结果检查方式；不得另起测试框架或只写一个不会被 suite 选择的孤立脚本。
 
-新增模型必须进入 `tests/integration_tests/<model>.py` 的 `build_*_test_list`，并在 `run_tests.py` 的 `build_models_test_list` 中加入默认模型 suite（若资产或资源需要条件门禁，应在 case 定义或 runner 的既有选择机制中表达）。不得通过修改 `.ci/smoke_test.sh` 来绕过模型列表或为单个 PR 建立专用入口。
+新增模型必须进入 `tests/integration_tests/<model>.py` 的 `build_*_test_list`，并在 `run_tests.py` 的 `build_models_test_list` 中加入默认模型 suite（若资产或资源需要条件门禁，应在 case 定义或 runner 的既有选择机制中表达）。不得通过修改 `.ci/integration_test.sh` 或 `.ci/smoke_test.sh` 来绕过模型列表或为单个 PR 建立专用入口。
 
 ### 6. 最小组合
 
