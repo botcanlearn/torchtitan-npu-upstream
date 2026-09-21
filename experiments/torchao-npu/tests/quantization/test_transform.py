@@ -25,11 +25,14 @@ from torchao_npu.quantization.quant_configs import (
 )
 from torchao_npu.quantization.transform import (
     _replace_params_with_custom_fn_if_matches_filter,
+    unwrap_param,
 )
+from torchao_npu.quantized_tensors.mx_tensor import MXTensor
 from torchao_npu.wrapper_tensors import (
     BaseTrainingWeightWrapperTensor,
     BlockMXTrainingWeightWrapperTensor,
     Float8TrainingWeightWrapperTensor,
+    MXTrainingWeightWrapperTensor,
 )
 
 from ..reference_moe import MoE
@@ -186,16 +189,21 @@ def test_prepare_skips_non_expert_params(device, weight_config, act_config, wrap
 @pytest.mark.parametrize(
     "weight_config, act_config, wrapper_cls",
     [
-        (Float8FakeQuantizeConfig(), None, Float8TrainingWeightWrapperTensor),
+        (MXQuantizeConfig(), MXQuantizeConfig(), MXTrainingWeightWrapperTensor),
         (BlockMXQuantizeConfig(), MXQuantizeConfig(), BlockMXTrainingWeightWrapperTensor),
     ],
 )
-def test_convert_unwraps(device, weight_config, act_config, wrapper_cls):
-    """Convert unwraps all parameters and restores original weight values."""
+def test_convert_produces_inference_weight(device, weight_config, act_config, wrapper_cls):
+    """Convert converts the wrapped parameters to inference weights (``MXTensor``).
+
+    The training-time weight_config is stored on the wrapper, so the bare
+    convert step (no config) quantizes via ``to_inference_weight``.
+    """
 
     # use_grouped_mm only affects the forward computation path, which is
     # never triggered here -- only prepare/convert lifecycle is tested.
-    moe_model = create_moe_model(device, use_grouped_mm=True)
+    # bf16 master: the block-MX quant kernel rejects fp32 inputs.
+    moe_model = create_moe_model(device, use_grouped_mm=True, dtype=torch.bfloat16)
     model = copy.deepcopy(moe_model)
 
     qat_config = ParamSwapConfig(
@@ -206,8 +214,8 @@ def test_convert_unwraps(device, weight_config, act_config, wrapper_cls):
     )
     quantize_(model, qat_config, filter_fn=lambda m, fqn: isinstance(m, MoE))
 
-    wrapped = sum(1 for _, p in model.named_parameters() if isinstance(p.data, wrapper_cls))
-    assert wrapped == 3, f"Only {wrapped} nn.Parameters are wrapped, 3 expected."
+    wrapped_fqns = [name for name, p in model.named_parameters() if isinstance(p.data, wrapper_cls)]
+    assert len(wrapped_fqns) == 3, f"Only {len(wrapped_fqns)} nn.Parameters are wrapped, 3 expected."
 
     for (name, param), (orig_name, orig_param) in zip(
         model.named_parameters(), moe_model.named_parameters(), strict=True
@@ -222,11 +230,61 @@ def test_convert_unwraps(device, weight_config, act_config, wrapper_cls):
     wrapped = sum(1 for _, p in model.named_parameters() if isinstance(p.data, BaseTrainingWeightWrapperTensor))
     assert wrapped == 0, f"{wrapped} parameters should not be wrapped after convert"
 
-    for (name, param), (orig_name, orig_param) in zip(
-        model.named_parameters(), moe_model.named_parameters(), strict=True
-    ):
-        assert name == orig_name, f"Parameter order changed: {name} vs {orig_name}"
-        assert torch.equal(param, orig_param), f"Values of {name} should match after convert"
+    params = dict(model.named_parameters())
+    for name in wrapped_fqns:
+        assert isinstance(params[name].data, MXTensor), (
+            f"{name}: expected MXTensor after convert, got {type(params[name].data).__name__}"
+        )
+
+
+@pytest.mark.parametrize("device", target_devices)
+@pytest.mark.parametrize(
+    "weight_config, wrapper_cls, expected_elem_dtype",
+    [
+        pytest.param(MXQuantizeConfig(), MXTrainingWeightWrapperTensor, torch.float8_e4m3fn, id="mx"),
+        pytest.param(BlockMXQuantizeConfig(), BlockMXTrainingWeightWrapperTensor, torch.float8_e4m3fn, id="block_fp8"),
+        pytest.param(
+            BlockMXQuantizeConfig(mxfp4_fake_quantize_config=MXQuantizeConfig(elem_dtype=torch.float4_e2m1fn_x2)),
+            BlockMXTrainingWeightWrapperTensor,
+            torch.float4_e2m1fn_x2,
+            id="block_fp8_mxfp4",
+        ),
+    ],
+)
+def test_convert_with_weight_config_produces_mx_tensor(device, weight_config, wrapper_cls, expected_elem_dtype):
+    """Convert of a wrapper with a weight_config quantizes via its to_inference_weight.
+
+    Covers every to_inference_weight shape: MX (FP8), block-MX FP8 (converted
+    via ``BlockMXTensor.to_mx_tensor``), and mxfp4-QAT (FP4 qdata).
+    """
+    wrapped = wrapper_cls(
+        torch.randn(256, 128, dtype=torch.bfloat16, device=device),
+        weight_config=weight_config,
+        activation_config=MXQuantizeConfig(),
+    )
+    param = torch.nn.Parameter(wrapped, requires_grad=False)
+
+    result = unwrap_param(torch.nn.Linear(128, 256), "weight", param)
+
+    assert isinstance(result.data, MXTensor), f"got {type(result.data).__name__}"
+    assert not result.requires_grad
+    assert result.data.quant_axis == result.data.ndim - 1
+    assert result.data.quant_config.elem_dtype is expected_elem_dtype, (
+        f"expected {expected_elem_dtype} qdata, got {result.data.quant_config.elem_dtype}"
+    )
+
+
+def test_convert_with_unsupported_wrapper_raises_before_the_quant_kernel():
+    """Wrappers without a to_inference_weight (e.g. Float8) are rejected before any NPU quant kernel runs."""
+    cfg = Float8FakeQuantizeConfig(dtype=torch.float8_e4m3fn, granularity=PerRow())
+    wrapped = Float8TrainingWeightWrapperTensor(
+        torch.randn(4, 32, dtype=torch.bfloat16),
+        weight_config=cfg,
+    )
+    param = torch.nn.Parameter(wrapped, requires_grad=False)
+
+    with pytest.raises(NotImplementedError, match="to_inference_weight"):
+        unwrap_param(torch.nn.Linear(32, 4), "weight", param)
 
 
 @pytest.mark.parametrize("device", target_devices)
@@ -352,29 +410,15 @@ def test_is_parameter_with_wrapped_data_filter(device, weight_config, wrapper_cl
     assert _is_parameter_with_wrapped_data(None, "any.fqn") is False
 
 
-@pytest.mark.parametrize(
-    "weight_config, act_config, wrapper_cls",
-    [
-        (Float8FakeQuantizeConfig(), None, Float8TrainingWeightWrapperTensor),
-        (BlockMXQuantizeConfig(), MXQuantizeConfig(), BlockMXTrainingWeightWrapperTensor),
-    ],
-)
-@pytest.mark.parametrize("device", target_devices)
-def test_is_parameter_with_wrapped_data_integration(device, weight_config, act_config, wrapper_cls):
-    """_is_parameter_with_wrapped_data as params_filter_fn: prepare then convert unwraps all."""
+def test_convert_unwraps_wrapper_without_weight_config():
+    """A wrapper without a weight_config unwraps to the raw high-precision tensor on convert."""
+    orig = torch.randn(4, 32, dtype=torch.bfloat16)
+    wrapped = Float8TrainingWeightWrapperTensor(orig)
+    assert wrapped.weight_config is None
+    param = torch.nn.Parameter(wrapped, requires_grad=True)
 
-    # use_grouped_mm only affects the forward computation path -- no forward run here.
-    moe_model = create_moe_model(device, use_grouped_mm=True)
-    qat_config = ParamSwapConfig(
-        weight_config=weight_config,
-        activation_config=act_config,
-        step="prepare",
-        params_filter_fn=_expert_weight_filter,
-    )
-    quantize_(moe_model, qat_config, filter_fn=lambda m, fqn: isinstance(m, MoE))
+    result = unwrap_param(torch.nn.Linear(32, 4), "weight", param)
 
-    qat_config = ParamSwapConfig(step="convert", params_filter_fn=_is_parameter_with_wrapped_data)
-    quantize_(moe_model, qat_config, filter_fn=lambda m, fqn: isinstance(m, MoE))
-
-    wrapped = sum(1 for _, p in moe_model.named_parameters() if isinstance(p.data, wrapper_cls))
-    assert wrapped == 0
+    assert not isinstance(result.data, BaseTrainingWeightWrapperTensor)
+    assert result.requires_grad
+    assert torch.equal(result.data, orig)

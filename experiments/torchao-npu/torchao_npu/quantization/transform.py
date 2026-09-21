@@ -5,7 +5,7 @@
 
 import functools
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 from torch import nn
 from torchao.quantization.qat.fake_quantize_config import FakeQuantizeConfigBase
@@ -54,15 +54,21 @@ def unwrap_param(
 
     # ``unwrap_param`` is invoked with parameters already wrapped by
     # ``BaseTrainingWeightWrapperTensor`` (the convert step pairs with
-    # ``_is_parameter_with_wrapped_data``). Narrow the type so static
-    # checkers see the wrapper-specific ``to_tensor`` method.
+    # ``_is_parameter_with_wrapped_data``). The assert is the runtime guard;
+    # the cast gives checkers the wrapper type, since torchao_npu imports
+    # resolve as Any and isinstance alone does not narrow.
     assert isinstance(param.data, BaseTrainingWeightWrapperTensor), (
         f"unwrap_param expects a parameter wrapped by BaseTrainingWeightWrapperTensor, got {type(param.data).__name__}"
     )
-    return nn.Parameter(
-        param.data.to_tensor(),
-        requires_grad=param.requires_grad,
-    )
+    data = cast("BaseTrainingWeightWrapperTensor", param.data)
+
+    if data.weight_config is None:
+        return nn.Parameter(
+            data.to_tensor(),
+            requires_grad=param.requires_grad,
+        )
+
+    return nn.Parameter(data.to_inference_weight(), requires_grad=False)
 
 
 def _replace_params_with_custom_fn_if_matches_filter(

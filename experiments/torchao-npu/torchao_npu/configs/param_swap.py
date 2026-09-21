@@ -44,7 +44,8 @@ class ParamSwapConfig(QATConfig):
     The workflow follows the same two-step pattern:
 
     1. Prepare: wraps matched parameters with ``BaseTrainingWeightWrapperTensor``
-    2. Convert: unwraps ``BaseTrainingWeightWrapperTensor`` back to regular tensors
+    2. Convert: converts ``BaseTrainingWeightWrapperTensor`` to inference weights
+       via the wrapper's ``to_inference_weight``
 
     Supported configs: FP8 row-wise
     (:class:`~torchao.quantization.qat.fake_quantize_config.Float8FakeQuantizeConfig`),
@@ -131,9 +132,7 @@ def _param_swap_config_transform(
         )
 
     elif config.step == QATStep.CONVERT:
-        _replace_params_with_custom_fn_if_matches_filter(
-            module, unwrap_param, _is_parameter_with_wrapped_data, extra_args=(config,)
-        )
+        _replace_params_with_custom_fn_if_matches_filter(module, unwrap_param, _is_parameter_with_wrapped_data)
 
     else:
         raise ValueError(f"Invalid value of config.step: {config.step}")
