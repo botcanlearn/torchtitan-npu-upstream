@@ -17,19 +17,20 @@ shared compressed KV ``[B, N, Dk]``.  A learned per-head sink logit takes part i
 softmax denominator without contributing a value, so a row with no reachable entry
 still produces zeros instead of NaN.
 
-Packed documents are isolated by the metadata's ``doc_ids``, which is the only varlen
-metadata: the operator applies it to the sliding-window branch, and the indexer uses it
-to keep its top-``K`` inside the query's own document (the operator's contract leaves
-the sparse branch to the caller).  ``positions`` still drives RoPE; it is not segment
-metadata.
+Packed documents are isolated by ``doc_ids``, the metadata's only per-token field: the
+operator applies it to the sliding-window branch, and the indexer uses it to keep its
+top-``K`` inside the query's own document (the operator's contract leaves the sparse
+branch to the caller).  ``doc_ids`` is not an attention input: the indexer derives its
+entry-axis isolation from it while building the precomputed selection masks.  ``positions``
+is a per-forward argument, not metadata, and only drives RoPE.
 
 The attention is also where the indexer's distillation loss is applied.  The operator
 returns the per-head log-sum-exp of the full softmax (window, selected compressed entries
 and sink) and the student logits arrive as an input; the loss itself, including the
 teacher it rebuilds from them, lives on ``IndexerDistillLoss``.  The loss's inputs are
 detached at that call site: the distillation must train the indexer and nothing else.
-A query row the metadata marks as structural padding is excluded from the
-distillation instead of contributing.
+A query row with no reachable compressed entry is dropped from the distillation instead
+of contributing.
 
 The projections use the rope module with the site's un-rotated prefix width.
 The reference forward owns Attention Gym attention and teacher reconstruction;
@@ -167,7 +168,6 @@ class CompressedSparseInnerAttention2(Module):
             lse_BHL.transpose(1, 2).detach(),
             topk_scores,
             carrier=attn_BLHD,
-            query_valid_mask=attention_masks.valid_tokens_BL,
         )
 
 

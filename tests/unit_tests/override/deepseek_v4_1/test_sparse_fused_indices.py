@@ -36,7 +36,9 @@ def test_kernel_receives_document_local_indices(monkeypatch, ratio, bounds):
     positions = torch.cat([torch.arange(end - begin) for begin, end in pairwise(bounds)])
     metadata = _metadata(positions)
     assert torch.equal(metadata.cu_seq_q, torch.tensor(bounds, dtype=torch.int32))
-    # Per-document alignment makes every document's compressed length exact.
+    # The compressed boundary is the query boundary divided by the ratio: exact
+    # only when a document length is a multiple of the ratio, which nothing
+    # enforces.
     cu_cmp = metadata.cu_seq_q // ratio
 
     # Model indices are global compressed-pool coordinates, -1 for unused
@@ -140,7 +142,6 @@ def test_backward_routes_kernel_gradients_and_ignores_the_lse_gradient(monkeypat
         0.5,
         2 if with_shared else 0,
         2,
-        None,
         None,
         None,
         "logits",

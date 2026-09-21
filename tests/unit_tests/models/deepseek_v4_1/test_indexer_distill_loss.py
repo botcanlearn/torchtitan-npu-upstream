@@ -171,34 +171,33 @@ def test_per_layer_losses_sum_to_the_pooled_teacher() -> None:
     torch.testing.assert_close(pooled, first + second, rtol=1e-6, atol=1e-7)
 
 
-def test_structural_padding_rows_are_excluded_from_distillation() -> None:
-    """A row the loader marks as structural padding trains nothing, while a
-    real image row (masked label, valid query) keeps its gradient.
+def test_rows_without_a_reachable_entry_are_excluded_from_distillation() -> None:
+    """A row whose every slot is unused trains nothing; a row with a reachable
+    entry keeps its gradient.
 
     Both rows share the uniform teacher ``p = [0.5, 0.5]`` with ``Z = 1``
     and student ``Y = softmax(log 2, 0) = [2/3, 1/3]``; the closed form
-    gives ``dI = [1/6, -1/6]`` on the valid row and zero on the padding.
+    gives ``dI = [1/6, -1/6]`` on the reachable row and zero on the empty one.
     """
     loss = _loss()
     q_BLHD = torch.zeros(1, 2, 1, 1)
     cmp_k_BND = torch.zeros(1, 2, 1)
-    topk_indices_BLK = torch.tensor([[[0, 1], [0, 1]]])
+    # Row 1 has no reachable entry: the indexer marks both slots ``-1``.
+    topk_indices_BLK = torch.tensor([[[0, 1], [-1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
     lse_BLH = log_two.expand(1, 2, 1).clone()
     student_logits = torch.tensor(
         [[[float(log_two), 0.0], [float(log_two), 0.0]]], requires_grad=True
     )
     carrier = torch.zeros(1, 2, 1)
-    query_valid_mask = torch.tensor([[True, False]])
 
     loss(
         q_BLHD,
         cmp_k_BND,
         topk_indices_BLK,
         lse_BLH,
-        student_logits,
+        student_logits.masked_fill(topk_indices_BLK < 0, -torch.inf),
         carrier=carrier,
-        query_valid_mask=query_valid_mask,
     ).sum().backward()
 
     torch.testing.assert_close(

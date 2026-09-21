@@ -31,7 +31,6 @@ from .language_encoder import (
 _STACKED_INPUT_KEYS = (
     "input",
     "positions",
-    "valid_tokens",
     "token_types",
 )
 
@@ -325,7 +324,6 @@ class DeepSeekV41VisionLanguageProcessor:
         inputs = {
             "input": tokens,
             "positions": torch.arange(self.seq_len),
-            "valid_tokens": torch.arange(self.seq_len) < len(ids),
             "pixel_values": pad_sequence(patches, batch_first=True),
             "image_grid": torch.tensor(grids),
             "token_types": token_types,

@@ -5,9 +5,11 @@
 
 """DSV4.1 multimodal data adapter.
 
-The image token protocol, per-document alignment, validity marks and packed
-batching over TorchTitan's multimodal stack; the sample parser reads the
-CC12M WebDataset ``jpg``/``txt`` fields (``cc12m`` / ``cc12m-test``)."""
+The image token protocol and packed batching over TorchTitan's multimodal stack;
+the sample parser reads the CC12M WebDataset ``jpg``/``txt`` fields (``cc12m`` /
+``cc12m-test``).  Each document is padded to the model's per-document pooling
+alignment, so a compressor group never straddles a document edge (see the
+``text_datasets`` patch)."""
 
 import functools
 from dataclasses import dataclass
@@ -21,10 +23,12 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import HuggingFaceMultiModalD
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 from torchtitan.hf_datasets.multimodal.utils.packing import MMSamplePacker
 
+from torchtitan_npu.patches.torchtitan.hf_datasets.text_datasets import pad_segments_to_multiple
+
 from .data import TEXT, ImagePatchProcessor, build_image_token_layout
 
 
-def _process_mm_sample(sample, tokenizer, *, document_alignment: int = 1, **kwargs):
+def _process_mm_sample(sample, tokenizer, *, per_doc_alignment: int = 1, **kwargs):
     image = sample["jpg"]
     if isinstance(image, bytes):
         image = Image.open(BytesIO(image))
@@ -38,21 +42,15 @@ def _process_mm_sample(sample, tokenizer, *, document_alignment: int = 1, **kwar
     ids = torch.tensor([tokenizer.bos_id, *image_ids.tolist(), *caption, tokenizer.eos_id], dtype=torch.long)
     labels = ids.clone()
     labels[: 1 + image_ids.numel()] = -100
-    # The compressor pools ratio-sized groups over whole rows, so every document ends
-    # on a multiple of the model's pooling ratio: at most one unsupervised pad token
-    # after EOS keeps the next document's groups from straddling the boundary.  The
-    # pad stays inside its document (positions continue; the next BOS still resets).
-    real_length = ids.numel()
-    alignment_pad = (-real_length) % document_alignment
-    ids = torch.nn.functional.pad(ids, (0, alignment_pad))
-    labels = torch.nn.functional.pad(labels, (0, alignment_pad), value=-100)
+    # One document is one segment here, so the whole sample is padded at once.  The
+    # pad stays inside its own document (positions continue; the next BOS still
+    # resets) and is unsupervised, so it only rounds the document up to a whole
+    # number of pooling groups.
+    ids, labels = pad_segments_to_multiple((ids, labels), multiple=per_doc_alignment)
     return {
         "input_ids": ids,
         "labels": labels,
         "positions": torch.arange(ids.numel()),
-        # False exactly on the structural padding added above; the packer carries the
-        # mark through and the collator pads the row tail with False too.
-        "valid_tokens": torch.arange(ids.numel()) < real_length,
         # The upstream packer preserves this ordered list for every document.
         "pixel_values": [(patches, grid)],
     }
@@ -65,14 +63,6 @@ class _BufferedSamplePacker(MMSamplePacker):
         super().add_sample(sample)
         if len(self._sample_buffer) >= self.buffer_size:
             self.flush()
-
-    @staticmethod
-    def _merge_samples(samples):
-        merged = MMSamplePacker._merge_samples(samples)
-        # Upstream merges only its fixed sample fields; the validity mark rides along
-        # in the same per-document order as the ids it describes.
-        merged["valid_tokens"] = torch.cat([sample["valid_tokens"] for sample in samples])
-        return merged
 
 
 class _MultiModalDataset(HuggingFaceMultiModalDataset):
@@ -101,7 +91,6 @@ class _V41Collator:
         (sample,) = batch
         ids, labels, positions = (sample[k] for k in ("input_ids", "labels", "positions"))
         images = sample["pixel_values"]
-        valid = sample["valid_tokens"]
         starts = (positions == 0).nonzero().flatten().tolist()
         types = torch.full_like(ids, TEXT)
         indices = torch.full_like(ids, -1)
@@ -118,7 +107,6 @@ class _V41Collator:
         tokens = torch.nn.functional.pad(ids, (0, pad))
         token_types = torch.nn.functional.pad(types, (0, pad), value=TEXT)
         feature_indices = torch.nn.functional.pad(indices, (0, pad), value=-1)
-        valid_tokens = torch.nn.functional.pad(valid, (0, pad), value=False)
         # BOS labels are already masked, so shifting a pack never supervises
         # EOS -> the next document's BOS. Padding is a separate document.
         targets = torch.nn.functional.pad(labels[1:], (0, pad + 1), value=-100)
@@ -128,7 +116,6 @@ class _V41Collator:
             "positions": positions.unsqueeze(0),
             "token_types": token_types.unsqueeze(0),
             "image_feature_indices": feature_indices.unsqueeze(0),
-            "valid_tokens": valid_tokens.unsqueeze(0),
             "pixel_values": pad_sequence([p for p, _ in images], batch_first=True),
             "image_grid": torch.stack([g for _, g in images]),
         }, targets.unsqueeze(0)
@@ -142,9 +129,9 @@ class DeepSeekV41DataLoader(ParallelAwareDataloader):
         dataset: str = "cc12m-test"
         packing_buffer_size: int = 0
         infinite: bool = True
-        # Per-document length alignment, the LCM of the model's pooling ratios;
-        # the recipe derives it from the model spec.
-        document_alignment: int = 1
+        per_doc_alignment: int = 1
+        """Per-document pooling granularity (the model's compression alignment);
+        the recipe derives it from the model spec."""
 
     def __init__(
         self,
@@ -159,9 +146,11 @@ class DeepSeekV41DataLoader(ParallelAwareDataloader):
     ):
         if local_batch_size != 1:
             raise ValueError("DSV4.1 expects one packed sequence per rank (local_batch_size=1)")
-        if seq_len % config.document_alignment:
+        if config.per_doc_alignment < 1:
+            raise ValueError("per_doc_alignment must be positive")
+        if seq_len % config.per_doc_alignment:
             raise ValueError(
-                f"seq_len ({seq_len}) must be divisible by document_alignment ({config.document_alignment})"
+                f"seq_len ({seq_len}) must be a multiple of per_doc_alignment ({config.per_doc_alignment})"
             )
         processor = ImagePatchProcessor()
         dataset = _MultiModalDataset(
@@ -187,7 +176,7 @@ class DeepSeekV41DataLoader(ParallelAwareDataloader):
         )
         # Instance-local adaptation: no global dataset registry mutation, and
         # iteration/packing/state remain entirely owned by upstream TorchTitan.
-        dataset.sample_processor = functools.partial(_process_mm_sample, document_alignment=config.document_alignment)
+        dataset.sample_processor = functools.partial(_process_mm_sample, per_doc_alignment=config.per_doc_alignment)
         if dataset.enable_packing:
             dataset.packer = _BufferedSamplePacker(
                 max_seq_length=seq_len, buffer_size=config.packing_buffer_size, batch_size=local_batch_size

@@ -144,9 +144,12 @@ def test_vqa_labels_only_assistant_text_and_eos(tmp_path, tokenizer):
     dataset_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     inputs, labels = _processor(dataset_path, tokenizer)._sample(row)
 
-    valid_length = int(inputs["valid_tokens"].sum())
-    assert inputs["input"][valid_length - 1] == tokenizer.eos_id
-    assert labels[valid_length - 2] == tokenizer.eos_id
+    # Labels are shifted targets, so the reply's EOS is supervised at the reply's
+    # last token and the row tail (also filled with EOS) is unsupervised.
+    last_supervised = int((labels != -100).nonzero().flatten().max())
+    assert labels[last_supervised] == tokenizer.eos_id
+    assert inputs["input"][last_supervised + 1] == tokenizer.eos_id
+    assert (labels[last_supervised + 1 :] == -100).all()
     assert (labels[:-1][inputs["token_types"][1:] >= 0] == -100).all()
     supervised = labels[:-1] != -100
     assert torch.equal(labels[:-1][supervised], inputs["input"][1:][supervised])

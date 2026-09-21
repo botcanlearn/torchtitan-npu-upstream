@@ -35,9 +35,10 @@ Packed documents are handled exactly like ``selected_attention`` handles its win
 ``[j * compress_ratio, (j + 1) * compress_ratio)``, so its document is
 ``doc_ids[:, j * compress_ratio]`` and it is causally complete for query ``t`` iff
 ``j < (t + 1) // compress_ratio``.  An entry is selectable by ``t`` iff both hold.  This
-relies on every document segment being a multiple of ``compress_ratio`` tokens, which the
-V4.1 dataloader enforces with its ``document_alignment`` and which is also what makes the
-compressor's reshape segment-exact.
+is exact only when every document segment is a multiple of ``compress_ratio`` tokens;
+otherwise a pooling group straddles a document edge and its entry mixes the two
+documents.  That case is deliberately left unhandled, and the loader pads each document
+to keep it from arising for documents that fit in one row.
 
 Every layer owns a :class:`HierarchicalIndexer`, statically assigned one of CSA2's three
 modes: Full Mode carries the parameters and produces both the index keys and the top-k,
@@ -602,7 +603,6 @@ class IndexerDistillLoss(LoggedAuxLoss):
         topk_scores_BLK: torch.Tensor,
         *,
         carrier: torch.Tensor,
-        query_valid_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build the teacher, score the student against it, inject the gradient.
 
@@ -638,11 +638,6 @@ class IndexerDistillLoss(LoggedAuxLoss):
         # It carries no teacher mass either, so it is zeroed and contributes nothing.
         row_valid_BL = torch.isfinite(logits_BLK).any(dim=-1)
 
-        if query_valid_mask is not None:
-            # Structural padding (the alignment pad and the row tail) is not a
-            # query: it has no teacher and must train nothing.  Real image
-            # tokens stay valid even though their labels are masked.
-            row_valid_BL = row_valid_BL & query_valid_mask
         logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
         if self.score_gradient == "teacher":
             logits_BLK = logits_BLK.detach()

@@ -48,7 +48,6 @@ def _quantized_forward(
         lse.transpose(1, 2).detach(),
         topk_scores,
         carrier=output,
-        query_valid_mask=attention_masks.valid_tokens_BL,
     )
 
 

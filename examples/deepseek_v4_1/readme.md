@@ -59,7 +59,7 @@ indexer 蒸馏损失由 `IndexerDistillLoss` 实现（上游默认 `coeff=0.01`�
 
 `cc12m-train-0000.tar` 原样复用 [GitHub TorchTitan v0.3.0 测试资产](https://github.com/pytorch/torchtitan/blob/v0.3.0/tests/assets/cc12m_test/cc12m-train-0000.tar)，包含 32 条图文样本，仅用于测试。完整在线数据源通过 `--dataloader.dataset cc12m` 选择；指定本地目录后，读取的是该目录的数据，而非仓内测试资产。
 
-直接复用上游 `HuggingFaceMultiModalDataset` 的 DP 分片、`MMSamplePacker` 和状态恢复，以及 `ParallelAwareDataloader`。针对 TorchTitan 0.3.0 的 HF 恢复起点跨 epoch 重放问题，按上游文本 loader 的方式补齐 `set_epoch`；packing 缓冲满时调用上游 `flush()`。DSV4.1 只适配协议层：`BOS + 完整图片协议 + caption + EOS`、每篇文档按模型压缩比的最小公倍数对齐（当前为 2，至多在 EOS 后补 1 个不监督的 pad）、`valid_tokens` 标记随 pack 消费并穿过 packer；只有 caption 与 EOS 参与监督，图片特征索引按 pack 中的图片顺序连续编号，每篇文档的位置从零开始，注意力和压缩块隔离文档边界。
+直接复用上游 `HuggingFaceMultiModalDataset` 的 DP 分片、`MMSamplePacker` 和状态恢复，以及 `ParallelAwareDataloader`。针对 TorchTitan 0.3.0 的 HF 恢复起点跨 epoch 重放问题，按上游文本 loader 的方式补齐 `set_epoch`；packing 缓冲满时调用上游 `flush()`。DSV4.1 只适配协议层：`BOS + 完整图片协议 + caption + EOS`；只有 caption 与 EOS 参与监督，图片特征索引按 pack 中的图片顺序连续编号，每篇文档的位置从零开始。每篇文档按 dataloader 的 `per_doc_alignment`（recipe 由模型压缩比取 LCM 得到，当前为 2）在 EOS 后补至整数个池化组：pad 的 label 为 `-100`，位置继续累加，因此它留在本文档内、既不被监督也不改变下一篇文档的起点。注意 pad 会顶掉奇数长度文档 EOS 的目标（label 在文档内右移，EOS 的下一个位置变成了 pad，而 pad 的 label 是 `-100`），即每篇奇数长度文档少一个监督目标；对齐不覆盖行切分，长于 `seq_len` 的文档仍按行切开，续行另起一套池化组。
 
 与上游一致，`--dataloader.packing-buffer-size 0` 默认关闭 packing；设置正值（例如 `128`）启用。一个 rank 的 local batch 仍为 1，但一个 packed 序列可以包含多篇图文样本。装箱和合并仍调用上游实现；缓冲量还包括待输出的 packed 队列及 loader 预取，不是进程内存的硬上限。
 

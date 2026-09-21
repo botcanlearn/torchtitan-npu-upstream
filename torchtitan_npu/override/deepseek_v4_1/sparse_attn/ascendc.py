@@ -46,7 +46,6 @@ class _SparseMLA(torch.autograd.Function):
         window_size,
         topk_scores,
         teacher_scale,
-        query_valid,
         score_gradient,
         aux_loss,
     ):
@@ -95,7 +94,6 @@ class _SparseMLA(torch.autograd.Function):
             lse,
             smla_grad_metadata,
             topk_scores,
-            query_valid,
         )
         ctx.softmax_scale, ctx.ratio, ctx.window_size = softmax_scale, ratio, window_size
         # The teacher consumes the LSE as a detached constant.
@@ -123,7 +121,6 @@ class _SparseMLA(torch.autograd.Function):
             lse,
             smla_grad_metadata,
             topk_scores_saved,
-            query_valid,
         ) = ctx.saved_tensors
         dq, dswa_k, dcmp_k, dsinks, _, cmp_softmax_l1_norm = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
             q,
@@ -147,8 +144,6 @@ class _SparseMLA(torch.autograd.Function):
         grad_topk_scores = None
         if topk_scores_saved is not None:
             valid = cmp_sparse_indices >= 0
-            if query_valid is not None:
-                valid = valid & query_valid.reshape(-1, 1, 1)
             p = cmp_softmax_l1_norm.reshape_as(topk_scores_saved).float().masked_fill(~valid, 0.0)
             if ctx.score_gradient == "teacher":
                 grad_topk_scores = p
@@ -172,7 +167,6 @@ class _SparseMLA(torch.autograd.Function):
             None,
             None,
             grad_topk_scores,
-            None,
             None,
             None,
             None,
@@ -242,12 +236,16 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
                 raise ValueError("ratio 1/2 fused attention requires the model's selection indices")
             if ratio == 1 and cmp_k.shape != swa_k.shape:
                 raise ValueError("ratio 1 requires the full-resolution second KV stream")
-            # Per-document alignment makes every document's compressed length
-            # exactly cu_seqlens_q // ratio.  Like DSV4, the uncompressed
-            # path carries no residual; unlike DSV4, ratio 1 keeps its
-            # full-resolution second KV stream (the model's difference from
-            # DSV4's has_compressed gate) — only the residual is None.
+            # The compressed axis' boundaries.  A document whose length is not a
+            # multiple of the ratio has a partial trailing group, which this integer
+            # division rounds down; that group's entry is simply not addressable.
             cu_seqlens_cmp_kv = cu_seqlens_q // ratio
+            # The remainder of DSV4's plan (``block_remainder``) is zero here: the
+            # loader pads every document to the model's compression alignment, so each
+            # document in a row is a whole number of groups.  The one gap is a segment
+            # that is the continuation of a document longer than ``seq_len``: the row
+            # cut starts its grid past the alignment, so it can leave a partial trailing
+            # group while this reports none.
             cmp_residual_kv = torch.zeros_like(cu_seqlens_cmp_kv[1:]) if ratio > 1 else None
             cmp_k_tnd = cmp_k.flatten(0, 1)
             # TND kernels consume document-local indices; cu_seqlens_cmp_kv
@@ -279,7 +277,6 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
             self.window_size,
             carrier,
             teacher_scale,
-            attention_masks.valid_tokens_BL,
             self.score_gradient,
             self.aux_loss if wants_teacher else None,
         )

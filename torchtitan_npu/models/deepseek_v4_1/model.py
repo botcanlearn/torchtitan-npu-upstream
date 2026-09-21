@@ -33,6 +33,7 @@ selection masks are precomputed from it once per forward.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -55,6 +56,27 @@ if TYPE_CHECKING:
     from .attention import Attention
 
 
+def compression_alignment(compress_ratios: tuple[int, ...]) -> int:
+    """The ``A`` a packed document length must be a multiple of, ``1`` when none.
+
+    Every layer with ``compress_ratio > 0`` pools each group of ``R`` consecutive
+    tokens into one main-KV entry, and the indexer addresses that entry axis as
+    ``doc_ids[:, j * R]``.  A document whose token count is not a multiple of ``R``
+    therefore gets a partial trailing group that the *next* document's tokens
+    complete: the pooled value mixes two documents, and the entry stays selectable by
+    the first document's queries because its document is read off its first token.
+
+    Taking the least common multiple of every ratio the stack pools with gives the
+    alignment that keeps a whole group of each ratio inside one document; that is what
+    the dataloaders pad each document to.
+    """
+    alignment = 1
+    for ratio in compress_ratios:
+        if ratio > 0:
+            alignment = math.lcm(alignment, ratio)
+    return alignment
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class DeepSeekV41Metadata:
     """Per-forward varlen metadata, built by :meth:`V41Model.get_attention_masks`.
@@ -71,16 +93,12 @@ class DeepSeekV41Metadata:
     only on ``doc_ids`` and the ratio, so every indexer looks its own up instead of
     rebuilding it.
 
-    Two optional fields carry what a packed loader knows but the per-token view cannot
-    express: ``valid_tokens_BL`` marks structural padding (the document-alignment pad
-    and the row tail) so the distillation excludes those rows, and ``cu_seq_q`` is the
-    ragged cumulative boundary form the fused sparse kernel consumes.  Both are
-    ``None`` for loaders without the marks.
+    ``cu_seq_q`` carries the ragged cumulative boundary form the fused sparse kernel
+    consumes, and is ``None`` for loaders that do not provide it.
     """
 
     doc_ids_BL: torch.Tensor  # noqa: N815
     selection_masks: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-    valid_tokens_BL: torch.Tensor | None = None  # noqa: N815
     cu_seq_q: torch.Tensor | None = None
 
 
@@ -388,11 +406,10 @@ class V41Model(Decoder):
         )
 
     def get_attention_masks(  # pyrefly: ignore [bad-override]
-        self, positions: torch.Tensor, *, valid_tokens: torch.Tensor | None = None
+        self, positions: torch.Tensor
     ) -> DeepSeekV41Metadata:
-        """Build the per-forward varlen metadata: a document id per token, the
-        indexer's selection masks, and the packed loader's validity marks when it
-        produced any.
+        """Build the per-forward varlen metadata: a document id per token and the
+        indexer's selection masks.
 
         ``selected_attention`` consumes the document ids for the window branch, and the
         indexer derives its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from them —
@@ -412,7 +429,6 @@ class V41Model(Decoder):
         return DeepSeekV41Metadata(
             doc_ids_BL=doc_ids_BL,
             selection_masks=indexer_selection_masks(doc_ids_BL, self.compress_ratios),
-            valid_tokens_BL=valid_tokens,
             cu_seq_q=cu_seq_q,
         )
 
@@ -426,12 +442,7 @@ class V41Model(Decoder):
         del load_balancer_type
         if cp_mesh is not None:
             raise NotImplementedError("DeepSeek V4.1 currently supports CP=1 only")
-        # The packed loader's validity mark is metadata, not a forward input:
-        # consume it here so it never reaches a forward that does not take it.
-        valid_tokens = extra_kwargs.pop("valid_tokens", None)
-        extra_kwargs["attention_masks"] = self.get_attention_masks(
-            extra_kwargs.get("positions"), valid_tokens=valid_tokens
-        )
+        extra_kwargs["attention_masks"] = self.get_attention_masks(extra_kwargs.get("positions"))
         return inputs, labels, extra_kwargs
 
     def _prepare_multimodal_embeddings(

@@ -27,8 +27,18 @@ from torchtitan_npu.extensions.trainer import TrainerEx
 from torchtitan_npu.models.common.muon import make_expert_layout, make_owned_layout
 
 from . import model_registry
-from .model import V41Model
+from .model import V41Model, compression_alignment
 from .vision.dataloader import DeepSeekV41DataLoader
+
+
+def _per_doc_alignment(model_spec: ModelSpec) -> int:
+    """The pooling granularity a packed document must be padded to.
+
+    Derived from the model's compression ratios so the loader and the compressor
+    cannot disagree: a document whose length is not a multiple of every ratio would
+    get a group straddling its edge.
+    """
+    return compression_alignment(model_spec.model.compress_ratios)  # pyrefly: ignore [missing-attribute]
 
 
 @dataclass(kw_only=True)
@@ -64,17 +74,6 @@ class DeepSeekV41Trainer(GradientClippingTrainer, TrainerEx):
         if isinstance(self.optimizers, HostSparseOptimizersContainer):
             return self.optimizers.clip_grad_norm(parameters, max_norm, **kwargs)
         return super().clip_grad_norm(parameters, max_norm, **kwargs)
-
-
-def _document_alignment(model_spec) -> int:
-    """Largest compression ratio the model pools with, ``1`` when it has none.
-
-    A pooled group must never straddle a document edge: the row length stays a
-    multiple of the pooling ratio, and the multimodal dataloader applies the
-    same alignment to each packed document.
-    """
-    ratios = [ratio for ratio in model_spec.model.compress_ratios if ratio > 1]
-    return max(ratios) if ratios else 1
 
 
 def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
@@ -217,7 +216,7 @@ def _v41_trainer_config(flavor: str) -> TrainerEx.Config:
         model_spec=model_spec,
         tokenizer=HuggingFaceTokenizer.Config(),
         dataloader=DeepSeekV41DataLoader.Config(
-            document_alignment=_document_alignment(model_spec),
+            per_doc_alignment=_per_doc_alignment(model_spec),
         ),
         optimizer=_v41_optimizer_config(model_spec),
         activation_checkpoint=FullAC.Config(),
