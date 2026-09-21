@@ -325,6 +325,12 @@ class HostEngramTable(EngramTable):
     def mark_sparse_step_complete(self) -> None:
         self._pending_sparse_grad = None
 
+    def refresh_lookup_storage(self, row_ids: torch.Tensor) -> None:
+        """Refresh derived lookup rows after an optimizer update, if any.
+
+        FP32 lookup uses the master weight directly and needs no refresh.
+        """
+
     def pending_sparse_grad(self) -> torch.Tensor | None:
         """The accumulated CPU sparse gradient, before it reaches SparseAdam."""
         return self._pending_sparse_grad

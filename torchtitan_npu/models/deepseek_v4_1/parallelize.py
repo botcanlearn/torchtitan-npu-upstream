@@ -45,6 +45,9 @@ def _shard_engram_tables(
             wire_replicas = getattr(module, "wire_sparse_grad_replicas", None)
             if wire_replicas is not None:
                 wire_replicas(edp_mesh=edp_mesh, edp_mesh_dims=edp_mesh_dims)
+            init_buffer = getattr(module, "init_elastic_buffer", None)
+            if init_buffer is not None:
+                init_buffer(param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param])
     return ignored_params
 
 

@@ -206,6 +206,10 @@ class HostSparseOptimizersContainer(OptimizersContainer):
                 table.prepare_sparse_optimizer_step()
         result = super().step(closure=closure)
         for table in self._iter_host_tables():
+            pending = table.pending_sparse_grad()
+            if pending is not None:
+                with record_function("engram::refresh_lookup_storage"):
+                    table.refresh_lookup_storage(pending.indices()[0])
             table.mark_sparse_step_complete()
         return result
 
