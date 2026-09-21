@@ -53,6 +53,43 @@ A/B 必须固定 tar 内容及顺序、tokenizer、序列长度、packing buffer
 
 上游多模态模块需要与 PyTorch 匹配的 `torchvision`（CPU 图像预处理）；按运行环境安装对应版本。数据路径支持 `DATASET_PATH` 环境变量或标准 CLI；不指定路径时使用所选数据集的上游注册源。
 
+### Vision-language SFT（LLaVA / VQA）
+
+SFT 复用同目录的 CPT launcher，只替换 dataloader；不另设 checkpoint 或并行策略。输入可以是 JSON、JSONL 或 Parquet，支持：
+
+- LLaVA/ShareGPT 的 `conversations`（`human` / `gpt` 与 `<image>` 标记）；
+- OpenAI message schema 的 `messages` 与有序 text/image content blocks；
+- 纯文本 Alpaca `instruction` / `input` / `output`。
+
+`developer` 映射为 V4.1 的 `system`，`last_reminder` 映射为官方 `latest_reminder`。其他 role 会明确报错。训练策略由 override 统一配置，数据行中的同名字段不会覆盖 `thinking_mode`、`drop_thinking`、BOS 或 reasoning effort。
+
+最小 LLaVA VQA 样例：
+
+```json
+{"image":"train2014/example.jpg","conversations":[{"from":"human","value":"<image>\nWhat is shown?"},{"from":"gpt","value":"A red bus."}]}
+```
+
+图片相对路径默认以数据文件所在目录为根；也可以通过 override 的 `image_root` 指定统一根目录。普通 HTTP(S) URL 不在训练 worker 中下载，需先落盘；data URI 可以直接使用。无图片的纯文本样本沿用同一官方 chat encoding。
+
+默认 `chat` 模式对每个 assistant 回复计算监督，system/user/image/padding label 均为 `-100`，assistant 回复及 EOS 参与 loss。超过 `training.seq_len` 的样本被跳过。与 CPT 一样，每个数据并行 rank 处理一条序列（`training.local_batch_size=1`）；这不限制节点数，global batch 由有效 DP 度和梯度累积扩展。`dataloader.num_workers` 等 worker 配置与 tensor batch 独立并正常透传，DP shard 和恢复状态沿用公共 V4.1 数据生命周期。
+
+```sh
+DATASET_PATH=/path/to/vqa.jsonl \
+bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_sft_4k_a3.sh \
+    --hf-assets-path /path/to/DeepSeek-V4.1-Flash
+```
+
+A5 使用同样的调用方式，将 launcher 换为同目录
+`deepseek_v4_1_flash_8p_sft_4k_a5.sh`；它复用 A5 CPT wrapper，由后者继续负责量化与融合算子配置。
+
+需要覆盖官方 encoding 选项时，将参数放在同一个 override JSON 中，例如：
+
+```sh
+'torchtitan_npu.override.deepseek_v4_1.vision_language_dataloader.sft={"thinking_mode":"thinking","drop_thinking":false,"reasoning_effort":"high"}'
+```
+
+encoder 只调用模型目录 `encoding/encoding.py` 的 `encode_messages` 公共入口，并通过官方前缀编码求 assistant span；`drop_thinking` 使历史前缀变化时，改用完整对话的公开字段探针求边界。它不复刻工具合并、thinking 清理或逐消息渲染规则；若未来官方版本不再保持上述公共行为，loader 会在生成 loss mask 前明确失败，避免静默监督错位。
+
 ### 相同初始权重（生成与加载）
 
 baseline 与融合组要从同一份显式权重出发时，先生成再加载（dcp 格式，model-only）：

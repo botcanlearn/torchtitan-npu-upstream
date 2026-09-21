@@ -185,8 +185,10 @@ class ImagePatchProcessor:
             width = height * self.max_wh_ratio
         if 0 < width * height < self.min_pixels:
             scale = (self.min_pixels / (width * height)) ** 0.5
-            width *= scale
-            height *= scale
+            # Match the model asset's reference image planner: round down the
+            # scaled dimensions before snapping them to the patch grid.
+            width = int(width * scale)
+            height = int(height * scale)
         target_h, target_w = self._safe_resize(height, width)
         return target_h // self.patch_size, target_w // self.patch_size
 
