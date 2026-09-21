@@ -2,11 +2,13 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""V4.1 fused sparse attention; the distillation loss stays owned by the model."""
+
+"""Independent V4.1 attention and score-and-select overrides."""
 
 from torchtitan.config import derive, override
 
 from torchtitan_npu.models.deepseek_v4_1.attention import CompressedSparseInnerAttention2
+from torchtitan_npu.models.deepseek_v4_1.indexer import ScoreAndSelect
 
 
 @override(
@@ -18,3 +20,18 @@ def asc(cfg: CompressedSparseInnerAttention2.Config):
     from .ascendc import AscV41SparseAttention
 
     return derive(cfg, AscV41SparseAttention.Config)
+
+
+@override(
+    target=ScoreAndSelect.Config,
+    exact=True,
+    description=(
+        "The score-and-select node fused with its SLIKG backward in one "
+        "autograd.Function (pool-free indexers; pool layers keep the eager "
+        "score-and-select)"
+    ),
+)
+def asc_li(cfg: ScoreAndSelect.Config):
+    from .lightning_indexer import derive_fused_score_and_select_config
+
+    return derive_fused_score_and_select_config(cfg)

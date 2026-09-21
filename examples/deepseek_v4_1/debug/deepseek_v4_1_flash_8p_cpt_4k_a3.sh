@@ -36,7 +36,7 @@ SPMD_BACKEND="spmd_types"
 
 # Training
 # Retain the validated eager / AdamW / FullAC resource crop.
-SEQ_LEN=512
+SEQ_LEN=4096
 MBS=1
 GBS=8
 STEPS=40

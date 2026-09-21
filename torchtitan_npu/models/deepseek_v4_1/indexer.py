@@ -56,7 +56,11 @@ import torch
 import torch.nn.functional as F
 from torchtitan.protocols.module import Module
 
-from torchtitan_npu.patches.torchtitan.models.common.aux_loss import LoggedAuxLoss
+from torchtitan_npu.patches.torchtitan.models.common.aux_loss import (
+    LoggedAuxLoss,
+    _AuxLossInjection,
+    _should_run_forward,
+)
 
 if TYPE_CHECKING:
     from torchtitan.models.common.linear import Linear
@@ -124,57 +128,23 @@ def indexer_selection_masks(
     }
 
 
-class HierarchicalIndexer(Module):
-    """The Hierarchical Sparse Indexer (report section 2.3.2) across CSA2's layer modes.
-
-    V4.1 is a Causal Encoder-Decoder (CED): the bottom ``L/2`` layers are the causal
-    encoder and the top ``L/2`` the decoder, and this indexer is used in the decoder
-    only.  That is why the released config puts the candidate-pool source at the first
-    decoder layer, ``candidate_source_layer = 20`` of 40.
-
-    Each layer is statically assigned one mode (report section 2.3.1), and ``forward`` is
-    the adapter over them:
-
-    - ``FULL``: the layer owns the main KV, so it projects the index keys from the
-      compressor latent and runs the indexer.  With ``candidate_topk_blocks > 0`` it is
-      also the group's candidate source and builds the shared pool.
-    - ``REINDEX``: it reuses the main KV and index keys of a preceding Full Mode layer,
-      computes its own index query and rescores them.  With ``candidate_topk_blocks > 0``
-      it searches only the shared candidate pool, otherwise every visible entry.
-    - ``REUSE``: no index query and no scores; it carries the latest Top-K indices and
-      the shared keys forward.
-
-    The candidate pool is the hierarchy: the source scores every causally visible entry
-    once, scores each block by its best entry and keeps ``candidate_topk_blocks`` blocks
-    of ``candidate_block_size`` positions -- 2048 x 8 = 16384 candidates against
-    ``index_topk`` 512 in V4.1-Flash -- and the Reindex Mode layers search only those.
-    The pool boundary comes from a top-k over blocks, so it receives no gradient: it is a
-    training/inference consistency and per-query cost device, not a learned component.
-
-    The indexer is trained by distillation alone, so its graph starts at its own
-    parameters: the caller detaches the trunk inputs (``Attention.forward``).  The shared
-    index keys are the one exception -- a Reindex Mode layer receives ``idx_k`` live, so
-    that the consumers of a key keep training its owner.
-    """
+class ScoreAndSelect(Module):
+    """The score-and-select computation, extracted so a fused kernel can
+    override it without replacing the whole indexer."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         mode: IndexerMode
+        compress_ratio: int
         num_index_heads: int
         index_head_dim: int
         index_topk: int
-        compress_ratio: int
-        # Candidate pool: a Full Mode source builds it, Reindex Mode layers search it.
-        # 0 leaves the mode's plain behaviour, scoring every visible entry.
-        candidate_topk_blocks: int = 0
-        candidate_block_size: int = 0
-        # Present on Full and Reindex Mode layers:
-        rope: RoPE.Config | None = None
-        wq_b: Linear.Config | None = None
-        weights_proj: Linear.Config | None = None
-        # Present on Full Mode layers, which project their own keys:
-        wk: Linear.Config | None = None
-        k_norm: RMSNorm.Config | None = None
+        candidate_topk_blocks: int
+        candidate_block_size: int
+
+        @property
+        def score_gradient(self) -> str:
+            return "logits"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -185,18 +155,6 @@ class HierarchicalIndexer(Module):
         self.index_topk = config.index_topk
         self.candidate_topk_blocks = config.candidate_topk_blocks
         self.candidate_block_size = config.candidate_block_size
-        if self.mode is REUSE:
-            return
-        if config.rope is None or config.wq_b is None or config.weights_proj is None:
-            raise ValueError("A Full or Reindex Mode indexer requires rope, wq_b and weights_proj configs.")
-        self.rope = config.rope.build()
-        self.wq_b = config.wq_b.build()
-        self.weights_proj = config.weights_proj.build()
-        if self.mode is FULL:
-            if config.wk is None or config.k_norm is None:
-                raise ValueError("A Full Mode indexer requires wk and k_norm configs to project its own index keys.")
-            self.wk = config.wk.build()
-            self.k_norm = config.k_norm.build()
 
     @staticmethod
     def select_candidate_blocks(
@@ -312,6 +270,110 @@ class HierarchicalIndexer(Module):
         # the value that drops it from the distillation's student softmax.
         topk_scores_BLK = logits_BLHiK.sum(dim=2).masked_fill(topk_indices_BLK < 0, -torch.inf)
         return topk_indices_BLK, topk_scores_BLK, candidates_BLN
+
+    def forward(
+        self,
+        idx_q_BLHiDi: torch.Tensor,
+        idx_k_BNDi: torch.Tensor,
+        weights_BLHi: torch.Tensor,
+        attention_masks: DeepSeekV41Metadata,
+        *,
+        candidates_BLN: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        return self._score_and_select(
+            idx_q_BLHiDi, idx_k_BNDi, weights_BLHi, attention_masks, candidates_BLN=candidates_BLN
+        )
+
+
+class HierarchicalIndexer(Module):
+    """The Hierarchical Sparse Indexer (report section 2.3.2) across CSA2's layer modes.
+
+    V4.1 is a Causal Encoder-Decoder (CED): the bottom ``L/2`` layers are the causal
+    encoder and the top ``L/2`` the decoder, and this indexer is used in the decoder
+    only.  That is why the released config puts the candidate-pool source at the first
+    decoder layer, ``candidate_source_layer = 20`` of 40.
+
+    Each layer is statically assigned one mode (report section 2.3.1), and ``forward`` is
+    the adapter over them:
+
+    - ``FULL``: the layer owns the main KV, so it projects the index keys from the
+      compressor latent and runs the indexer.  With ``candidate_topk_blocks > 0`` it is
+      also the group's candidate source and builds the shared pool.
+    - ``REINDEX``: it reuses the main KV and index keys of a preceding Full Mode layer,
+      computes its own index query and rescores them.  With ``candidate_topk_blocks > 0``
+      it searches only the shared candidate pool, otherwise every visible entry.
+    - ``REUSE``: no index query and no scores; it carries the latest Top-K indices and
+      the shared keys forward.
+
+    The candidate pool is the hierarchy: the source scores every causally visible entry
+    once, scores each block by its best entry and keeps ``candidate_topk_blocks`` blocks
+    of ``candidate_block_size`` positions -- 2048 x 8 = 16384 candidates against
+    ``index_topk`` 512 in V4.1-Flash -- and the Reindex Mode layers search only those.
+    The pool boundary comes from a top-k over blocks, so it receives no gradient: it is a
+    training/inference consistency and per-query cost device, not a learned component.
+
+    The indexer is trained by distillation alone, so its graph starts at its own
+    parameters: the caller detaches the trunk inputs (``Attention.forward``).  The shared
+    index keys are the one exception -- a Reindex Mode layer receives ``idx_k`` live, so
+    that the consumers of a key keep training its owner.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        mode: IndexerMode
+        num_index_heads: int
+        index_head_dim: int
+        index_topk: int
+        compress_ratio: int
+        # Candidate pool: a Full Mode source builds it, Reindex Mode layers search it.
+        # 0 leaves the mode's plain behaviour, scoring every visible entry.
+        candidate_topk_blocks: int = 0
+        candidate_block_size: int = 0
+        # Present on Full and Reindex Mode layers:
+        rope: RoPE.Config | None = None
+        wq_b: Linear.Config | None = None
+        weights_proj: Linear.Config | None = None
+        # Present on Full Mode layers, which project their own keys:
+        score_and_select: ScoreAndSelect.Config
+        wk: Linear.Config | None = None
+        k_norm: RMSNorm.Config | None = None
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.mode = config.mode
+        self.compress_ratio = config.compress_ratio
+        self.num_index_heads = config.num_index_heads
+        self.index_head_dim = config.index_head_dim
+        self.index_topk = config.index_topk
+        self.candidate_topk_blocks = config.candidate_topk_blocks
+        self.candidate_block_size = config.candidate_block_size
+        self.score_and_select = config.score_and_select.build()
+        if self.mode is REUSE:
+            return
+        if config.rope is None or config.wq_b is None or config.weights_proj is None:
+            raise ValueError("A Full or Reindex Mode indexer requires rope, wq_b and weights_proj configs.")
+        self.rope = config.rope.build()
+        self.wq_b = config.wq_b.build()
+        self.weights_proj = config.weights_proj.build()
+        if self.mode is FULL:
+            if config.wk is None or config.k_norm is None:
+                raise ValueError("A Full Mode indexer requires wk and k_norm configs to project its own index keys.")
+            self.wk = config.wk.build()
+            self.k_norm = config.k_norm.build()
+
+    def _score_and_select(
+        self,
+        idx_q_BLHiDi: torch.Tensor,
+        idx_k_BNDi: torch.Tensor,
+        weights_BLHi: torch.Tensor,
+        attention_masks: DeepSeekV41Metadata,
+        *,
+        candidates_BLN: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Delegate to the extracted score-and-select node."""
+        return self.score_and_select(
+            idx_q_BLHiDi, idx_k_BNDi, weights_BLHi, attention_masks, candidates_BLN=candidates_BLN
+        )
 
     def forward(
         self,
@@ -443,6 +505,8 @@ class IndexerDistillLoss(LoggedAuxLoss):
     class Config(LoggedAuxLoss.Config):
         """The ``LoggedAuxLoss`` fields plus the teacher's temperature."""
 
+        score_gradient: str = "logits"
+
         softmax_scale: float
         """Attention softmax scale; the teacher recomputes its logits with the same
         temperature as the sparse attention that produced the LSE."""
@@ -450,6 +514,24 @@ class IndexerDistillLoss(LoggedAuxLoss):
     def __init__(self, config: Config):
         super().__init__(config)
         self.softmax_scale = config.softmax_scale
+        if config.score_gradient not in ("logits", "teacher"):
+            raise ValueError(f"Unknown scores gradient mode: {config.score_gradient}")
+        self.score_gradient = config.score_gradient
+
+    @property
+    def normalization_scale(self) -> float:
+        if self.global_batch_size is None or self.global_batch_size <= 0:
+            raise ValueError("Indexer loss requires a positive global valid-token count")
+        return self._mesh_scale_factor / self.global_batch_size
+
+    def teacher_alpha(self) -> float:
+        return self.coeff * self.normalization_scale
+
+    @torch.no_grad()
+    def record_teacher(self, scores, p, valid) -> None:
+        t = p / p.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+        value = self._logged_kl(p, t, scores.float(), valid).sum()
+        self._acc.add_(value * self.normalization_scale)
 
     def _teacher(
         self,
@@ -491,6 +573,21 @@ class IndexerDistillLoss(LoggedAuxLoss):
         # A row with no valid slot has an all -inf softmax row; its mass is zero anyway.
         conditional_BLHK = torch.softmax(logits_BLHK.masked_fill(~row_valid_BL[:, :, None, None], 0.0), dim=-1)
         return (mass_BLH.unsqueeze(-1) * conditional_BLHK).sum(dim=2) / q_BLHD.size(2)
+
+    def _logged_kl(
+        self,
+        p_BLK: torch.Tensor,
+        t_BLK: torch.Tensor,
+        logits_BLK: torch.Tensor,
+        slot_valid_BLK: torch.Tensor,
+    ) -> torch.Tensor:
+        """The reference KL value the metric accumulates (per-element)."""
+        log_student_BLK = F.log_softmax(
+            logits_BLK.masked_fill(~slot_valid_BLK, -torch.inf).masked_fill(~slot_valid_BLK.any(-1, keepdim=True), 0.0),
+            dim=-1,
+        )
+        weighted = torch.special.xlogy(p_BLK, t_BLK) - p_BLK * log_student_BLK
+        return weighted.masked_fill(~slot_valid_BLK, 0.0)
 
     def forward(
         self,
@@ -543,11 +640,19 @@ class IndexerDistillLoss(LoggedAuxLoss):
             # tokens stay valid even though their labels are masked.
             row_valid_BL = row_valid_BL & query_valid_mask
         logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
-        log_student_BLK = F.log_softmax(logits_BLK, dim=-1)
-
-        # xlogy keeps 0 * log(0) = 0: an entry with no teacher mass contributes nothing
-        # even though its conditional is 0.  The student term is a plain product, so the
-        # slots the indexer marked unreachable would be 0 * -inf = NaN and are dropped.
-        weighted_BLK = torch.special.xlogy(p_BLK, t_BLK) - p_BLK * log_student_BLK
-        weighted_BLK = weighted_BLK.masked_fill(~torch.isfinite(logits_BLK), 0.0)
+        if self.score_gradient == "teacher":
+            logits_BLK = logits_BLK.detach()
+        weighted_BLK = self._logged_kl(
+            p_BLK, t_BLK, logits_BLK, torch.isfinite(logits_BLK) & row_valid_BL.unsqueeze(-1)
+        )
+        if self.score_gradient == "teacher":
+            if self.training and _should_run_forward():
+                self._acc.add_(weighted_BLK.sum().detach() * self.normalization_scale)
+            linear = (
+                p_BLK
+                * torch.where(
+                    row_valid_BL.unsqueeze(-1) & torch.isfinite(topk_scores_BLK), topk_scores_BLK.float(), 0.0
+                )
+            ).sum()
+            return _AuxLossInjection.apply(carrier, linear * self.teacher_alpha())
         return self.inject(carrier, weighted_BLK.sum())

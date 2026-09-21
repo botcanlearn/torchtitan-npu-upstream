@@ -26,9 +26,9 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
     --training.steps 3 --lr-scheduler.total-steps 3 --lr-scheduler.warmup-steps 2
 ```
 
-默认实验为 40 层 / 16 专家、seq512、local/global batch 1/8、FSDP8/EP8、AdamW、eager、FullAC，训练与调度均为 40 步。Python 配方保留模型结构、数据协议和优化器参数布局；实验参数由脚本组织，末尾 CLI 参数覆盖脚本默认值。`CONFIG` 可选择 `deepseek_v4_1_debugmodel_multimodal` 调试宽度，硬件选择仍由脚本负责。
+默认实验为 40 层 / 16 专家、seq4096（4k）、local/global batch 1/8、FSDP8/EP8、AdamW、eager、FullAC，训练与调度均为 40 步。Python 配方保留模型结构、数据协议和优化器参数布局；实验参数由脚本组织，末尾 CLI 参数覆盖脚本默认值。`CONFIG` 可选择 `deepseek_v4_1_debugmodel_multimodal` 调试宽度，硬件选择仍由脚本负责。
 
-A5 的 `CPU_AFFINITY_CONF` 应按主机拓扑覆盖。`CLI_OVERRIDES` 沿用 DSV4 的列表扩展方式：A3 基础列表之外，文本 RoPE 经该通道按硬件选择（A3 默认 `asc_complex`，A5 换为 `asc_partial`），A5 默认追加 SwiGLUGroup、sparse attention 与 Sinkhorn，不重复传入 `--override.imports`。显式传 `--override.imports` 会替换整个集合，需自行包含所需的 RoPE 与 swap optimizer。最终选择随 Trainer Config 打印。
+A5 的 `CPU_AFFINITY_CONF` 应按主机拓扑覆盖。`CLI_OVERRIDES` 沿用 DSV4 的列表扩展方式：A3 基础列表之外，文本 RoPE 经该通道按硬件选择（A3 默认 `asc_complex`，A5 换为 `asc_partial`），A5 默认追加 SwiGLUGroup、sparse attention、融合 LI 选分与 Sinkhorn，不重复传入 `--override.imports`。显式传 `--override.imports` 会替换整个集合，需自行包含所需的 RoPE 与 swap optimizer。最终选择随 Trainer Config 打印。
 
 普通运行不强制随机种子和确定性；精度对照须在双方命令中追加 `--debug.seed 42 --debug.deterministic`。默认关闭 checkpoint 且设置 `load_only=True`；保存时同时传 `--checkpoint.enable --checkpoint.no-load-only`。`load_only` 表示禁止保存，与 model-only 加载不同。tokenizer 统一经 `--hf-assets-path` 提供（测试可用仓内 `tests/assets/deepseek_v3` mini tokenizer），该参数本身不加载模型权重。
 
@@ -85,7 +85,8 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
 | `common.rope.asc_complex`（A3 文本） | attention/compressor/indexer 的 split-aware 文本旋转（公共 `ComplexRoPE.Config`，保留 split/theta/YaRN） | Ascend rotary mul（interleave） |
 | `common.rope.asc_partial`（A5 文本） | 同上三处文本位点；单个 `inplace_partial_rotary_mul` 只旋转尾部 `dim` 通道 | AscendC partial rotary |
 | `common.rope.asc_half_rotation` | 视觉塔 2D 位置表的 half 旋转（半宽 cos/sin，融合前复制为全宽表，逐 batch 折叠保位置） | 同上 |
-| `sparse_attn.asc`（仅 A5） | `CompressedSparseInnerAttention2._compute_attention`：A5 TND kernel 返回完整 softmax 的输出与 LSE，蒸馏损失仍由模型注入 | Ascend sparse flash MLA |
+| `sparse_attn.asc`（仅 A5） | 替换完整 attention forward，反向复用 SMLAG teacher，省去 `_teacher` 重建 | Ascend sparse flash MLA |
+| `sparse_attn.asc_li`（A5 默认） | 替换 score-and-select；候选池路径保留 eager | LI / SLIKG |
 | `common.swiglu_group.asc`（仅 A5） | `*.moe.routed_experts.inner_experts` 的 grouped SwiGLU（FQN 限定） | cann_ops_nn.swiglu_group |
 | `common.swiglu_group.asc_shared_experts`（仅 A5） | `*.moe.shared_experts` 的 SwiGLU（FQN 限定，不替换视觉 MLP） | 同上 |
 | `common.token_dispatcher.asc` | 公共 MoE 的 permute / re-routing / unpermute；reference 不启用 | Ascend token dispatcher |

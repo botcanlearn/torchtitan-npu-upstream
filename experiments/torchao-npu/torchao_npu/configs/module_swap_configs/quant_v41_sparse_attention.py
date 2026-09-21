@@ -21,16 +21,44 @@ class QuantV41SparseAttentionConfig(ModuleSwapConfig):
     """Install mixed quant sparse attention with FP8 SWA_KV / FP4 CMP_KV and BF16 scales."""
 
 
-@register_quantize_module_handler(QuantV41SparseAttentionConfig)
-def _quant_v41_sparse_attention_transform(module, config: QuantV41SparseAttentionConfig):
+def _quantized_forward(
+    self, q, swa_k, cmp_k=None, *, attention_masks, topk_indices=None, topk_scores=None, attn_sink=None
+):
     from torchao_npu.quantized_modules.v41_sparse_attention import QuantV41SparseAttention
 
-    # Keep the host forward's validation and distillation loss wiring intact.
-    if not hasattr(module, "_torchao_npu_original_compute_attention"):
-        module._torchao_npu_original_compute_attention = module._compute_attention
+    if (cmp_k is None) != (topk_indices is None):
+        raise ValueError("cmp_k and topk_indices must be provided together.")
+    wants_teacher = self.training and self.aux_loss is not None and cmp_k is not None
+    output, lse = QuantV41SparseAttention.forward(
+        self,
+        q,
+        swa_k,
+        cmp_k,
+        attention_masks=attention_masks,
+        topk_indices=topk_indices,
+        attn_sink=attn_sink,
+        wants_teacher=wants_teacher,
+    )
+    if not wants_teacher:
+        return output
+    return self.aux_loss(
+        q.detach(),
+        cmp_k.detach(),
+        topk_indices,
+        lse.transpose(1, 2).detach(),
+        topk_scores,
+        carrier=output,
+        query_valid_mask=attention_masks.valid_tokens_BL,
+    )
+
+
+@register_quantize_module_handler(QuantV41SparseAttentionConfig)
+def _quant_v41_sparse_attention_transform(module, config: QuantV41SparseAttentionConfig):
+    if not hasattr(module, "_torchao_npu_original_forward"):
+        module._torchao_npu_original_forward = module.forward
     if config.step == QATStep.PREPARE:
         module._torchao_npu_module_swap_config = config
-        module._compute_attention = MethodType(QuantV41SparseAttention.forward, module)
+        module.forward = MethodType(_quantized_forward, module)
     else:
-        module._compute_attention = module._torchao_npu_original_compute_attention
+        module.forward = module._torchao_npu_original_forward
     return module

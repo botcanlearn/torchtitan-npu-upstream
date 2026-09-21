@@ -27,7 +27,7 @@ from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .attention import Attention, CompressedSparseInnerAttention2
 from .compressor import Compressor
-from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, IndexerDistillLoss
+from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, IndexerDistillLoss, ScoreAndSelect
 from .mhc import HcPost, HcPre
 from .model import DeepSeekV41TransformerBlock, V41Model
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
@@ -296,6 +296,15 @@ def _make_indexer_config(
     wants_pool = is_candidate_source or uses_candidates
     return HierarchicalIndexer.Config(
         mode=mode,
+        score_and_select=ScoreAndSelect.Config(
+            mode=mode,
+            compress_ratio=compress_ratio,
+            num_index_heads=num_index_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
+            candidate_topk_blocks=candidate_topk_blocks if wants_pool else 0,
+            candidate_block_size=candidate_block_size if wants_pool else 0,
+        ),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         index_topk=index_topk,

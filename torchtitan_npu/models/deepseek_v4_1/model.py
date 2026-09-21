@@ -34,7 +34,7 @@ selection masks are precomputed from it once per forward.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -336,6 +336,20 @@ class V41Model(Decoder):
             return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
+        # Resolve the cross-layer scores contract on configs before modules exist.
+        mode = "logits"
+        layers = []
+        for layer in config.layers:
+            attention = layer.attention
+            if attention.indexer.mode is not IndexerMode.REUSE:
+                mode = attention.indexer.score_and_select.score_gradient
+            inner = attention.inner_attention
+            loss = inner.aux_loss
+            if loss is not None:
+                loss = replace(loss, score_gradient=mode)
+            inner = replace(inner, score_gradient=mode, aux_loss=loss)
+            layers.append(replace(layer, attention=replace(attention, inner_attention=inner)))
+        config = replace(config, layers=layers)
         super().__init__(config)
         cfg = config
         self.hc_mult = cfg.hc_mult

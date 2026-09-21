@@ -2,22 +2,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""V4.1 CP1 fused sparse attention (A5-only kernels; A3 rejects cmp_topk=256).
-
-The adapter overrides exactly ``_compute_attention``: the parent forward
-keeps the input validation and the distillation wiring, and this module
-returns the kernel output together with the per-head LSE of the full
-softmax (window + selected entries + sink) the teacher rebuilds from.
-Ratio 1 carries a true full-resolution second KV stream, ratio 2 the
-compressed one; with per-document alignment every document's compressed
-length is exactly ``cu_seq_q // ratio``.  The selection stays the model's:
-global compressed-pool coordinates feed the loss untouched, while the TND
-kernel receives document-local indices whose valid entries form a stable
-prefix and whose invalid ``-1`` slots form the suffix — the A5 backward
-produces NaNs when ``-1`` slots precede valid keys.  Hardware validation
-records (commit, config, data and logs) live with the verification
-documents, not in this source file.
-"""
+"""V4.1 SMLA attention and SMLAG-backed indexer distillation."""
 
 from dataclasses import dataclass
 
@@ -59,6 +44,11 @@ class _SparseMLA(torch.autograd.Function):
         softmax_scale,
         ratio,
         window_size,
+        topk_scores,
+        teacher_scale,
+        query_valid,
+        score_gradient,
+        aux_loss,
     ):
         options = _kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ratio, window_size)
         # K can differ between the candidate and indexer paths. Use the actual
@@ -104,10 +94,15 @@ class _SparseMLA(torch.autograd.Function):
             output,
             lse,
             smla_grad_metadata,
+            topk_scores,
+            query_valid,
         )
         ctx.softmax_scale, ctx.ratio, ctx.window_size = softmax_scale, ratio, window_size
         # The teacher consumes the LSE as a detached constant.
         ctx.mark_non_differentiable(lse)
+        ctx.teacher_scale = teacher_scale
+        ctx.score_gradient = score_gradient
+        ctx.aux_loss = aux_loss
         return output, lse
 
     @staticmethod
@@ -127,8 +122,10 @@ class _SparseMLA(torch.autograd.Function):
             output,
             lse,
             smla_grad_metadata,
+            topk_scores_saved,
+            query_valid,
         ) = ctx.saved_tensors
-        dq, dswa_k, dcmp_k, dsinks, _, _ = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
+        dq, dswa_k, dcmp_k, dsinks, _, cmp_softmax_l1_norm = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
             q,
             grad_output.contiguous(),
             output,
@@ -147,6 +144,21 @@ class _SparseMLA(torch.autograd.Function):
             softmax_scale=ctx.softmax_scale,
             **_kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ctx.ratio, ctx.window_size),
         )
+        grad_topk_scores = None
+        if topk_scores_saved is not None:
+            valid = cmp_sparse_indices >= 0
+            if query_valid is not None:
+                valid = valid & query_valid.reshape(-1, 1, 1)
+            p = cmp_softmax_l1_norm.reshape_as(topk_scores_saved).float().masked_fill(~valid, 0.0)
+            if ctx.score_gradient == "teacher":
+                grad_topk_scores = p
+            else:
+                logits = topk_scores_saved.float().masked_fill(~valid, -torch.inf)
+                logits = logits.masked_fill(~valid.any(-1, keepdim=True), 0.0)
+                student = logits.softmax(-1).masked_fill(~valid, 0.0)
+                grad_topk_scores = student * p.sum(-1, keepdim=True) - p
+            grad_topk_scores = (grad_topk_scores * ctx.teacher_scale).to(topk_scores_saved.dtype)
+            ctx.aux_loss.record_teacher(topk_scores_saved, p, valid)
         return (
             dq,
             dswa_k,
@@ -155,6 +167,11 @@ class _SparseMLA(torch.autograd.Function):
             dsinks,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            grad_topk_scores,
             None,
             None,
             None,
@@ -186,17 +203,20 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
     class Config(CompressedSparseInnerAttention2.Config):
         pass
 
-    def _compute_attention(
+    def forward(
         self,
         q,
         swa_k,
-        cmp_k,
+        cmp_k=None,
         *,
         attention_masks,
-        topk_indices,
-        attn_sink,
-        wants_teacher,
+        topk_indices=None,
+        topk_scores=None,
+        attn_sink=None,
     ):
+        if (cmp_k is None) != (topk_indices is None):
+            raise ValueError("cmp_k and topk_indices must be provided together")
+        wants_teacher = self.training and self.aux_loss is not None and cmp_k is not None
         metadata = attention_masks
         ratio = self.compress_ratio
         if ratio not in (0, 1, 2):
@@ -211,6 +231,7 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
         if cu_seqlens_q is None:
             raise ValueError("V4.1 SMLA requires the packed document boundaries (cu_seq_q metadata)")
         cmp_k_tnd = cu_seqlens_cmp_kv = cmp_residual_kv = cmp_sparse_indices = None
+        carrier = teacher_scale = None
         if ratio == 0:
             if cmp_k is not None:
                 raise ValueError("window-only ratio 0 must not receive a second KV stream")
@@ -238,7 +259,13 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
             order = (local < 0).to(torch.int32).argsort(dim=-1, stable=True)
             cmp_sparse_indices = local.gather(-1, order).flatten(0, 1).to(torch.int32).unsqueeze(1).contiguous()
             cmp_k_tnd = cmp_k_tnd.unsqueeze(1).contiguous()
-        output, lse = _SparseMLA.apply(
+            if wants_teacher:
+                assert self.aux_loss is not None
+                if topk_scores is None:
+                    raise ValueError("Indexer distillation requires topk_scores")
+                carrier = topk_scores.gather(-1, order).flatten(0, 1).unsqueeze(1).contiguous()
+                teacher_scale = self.aux_loss.teacher_alpha()
+        output, _lse = _SparseMLA.apply(
             q.flatten(0, 1).contiguous(),
             swa_k.flatten(0, 1).unsqueeze(1).contiguous(),
             cmp_k_tnd,
@@ -250,9 +277,10 @@ class AscV41SparseAttention(CompressedSparseInnerAttention2):
             self.softmax_scale,
             ratio,
             self.window_size,
+            carrier,
+            teacher_scale,
+            attention_masks.valid_tokens_BL,
+            self.score_gradient,
+            self.aux_loss if wants_teacher else None,
         )
-        out = output.reshape_as(q)
-        if not wants_teacher:
-            return out, None
-        # The kernel returns the LSE as [1, S, H]; the teacher reads [B, H, L].
-        return out, lse.transpose(1, 2)
+        return output.reshape_as(q)
