@@ -16,7 +16,7 @@ import torch
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_INDEX_SOURCE_LAYERS,
-    deepseek_v4_1_debugmodel_config,
+    model_registry,
 )
 from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
 
@@ -125,7 +125,7 @@ def test_unreachable_slot_marked_minus_inf_is_dropped_not_nan() -> None:
 
 def test_distill_loss_is_attached_only_where_a_selection_exists() -> None:
     """The loss follows upstream's rule: every consumer of a selection, and no other layer."""
-    config = deepseek_v4_1_debugmodel_config()
+    config = model_registry("deepseek_v4_1_debugmodel").model
 
     for layer_id, layer in enumerate(config.layers):
         attention = layer.attention

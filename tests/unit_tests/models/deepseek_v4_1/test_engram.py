@@ -260,9 +260,9 @@ def test_image_tokens_reset_hash_history_and_receive_no_residual_gradient():
     assert torch.count_nonzero(engram.table.pending_sparse_grad().values()) == 0
 
 
-def test_explicit_disable_preserves_dense_optimizer_recipe():
+@pytest.mark.parametrize("optimizer", ["AdamW", "Muon"])
+def test_explicit_disable_preserves_selected_optimizer(optimizer):
     trainer = deepseek_v4_1_debugmodel_multimodal()
-    dense = copy.deepcopy(trainer.optimizer.param_groups[1])
     trainer = ConfigManager().parse_args(
         [
             "--module",
@@ -270,12 +270,18 @@ def test_explicit_disable_preserves_dense_optimizer_recipe():
             "--config",
             "deepseek_v4_1_debugmodel_multimodal",
             "--no-engram-enabled",
+            "--optimizer.name",
+            optimizer,
             "--training.seq-len",
             "512",
         ]
     )
     trainer.model_spec.model.update_from_config(config=trainer)
     assert all(layer.engram is None for layer in trainer.model_spec.model.layers)
-    assert trainer.optimizer.param_groups == [dense]
+    assert trainer.optimizer.name == optimizer
+    trainer.optimizer.materialize()
+    assert [group.optimizer_name for group in trainer.optimizer.param_groups] == (
+        ["DistMuon", "AdamW"] if optimizer == "Muon" else ["AdamW"]
+    )
     adapter = DeepSeekV41StateDictAdapter(trainer.model_spec.model, None)
     assert adapter.to_hf({}) == {}

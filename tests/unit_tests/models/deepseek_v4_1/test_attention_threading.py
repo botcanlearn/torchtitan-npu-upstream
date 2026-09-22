@@ -14,7 +14,6 @@ nothing; the same path runs end to end in the 2-card integration case
 """
 
 import importlib
-from dataclasses import replace
 
 import pytest
 import torch
@@ -38,11 +37,10 @@ def _tiny_debug_model(monkeypatch):
     """The registered debug flavor at CPU-sized widths, entered through the registry."""
     monkeypatch.setattr(DefaultDeviceType, "_default_device_type", "cpu")
     registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
-    monkeypatch.setattr(
-        registry,
-        "_DEBUG_WIDTHS",
-        replace(
-            registry._DEBUG_WIDTHS,
+    make_config = registry._make_v41_config
+
+    def tiny_config(**kwargs):
+        kwargs.update(
             dim=8,
             n_heads=2,
             head_dim=8,
@@ -56,8 +54,10 @@ def _tiny_debug_model(monkeypatch):
             vision_dim=8,
             vision_heads=2,
             vision_inter_dim=16,
-        ),
-    )
+        )
+        return make_config(**kwargs)
+
+    monkeypatch.setattr(registry, "_make_v41_config", tiny_config)
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
     config.vocab_size = config.tok_embeddings.num_embeddings = config.lm_head.out_features = 64
     # The trainer's update_from_config fills the aux-loss denominators before the run.

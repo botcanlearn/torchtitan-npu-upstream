@@ -27,6 +27,37 @@ if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
 
 
+def apply_fsdp_to_vision_encoder(
+    vision_encoder: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    reshard_after_forward_policy: str = "default",
+    pp_enabled: bool = False,
+    cpu_offload: bool = False,
+    *,
+    dp_mesh_dims: DataParallelMeshDims | None = None,
+) -> None:
+    """Upstream ``apply_fsdp_to_vision_encoder`` with a CPU offload policy.
+
+    Upstream wraps the vision encoder without ``offload_policy``; under CPU
+    offload the parameters still materialize on CPU, so unshard's foreach
+    fast path fails on the CPU->NPU copy (device-mismatch error).
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    reshard_after_forward = get_fsdp_reshard_after_forward_policy(reshard_after_forward_policy, pp_enabled=pp_enabled)
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    fully_shard(
+        vision_encoder,
+        **fsdp_config,
+        reshard_after_forward=reshard_after_forward,
+    )
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,

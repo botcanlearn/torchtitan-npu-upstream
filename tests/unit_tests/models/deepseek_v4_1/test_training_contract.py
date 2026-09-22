@@ -5,7 +5,6 @@
 
 import copy
 import importlib
-from dataclasses import replace
 
 import pytest
 import torch
@@ -21,11 +20,10 @@ def test_full_ac_preserves_image_routing(monkeypatch, with_engram):
     # CPU-only checkpoint inputs otherwise inherit the registered NPU backend.
     monkeypatch.setattr(DefaultDeviceType, "_default_device_type", "cpu")
     registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
-    monkeypatch.setattr(
-        registry,
-        "_DEBUG_WIDTHS",
-        replace(
-            registry._DEBUG_WIDTHS,
+    make_config = registry._make_v41_config
+
+    def tiny_config(**kwargs):
+        kwargs.update(
             dim=8,
             n_heads=2,
             head_dim=8,
@@ -39,8 +37,10 @@ def test_full_ac_preserves_image_routing(monkeypatch, with_engram):
             vision_dim=8,
             vision_heads=2,
             vision_inter_dim=16,
-        ),
-    )
+        )
+        return make_config(**kwargs)
+
+    monkeypatch.setattr(registry, "_make_v41_config", tiny_config)
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
     if not with_engram:
         for layer in config.layers:

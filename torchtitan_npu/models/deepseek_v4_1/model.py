@@ -531,7 +531,8 @@ class DeepSeekV41MultimodalModel(DeepSeekV41Model):
         submodule the shared decoder wrapper would miss.
         """
         from torchtitan.config import TORCH_DTYPE_MAP
-        from torchtitan.distributed.fsdp import apply_fsdp_to_vision_encoder
+
+        from torchtitan_npu.extensions.distributed.fsdp import apply_fsdp_to_vision_encoder
 
         apply_fsdp_to_vision_encoder(
             self.vision_encoder,
@@ -540,6 +541,7 @@ class DeepSeekV41MultimodalModel(DeepSeekV41Model):
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
         )
 
     def _modality_inputs(

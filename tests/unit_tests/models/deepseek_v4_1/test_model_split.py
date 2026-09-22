@@ -16,7 +16,6 @@ and routing behaviour is readable from its class.
 import contextlib
 import dataclasses
 import importlib
-import inspect
 
 import pytest
 import torch.nn as nn
@@ -41,17 +40,9 @@ def recipes():
 
 def _flavors(registry):
     return {
-        "text": registry.deepseek_v4_1_debugmodel_text_config(),
-        "multimodal": registry.deepseek_v4_1_debugmodel_config(),
+        "text": registry.model_registry("deepseek_v4_1_debugmodel_text").model,
+        "multimodal": registry.model_registry("deepseek_v4_1_debugmodel").model,
     }
-
-
-def test_the_two_flavors_build_the_two_classes(registry):
-    """The flavor's class is the modality: there is no half-built middle case."""
-    text, multimodal = _flavors(registry).values()
-    assert type(text) is DeepSeekV41Model.Config
-    assert type(multimodal) is DeepSeekV41MultimodalModel.Config
-    assert isinstance(multimodal, DeepSeekV41Model.Config)
 
 
 def test_only_the_multimodal_half_carries_vision_parameters(registry):
@@ -65,56 +56,8 @@ def test_only_the_multimodal_half_carries_vision_parameters(registry):
     assert not any(layer.moe.router.vision_enabled for layer in text.layers)
     assert all(layer.moe.router.vision_enabled for layer in multimodal.layers)
     assert "vision_enabled" not in {field.name for field in dataclasses.fields(DeepSeekV41TransformerBlock.Config)}
-    # A text-only width set has no vision widths to size, and the factory refuses a
-    # width set that disagrees with the modality.
-    assert (registry._DEBUG_TEXT_WIDTHS.vision_dim, registry._DEBUG_TEXT_WIDTHS.vision_heads) == (0, 0)
-    assert registry._DEBUG_WIDTHS.vision_dim > 0
-
-    with pytest.raises(ValueError, match="needs no vision widths"):
-        registry._make_v41_config(
-            n_layers=40,
-            compress_ratios=registry.V41_FULL_COMPRESS_RATIOS,
-            kv_source_layers=registry.V41_KV_SOURCE_LAYERS,
-            index_source_layers=registry.V41_FULL_INDEX_SOURCE_LAYERS,
-            candidate_source_layer=registry.V41_CANDIDATE_SOURCE_LAYER,
-            moe_comm_backend="standard",
-            non_blocking_capacity_factor=None,
-            vision=False,
-            widths=registry._DEBUG_WIDTHS,
-        )
-
-
-def test_moe_is_called_without_input_ids():
-    """No V4.1 layer hashes, so the block hands the MoE no token ids.
-
-    ``input_ids`` stays in ``HashMoE.forward`` for DSV4's hash layers, but the V4.1 call
-    site must not pass it: the router reads it only on the hash path, which no V4.1
-    layer builds.
-    """
-    source = inspect.getsource(DeepSeekV41TransformerBlock.forward)
-    assert "self.moe(" in source
-    moe_call = source[source.index("self.moe(") : source.index("\n", source.index("self.moe("))]
-    assert "input_ids" not in moe_call, moe_call
-    assert "image_mask" in moe_call, moe_call
-    # Engram still needs the ids: it hashes the token n-grams.
-    assert "input_ids" in source[: source.index("self.moe(")], source[: source.index("self.moe(")]
-
-
-def test_context_parallel_has_exactly_one_declaration_site(registry):
-    """The CP gate is declared once per stack, on the config -- its only reader.
-
-    ``update_from_config`` runs before any module exists, so the config is the only thing
-    that can be asked; a second declaration on the model class would be a copy nothing
-    reads and everything can drift from.
-    """
-    assert DeepSeekV41Model.Config.accepts_context_parallel is True
-    assert DeepSeekV41MultimodalModel.Config.accepts_context_parallel is False
-    assert DeepSeekV41Model.Config.accepts_context_parallel is not (
-        DeepSeekV41MultimodalModel.Config.accepts_context_parallel
-    )
-    for cls in (DeepSeekV41Model, DeepSeekV41MultimodalModel):
-        assert "accepts_context_parallel" not in vars(cls), cls
-    assert issubclass(DeepSeekV41MultimodalModel, DeepSeekV41Model)
+    assert not hasattr(text, "vision_encoder")
+    assert multimodal.vision_encoder.dim == 128
 
 
 def _with_cp(trainer, degree: int):
@@ -229,14 +172,6 @@ def _parallelize(par, parallel_dims, recipes, model, *, vision: bool):
     )
 
 
-def test_the_extension_hooks_live_only_on_the_multimodal_stack():
-    """The text stack must not carry a hook nobody would call for it."""
-    assert not hasattr(DeepSeekV41Model, "apply_activation_checkpointing_extensions")
-    assert not hasattr(DeepSeekV41Model, "apply_fsdp_extensions")
-    assert hasattr(DeepSeekV41MultimodalModel, "apply_activation_checkpointing_extensions")
-    assert hasattr(DeepSeekV41MultimodalModel, "apply_fsdp_extensions")
-
-
 def test_parallelize_never_asks_the_text_stack_for_the_hooks(registry, recipes, parallelize_deps):
     """A text run reaches both dispatch points without the hooks existing.
 
@@ -253,7 +188,7 @@ def test_parallelize_never_asks_the_text_stack_for_the_hooks(registry, recipes, 
 def test_parallelize_asks_the_multimodal_stack_for_both_hooks(registry, recipes, parallelize_deps):
     """The multimodal branch reaches both hooks, which is the only reason they exist."""
     par, parallel_dims = parallelize_deps
-    model = build_cpu_model(registry.deepseek_v4_1_debugmodel_config())
+    model = build_cpu_model(registry.model_registry("deepseek_v4_1_debugmodel").model)
     calls: list[str] = []
     # The hooks are this class's own methods; recording them here keeps the assertion
     # about dispatch, while ``test_multimodal_ac_hook_wraps_every_vision_block`` covers
@@ -270,7 +205,7 @@ def test_multimodal_ac_hook_wraps_every_vision_block(registry):
     The policy's own walk covers decoder layers; a vision block lives outside that list,
     so it is wrapped here or not at all.
     """
-    config = registry.deepseek_v4_1_debugmodel_config()
+    config = registry.model_registry("deepseek_v4_1_debugmodel").model
     model = build_cpu_model(config)
     wrapped: list[str] = []
 

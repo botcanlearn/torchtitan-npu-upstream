@@ -11,9 +11,7 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_COMPRESS_RATIOS,
     V41_FULL_INDEX_SOURCE_LAYERS,
     V41_KV_SOURCE_LAYERS,
-    _DEBUG_TEXT_WIDTHS,
-    _make_v41_config,
-    deepseek_v4_1_debugmodel_config,
+    model_registry,
 )
 from torchtitan_npu.models.deepseek_v4_1.attention import Attention
 from torchtitan_npu.models.deepseek_v4_1.indexer import FULL, REINDEX, REUSE, _selection_mask
@@ -54,7 +52,7 @@ def test_index_selection_mask_is_document_isolated_and_causal() -> None:
 
 
 def test_v41_config_uses_specialized_attention_with_explicit_ownership() -> None:
-    config = deepseek_v4_1_debugmodel_config()
+    config = model_registry("deepseek_v4_1_debugmodel").model
 
     assert not hasattr(config, "hc_head")
     assert config.kv_source_layers == V41_KV_SOURCE_LAYERS
@@ -106,7 +104,7 @@ def test_v41_config_uses_specialized_attention_with_explicit_ownership() -> None
 
 def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
     """The pool source and its consumers are config policy, not layer-id lookups."""
-    config = deepseek_v4_1_debugmodel_config()
+    config = model_registry("deepseek_v4_1_debugmodel").model
     # The frozen debug recipe: one pool built at layer 20, consumed by every later
     # index source, over blocks of 8 slots.
     pool_consumers = {24, 28, 32, 36}
@@ -162,22 +160,15 @@ def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
         "candidate_source_owns_no_kv",
     ],
 )
-def test_invalid_reuse_topology_is_rejected(overrides, match) -> None:
+def test_invalid_reuse_topology_is_rejected(overrides, match, monkeypatch) -> None:
     """A consumer derives its plan from its own ratio, so a mismatched source fails at build."""
-    topology = dict(
-        n_layers=40,
-        compress_ratios=V41_FULL_COMPRESS_RATIOS,
-        kv_source_layers=V41_KV_SOURCE_LAYERS,
-        index_source_layers=V41_FULL_INDEX_SOURCE_LAYERS,
-        candidate_source_layer=V41_CANDIDATE_SOURCE_LAYER,
-        moe_comm_backend="standard",
-        non_blocking_capacity_factor=None,
-        # The per-layer topology invariants under test hold for both stacks, so this
-        # exercises the text one: it takes the small width set, which has no vision
-        # widths to size.
-        vision=False,
-        widths=_DEBUG_TEXT_WIDTHS,
-    )
-    topology.update(overrides)
+    import torchtitan_npu.models.deepseek_v4_1 as registry
+
+    make_config = registry._make_v41_config
+
+    def invalid_config(**kwargs):
+        return make_config(**(kwargs | overrides))
+
+    monkeypatch.setattr(registry, "_make_v41_config", invalid_config)
     with pytest.raises(ValueError, match=match):
-        _make_v41_config(**topology)
+        registry.model_registry("deepseek_v4_1_debugmodel_text")

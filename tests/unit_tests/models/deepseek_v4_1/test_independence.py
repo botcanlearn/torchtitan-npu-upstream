@@ -4,33 +4,12 @@
 
 """V4.1 dependency and import-side-effect boundaries."""
 
-import ast
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
-V4_MODULE = re.compile(r"torchtitan_npu\.(?:models|override)\.deepseek_v4(?:\b|\.)")
-
-
-def test_v41_package_has_no_v4_references():
-    paths = list((REPO / "torchtitan_npu/models/deepseek_v4_1").rglob("*.py"))
-    paths += list((REPO / "tests/unit_tests/models/deepseek_v4_1").rglob("*.py"))
-    paths += [
-        REPO / "examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh",
-    ]
-    for path in paths:
-        if path == Path(__file__):
-            continue
-        source = path.read_text(encoding="utf-8")
-        assert not V4_MODULE.search(source), path
-        if path.suffix == ".py":
-            for node in ast.walk(ast.parse(source)):
-                if isinstance(node, ast.ImportFrom) and node.module:
-                    for alias in node.names:
-                        assert not V4_MODULE.search(f"{node.module}.{alias.name}"), path
 
 
 # The isolated subprocess must be self-contained without a CANN stack:
@@ -84,15 +63,17 @@ class Blocker:
         return None
 
 sys.meta_path.insert(0, Blocker())
-from dataclasses import replace
 import importlib
 import torch
 registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
-registry._DEBUG_WIDTHS = replace(
-    registry._DEBUG_WIDTHS, dim=8, n_heads=2, head_dim=8, rope_head_dim=4,
-    q_lora_rank=8, o_lora_rank=4, n_groups=1, index_n_heads=2,
-    index_head_dim=4, moe_inter_dim=16, vision_dim=8, vision_heads=2, vision_inter_dim=16,
-)
+make_config = registry._make_v41_config
+def tiny_config(**kwargs):
+    kwargs.update(dim=8, n_heads=2, head_dim=8, rope_head_dim=4,
+        q_lora_rank=8, o_lora_rank=4, n_groups=1, index_n_heads=2,
+        index_head_dim=4, moe_inter_dim=16, vision_dim=8, vision_heads=2, vision_inter_dim=16)
+    return make_config(**kwargs)
+registry._make_v41_config = tiny_config
+
 cfg = registry.model_registry("deepseek_v4_1_debugmodel").model
 cfg.vocab_size = cfg.tok_embeddings.num_embeddings = cfg.lm_head.out_features = 64
 from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss

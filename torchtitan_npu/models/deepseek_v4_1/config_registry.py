@@ -176,17 +176,12 @@ def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
 
 
 def _v41_optimizer_config(model_spec: ModelSpec) -> OptimizerConfig:
-    """Build the AdamW-default V4.1 optimizer schema with a Muon profile.
-
-    ``name`` stays ``AdamW`` unless the user explicitly selects
-    ``--optimizer.name Muon``; the profile only arms that CLI selection and
-    does not alter the default recipe.
-    """
     adamw = default_adamw(lr=1e-5, eps=1e-6)
     has_engram = any(
         getattr(layer, "engram", None) is not None for layer in cast("DeepSeekV41Model.Config", model_spec.model).layers
     )
     optimizer_type = HostSparseOptimizersContainer.Config if has_engram else OptimizerConfig
+    name = "AdamW" if has_engram else "Muon"
     groups = adamw.param_groups
     if has_engram:
         groups = [
@@ -198,6 +193,7 @@ def _v41_optimizer_config(model_spec: ModelSpec) -> OptimizerConfig:
             *groups,
         ]
     return optimizer_type(
+        name=name,
         param_groups=groups,
         implementation=adamw.implementation,
         optimizer_factory_kwargs_by_name=adamw.optimizer_factory_kwargs_by_name,
@@ -223,17 +219,11 @@ def _text_dataloader_config(model_spec: ModelSpec):
     return AlignedHuggingfaceDataloader.Config(per_doc_alignment=_per_doc_alignment(model_spec))
 
 
-def _v41_trainer_config(flavor: str, *, vision: bool) -> TrainerEx.Config:
+def _make_trainer_config(flavor: str) -> TrainerEx.Config:
     model_spec = model_registry(flavor)
     if model_spec.model.n_layers != len(model_spec.model.layers):  # pyrefly: ignore [missing-attribute]
         raise ValueError("registered V4.1 model does not describe every configured layer")
-    # The class is the single source of truth for which half the model has, and the
-    # loader, the optimizer groups and the state-dict adapter all follow from it.
-    expected = DeepSeekV41MultimodalModel.Config if vision else DeepSeekV41Model.Config
-    if not isinstance(model_spec.model, expected):
-        raise ValueError(f"flavor {flavor!r} does not build a {expected.__qualname__}")
-    if vision and not isinstance(model_spec.model, DeepSeekV41MultimodalModel.Config):
-        raise ValueError(f"the multimodal recipe requires a vision flavor, got {flavor!r}")
+    vision = isinstance(model_spec.model, DeepSeekV41MultimodalModel.Config)
 
     return DeepSeekV41Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -249,17 +239,21 @@ def _v41_trainer_config(flavor: str, *, vision: bool) -> TrainerEx.Config:
     )
 
 
+def deepseek_v4_1_flash() -> TrainerEx.Config:
+    return _make_trainer_config("deepseek_v4_1_flash")
+
+
 def deepseek_v4_1_flash_40layers_16experts_multimodal() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_flash_40layers_16experts_vision", vision=True)
+    return _make_trainer_config("deepseek_v4_1_flash_40layers_16experts_vision")
 
 
 def deepseek_v4_1_flash_40layers_16experts_text() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_flash_40layers_16experts_text", vision=False)
+    return _make_trainer_config("deepseek_v4_1_flash_40layers_16experts_text")
 
 
 def deepseek_v4_1_debugmodel_multimodal() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_debugmodel", vision=True)
+    return _make_trainer_config("deepseek_v4_1_debugmodel")
 
 
 def deepseek_v4_1_debugmodel_text() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_debugmodel_text", vision=False)
+    return _make_trainer_config("deepseek_v4_1_debugmodel_text")

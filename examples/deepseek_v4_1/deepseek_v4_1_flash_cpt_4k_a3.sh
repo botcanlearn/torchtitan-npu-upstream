@@ -4,48 +4,58 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Run this script on a single node.
+# Run this script on each participating node; NODE_IPS lists all node addresses.
 # Append CLI arguments to override the defaults below:
-#   ./examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh --training.steps 5
+#   NODE_IPS=192.168.1.10,192.168.1.11,192.168.1.12,192.168.1.13,192.168.1.14,192.168.1.15,192.168.1.16,192.168.1.17 \
+#     ./examples/deepseek_v4_1/deepseek_v4_1_flash_cpt_4k_a3.sh \
+#     --checkpoint.initial-load-path /path/to/model_ckpt --training.steps 5
 # USE_GOLDEN=1 selects Golden. For deterministic execution, append
 # --debug.seed 42 --debug.deterministic to the command line.
 
 set -euo pipefail
 
-NGPU="${NGPU:-8}"
-WORLD_SIZE="${NGPU}"
+NODE_IPS="${NODE_IPS:-xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, \
+                      xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx, xx.xx.xx.xx}"
+NGPU="${NGPU:-16}"
+NNODES=$(awk -F, '{print NF}' <<< "${NODE_IPS}")
+WORLD_SIZE=$((NGPU * NNODES))
 
 # Model
 MODULE="${MODULE:-torchtitan_npu.models.deepseek_v4_1}"
-CONFIG="${CONFIG:-deepseek_v4_1_flash_40layers_16experts_multimodal}"
+CONFIG="${CONFIG:-deepseek_v4_1_flash}"
 
 # Dataloader & Checkpoint
 DATASET="${DATASET:-cc12m-test}"
 DATASET_PATH="${DATASET_PATH:-}" # optional; unset keeps the upstream dataset source
 HF_ASSETS_PATH="${HF_ASSETS_PATH:-/path/to/DeepSeekV41_tokenizer}" # your tokenizer path
 CKPT_SAVE_LOAD_PATH="${CKPT_SAVE_LOAD_PATH:-/path/to/save_ckpt}" # your model save/load ckpt path
+CKPT_INIT_LOAD_PATH="${CKPT_INIT_LOAD_PATH:-/path/to/init_load_ckpt}" # your model initial load ckpt path
 
 # Parallelism
 TP=1
 PP=1
-EP=8
+EP="${EP:-128}"
 CP=1
-DP_SHARD=8
+DP_SHARD="${DP_SHARD:-128}"
+if (( WORLD_SIZE <= 0 || DP_SHARD <= 0 || EP <= 0 || WORLD_SIZE % DP_SHARD != 0 || WORLD_SIZE % EP != 0 || 384 % EP != 0 )); then
+    echo "Invalid topology: WORLD_SIZE must divide into DP_SHARD/EP groups; EP must divide 384 experts." >&2
+    exit 1
+fi
 DP_REPLICATE=$((WORLD_SIZE / (DP_SHARD * CP * TP * PP)))
 SPMD_BACKEND="spmd_types"
 
 # Training
-# Retain the validated eager / Muon / FullAC resource crop.
+# Full Flash uses eager execution and the recipe-owned FullAC policy.
 SEQ_LEN=4096
-MBS=1
-GBS=8
-STEPS=40
+MBS="${MBS:-1}"
+GBS="${GBS:-1024}"
+STEPS="${STEPS:-100}"
 
 # Debug
 USE_GOLDEN="${USE_GOLDEN:-0}"
 DEBUG_ARGS="
-    --debug.print-config
     --debug.moe-force-load-balance
+    --debug.print-config
 "
 
 # HF assets
@@ -102,22 +112,26 @@ LR_SCHEDULER_ARGS="
 "
 
 # Checkpoint
-# `checkpoint.folder` is the save/load root (`CKPT_SAVE_LOAD_PATH`). If it
+# `checkpoint.folder` is the output/resume root (`CKPT_SAVE_LOAD_PATH`). If it
 # already contains a valid step-* checkpoint, upstream TorchTitan resumes from
-# it; use a new/empty folder when starting a fresh run.
+# it and ignores `initial-load-path`; use a new/empty folder when cold-starting
+# from `CKPT_INIT_LOAD_PATH`.
 CHECKPOINT_ARGS="
-    --checkpoint.no-enable
+    --checkpoint.enable
     --checkpoint.load-only
-    --checkpoint.interval 10
     --checkpoint.folder ${CKPT_SAVE_LOAD_PATH}
+    --checkpoint.initial-load-path ${CKPT_INIT_LOAD_PATH}
+    --checkpoint.initial-load-in-hf
 "
 
 # Profiler
 PROFILER_ARGS="
     --profiler.no-enable-profiling
-    --profiler.profile-freq 10
-    --profiler.profiler-active 10
-    --profiler.profiler-warmup 0
+    --profiler.save-traces-folder profiling_path
+    --profiler.extension.no-enable-online-parse
+    --profiler.extension.profiler-start 6
+    --profiler.extension.profiler-end 7
+    --profiler.extension.profile-ranks 0
 "
 
 # Communication
@@ -127,7 +141,6 @@ COMM_ARGS="
 "
 
 # Optimizer
-# AdamW hyperparameters come from the recipe, not from CLI flags.
 OPTIMIZER_ARGS="
     --optimizer.name Muon
     --optimizer.lr 1.0e-5
@@ -146,26 +159,30 @@ OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimi
 # wrapper supplies asc_partial through the same CLI_OVERRIDES channel. Set the
 # default in both branches so `set -u` never sees it unbound.
 if [[ "${USE_GOLDEN}" == "1" ]]; then
+    DEFAULT_CLI_OVERRIDES=""
     NPU_OPS_OVERRIDES=(torchtitan_npu.override.common.rope.workaround)
-    DEFAULT_TEXT_ROPE_OVERRIDE=""
 else
-    DEFAULT_TEXT_ROPE_OVERRIDE="torchtitan_npu.override.common.rope.asc_complex"
+    DEFAULT_CLI_OVERRIDES="torchtitan_npu.override.common.rope.asc_complex"
     NPU_OPS_OVERRIDES=(
         torchtitan_npu.override.common.rms_norm.asc
+        # Vision RoPE (V4.1 keeps the text rope in CLI_OVERRIDES)
         torchtitan_npu.override.common.rope.asc_half_rotation
-        torchtitan_npu.override.common.token_dispatcher.asc
+        # MHC
         torchtitan_npu.override.deepseek_v4_1.mhc.asc_hc_post
+        # MoE token dispatcher
+        torchtitan_npu.override.common.token_dispatcher.asc
     )
 fi
 
 # Wrapper defaults extend override.imports after the base targets.
-CLI_OVERRIDES="${CLI_OVERRIDES:-${DEFAULT_TEXT_ROPE_OVERRIDE}}"
+CLI_OVERRIDES="${CLI_OVERRIDES:-${DEFAULT_CLI_OVERRIDES}}"
 
 MODULE="${MODULE}" \
 CONFIG="${CONFIG}" \
+NODE_IPS="${NODE_IPS}" \
 NGPU="${NGPU}" \
 LOG_PREFIX="${LOG_PREFIX:-${CONFIG}}" \
-bash scripts/run_train.sh \
+bash scripts/run_train_multinodes.sh \
     $COMPILE_ARGS \
     $HF_ASSETS_ARGS \
     $DATALOADER_ARGS \

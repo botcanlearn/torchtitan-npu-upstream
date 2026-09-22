@@ -8,8 +8,7 @@
 import torch
 
 from torchtitan_npu.models.deepseek_v4_1 import (
-    deepseek_v4_1_debugmodel_config,
-    deepseek_v4_1_debugmodel_text_config,
+    model_registry,
 )
 from torchtitan_npu.models.deepseek_v4_1.state_dict_adapter import DeepSeekV41StateDictAdapter
 from torchtitan_npu.models.deepseek_v4_1.vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
@@ -17,7 +16,7 @@ from torchtitan_npu.models.deepseek_v4_1.vision.state_dict_adapter import DeepSe
 
 def _build_model_config():
     """A minimal local V4.1 fixture (the debugmodel topology, tiny widths)."""
-    config = deepseek_v4_1_debugmodel_config()
+    config = model_registry("deepseek_v4_1_debugmodel").model
     for layer in config.layers:
         layer.engram = None
     config.vocab_size = 32
@@ -209,7 +208,7 @@ class TestTextFlavorAdapter:
 
     @staticmethod
     def _text_adapter():
-        config = deepseek_v4_1_debugmodel_text_config()
+        config = model_registry("deepseek_v4_1_debugmodel_text").model
         for layer in config.layers:
             layer.engram = None
         config.vocab_size = 32

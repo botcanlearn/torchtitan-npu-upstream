@@ -2,7 +2,7 @@
 
 V4.1 的模型、图像路由、压缩 attention、metadata 和并行化均由 `torchtitan_npu/models/deepseek_v4_1` 持有，不依赖 V4 模型或其专属 override。模型默认算子是 Attention Gym 的 eager `selected_attention`（`CompressedSparseInnerAttention2`）、公共 MoE 工厂与上游默认的 indexer 蒸馏损失 `IndexerDistillLoss`（coeff=0.01）。
 
-当前支持 **FSDP + EP、TP1 / CP1 / PP1、eager 执行与 torch.compile**，保留 FullAC 与图文输入。启动方式与 DSV4 一致：A3 脚本组织公共实验参数与融合列表，A5 调用 A3 并追加 CPU 亲和性、partial 文本 RoPE、两项 SwiGLUGroup、sparse attention 与 mHC Sinkhorn；两种入口均通过 `USE_GOLDEN=1` 选择 reference。A3 默认融合包含 RMSNorm、文本（`asc_complex`）与视觉 RoPE、MoE token dispatcher 和 mHC post；A5 将文本 RoPE 换为 `asc_partial` 并追加 routed/shared SwiGLUGroup、sparse 与 Sinkhorn。routed experts 的 grouped GEMM 是 reference 与融合共用的公共路径，不再作为独立融合开关。不支持量化、ngram、MTP、GraphTrainer；TP/CP/PP 仍限 1（更高并行度在入口拒绝）。
+当前支持 **FSDP + EP、TP1 / CP1 / PP1、eager 执行与 torch.compile**，保留 FullAC 与图文输入。A3 脚本组织公共实验参数与融合列表，A5 调用 A3 并追加 CPU 亲和性、partial 文本 RoPE、两项 SwiGLUGroup、sparse attention 与 mHC Sinkhorn；两种入口均通过 `USE_GOLDEN=1` 选择 reference。A3 默认融合包含 RMSNorm、文本（`asc_complex`）与视觉 RoPE、MoE token dispatcher 和 mHC post；A5 将文本 RoPE 换为 `asc_partial` 并追加 routed/shared SwiGLUGroup、sparse 与 Sinkhorn。routed experts 的 grouped GEMM 是 reference 与融合共用的公共路径，不再作为独立融合开关。已接入量化入口及 Host Engram；不支持 MTP、DSpark、GraphTrainer；不支持的 TP、CP、PP 和 compile 配置在入口拒绝。
 
 **torch.compile 已支持**（每个 TransformerBlock 整图编译，跨层状态为显式前向参数），通过脚本 `"$@"` 透传超参开启：
 
@@ -40,13 +40,36 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
     --training.steps 3 --lr-scheduler.total-steps 3 --lr-scheduler.warmup-steps 2
 ```
 
-默认实验为 40 层 / 16 专家、seq4096（4k）、local/global batch 1/8、FSDP8/EP8、AdamW、eager、FullAC，训练与调度均为 40 步。Python 配方保留模型结构、数据协议和优化器参数布局；实验参数由脚本组织，末尾 CLI 参数覆盖脚本默认值。`CONFIG` 可选择 `deepseek_v4_1_debugmodel_multimodal` 调试宽度，硬件选择仍由脚本负责。
+默认实验为 40 层 / 16 专家、seq4096（4k）、local/global batch 1/8、FSDP8/EP8、Muon（NS steps=10）、eager、FullAC，训练与调度均为 40 步。Python 配方保留模型结构、数据协议和优化器参数布局；实验参数由脚本组织，末尾 CLI 参数覆盖脚本默认值。`CONFIG` 可选择 `deepseek_v4_1_debugmodel_multimodal` 调试宽度，硬件选择仍由脚本负责。
 
-A5 的 `CPU_AFFINITY_CONF` 应按主机拓扑覆盖。`CLI_OVERRIDES` 沿用 DSV4 的列表扩展方式：A3 基础列表之外，文本 RoPE 经该通道按硬件选择（A3 默认 `asc_complex`，A5 换为 `asc_partial`），A5 默认追加 SwiGLUGroup、sparse attention、融合 LI 选分与 Sinkhorn，不重复传入 `--override.imports`。显式传 `--override.imports` 会替换整个集合，需自行包含所需的 RoPE 与 swap optimizer。最终选择随 Trainer Config 打印。
+关闭 Engram 使用 `--no-engram-enabled`；优化器由脚本显式选择，末尾 `--optimizer.name AdamW` 仍可覆盖。A3 单机使用 `--training.seq-len 2048`，脚本保留 4k 默认配置。A5 多机保留与单机一致的 swap override；可通过 `OPTIMIZER_OVERRIDES` 显式覆盖。
+
+A5 的 `CPU_AFFINITY_CONF` 应按主机拓扑覆盖。通过 `CLI_OVERRIDES` 扩展融合列表：A3 基础列表之外，文本 RoPE 经该通道按硬件选择（A3 默认 `asc_complex`，A5 换为 `asc_partial`），A5 默认追加 SwiGLUGroup、sparse attention、融合 LI 选分与 Sinkhorn，不重复传入 `--override.imports`。显式传 `--override.imports` 会替换整个集合，需自行包含所需的 RoPE 与 swap optimizer。最终选择随 Trainer Config 打印。
 
 普通运行不强制随机种子和确定性；精度对照须在双方命令中追加 `--debug.seed 42 --debug.deterministic`。默认关闭 checkpoint 且设置 `load_only=True`；保存时同时传 `--checkpoint.enable --checkpoint.no-load-only`。`load_only` 表示禁止保存，与 model-only 加载不同。tokenizer 统一经 `--hf-assets-path` 提供（测试可用仓内 `tests/assets/deepseek_v3` mini tokenizer），该参数本身不加载模型权重。
 
 indexer 蒸馏损失由 `IndexerDistillLoss` 实现（上游默认 `coeff=0.01`）：每层只要消费了 selection 就挂一个损失，教师用该层自身 attention 的完整 softmax 分母（窗口 + 压缩条目 + sink）重建，按压缩切片的边际质量加权；梯度经 `_AuxLossInjection` 注入，只训练 indexer 自身参数，训练指标为 `indexer_distill_loss/mean`。打包 loader 标记的结构 padding 行不参与蒸馏（真实图像 token 保留训练资格）。
+
+### Flash 完整主干多机训练
+
+`CONFIG=deepseek_v4_1_flash`，参数对齐 [HF 官方配置](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json)：40 层、隐藏维度 5120、384 个路由专家、1 个共享专家、top-6、MoE 中间维度 2304；attention 64 heads × 512、Q/O LoRA 1280/1024；ViT 32 层、维度 1024、16 heads、MLP 2816。Engram 位于第 1/14 层，逻辑表行数 384006168/384016682，沿用仓内 Host 存储和 2048 行对齐。训练长度默认为 4096；模型配置保留官方的最大位置范围 1048576，运行时按训练长度准备 RoPE。
+
+这里的“完整”指非裁剪的文本主干、ViT 和 Engram。HF 额外的 3 层 MTP 和 DSpark 尚未实现，本入口不代表完整 HF 训练目标均已支持；HF 的 FP8/FP4 权重发布格式也不等于本入口的训练量化配方。
+
+每台机器使用相同的 `NODE_IPS` 列表执行：
+
+```sh
+NODE_IPS=<node0_ip>,<node1_ip>,...,<node15_ip> \
+HF_ASSETS_PATH=/path/to/DeepSeek-V4.1-Flash \
+DATASET_PATH=/path/to/cc12m_tar_dir \
+bash examples/deepseek_v4_1/deepseek_v4_1_flash_cpt_4k_a5.sh
+```
+
+A5 默认每机 8 卡、EP128/FSDP128、TP1/CP1/PP1、MBS1/GBS1024、100 步、Muon、eager/FullAC、强制负载均衡，默认开启 SMLA/LI 及 block-FP8 训练。A3 对应 `deepseek_v4_1_flash_cpt_4k_a3.sh`，默认每机 16 卡、其余并行度相同，使用 A3 融合列表且不默认量化。
+
+`NGPU`、`EP`、`DP_SHARD`、`GBS`、`STEPS` 可通过环境变量设置；`NODE_IPS` 必填。总卡数须能被 EP 和 DP_SHARD 整除，EP 须兼容 384 专家；MBS 必须为 1。CLI 参数放在最后，可覆盖训练配置；修改拓扑请优先使用上述环境变量，保证派生的 DP_REPLICATE 一致。Host Engram 需要正确的 tokenizer 压缩映射与足够主机内存。
+
+初始权重不会因设置 `HF_ASSETS_PATH` 自动加载：需要时设置 `CKPT_INIT_LOAD_PATH` 指向 HF checkpoint；保存 checkpoint 另加 `--checkpoint.no-load-only`。默认不启用参数/梯度 CPU offload，保留 `swap_optimizer` 对 Engram 的适配。`USE_GOLDEN=1` 切换 reference override；A5 若还要关闭量化，追加 `--extension.quantization.no-enable-quantized-training`。
 
 ### 真实 CC12M 数据入口（图像条件 caption 预测）
 
