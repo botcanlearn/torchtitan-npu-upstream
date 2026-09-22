@@ -48,6 +48,7 @@ from torchtitan_npu.models.common.metadata_extension import (
 )
 from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
 from torchtitan_npu.models.deepseek_v4_1.attention import CompressedSparseInnerAttention2
+from torchtitan_npu.models.deepseek_v4_1.compressor import Compressor as V41Compressor
 from torchtitan_npu.override.common.swiglu_group.ascendc import AscGroupedExperts, _ensure_cann_ops_loaded
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
@@ -116,11 +117,12 @@ _DEFAULT_TARGET_CONFIG_TYPES = (
     LightningIndexer.Config,
     LightningIndexerMetadata.Config,
     CompressedSparseInnerAttention2.Config,
+    V41Compressor.Config,
 )
 
 
 def _get_npu_quantized_module_cls(parent_cls: type[Module]) -> type[Module]:
-    """Create a parameter-quantized subclass while preserving host behavior.
+    """Create a quantized subclass while preserving host behavior.
 
     The generated class inherits the concrete config owner so custom forward
     methods and config fields remain intact. Standard GroupedExperts and
@@ -135,7 +137,7 @@ def _get_npu_quantized_module_cls(parent_cls: type[Module]) -> type[Module]:
     class NpuQuantizedModule(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc, valid-type]
-            # ParamSwapConfig contains Python objects and is supplied by the
+            # TorchAO configs contain Python objects and are supplied by the
             # recipe, not by Tyro CLI parsing or config serialization.
             _torchao_npu_config: Annotated[AOBaseConfig | None, tyro.conf.Suppress] = None
 
@@ -473,11 +475,19 @@ _DSV4_CONFIG_FILTERS = {
     "lightning_indexer_metadata": match_config_fqn_suffix(".lightning_indexer_metadata"),
 }
 
+_v41_compressor_fqn_filter = match_config_fqn_suffix(".attention.compressor")
+
+
+def _is_v41_kv_source(config: Module.Config, fqn: str) -> bool:
+    return _v41_compressor_fqn_filter(config, fqn) and isinstance(config, V41Compressor.Config) and config.is_source
+
+
 _DSV41_CONFIG_FILTERS = {
     # V4.1 keeps the V4 attention and MoE config-tree suffixes for the dense
-    # parameter quantizers; only the sparse core has a new module boundary.
+    # parameter quantizers and adds Compressor/sparse-attention module swaps.
     "dense": _DSV4_CONFIG_FILTERS["dense"],
     "routed_expert": _DSV4_CONFIG_FILTERS["routed_expert"],
+    "compressor": _is_v41_kv_source,
     "sparse_attention": match_config_fqn_suffix(".attention.inner_attention"),
 }
 
@@ -742,8 +752,15 @@ def _recipe_converters(
         )
     if enable_sparse_attention_quantization:
         if "sparse_attention" in filters:
-            from torchao_npu.configs import QuantV41SparseAttentionConfig
+            from torchao_npu.configs import QuantCompressorConfig, QuantV41SparseAttentionConfig
 
+            converters.append(
+                _quantization_converter(
+                    QuantCompressorConfig(),
+                    filters["compressor"],
+                    model_compile_enabled=model_compile_enabled,
+                )
+            )
             converters.append(
                 _quantization_converter(
                     QuantV41SparseAttentionConfig(),

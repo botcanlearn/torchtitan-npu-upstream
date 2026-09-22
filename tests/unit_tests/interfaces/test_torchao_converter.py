@@ -318,3 +318,107 @@ def test_quantized_experts_preserve_wrappers_through_forward(monkeypatch, conver
     torch.testing.assert_close(weight, scores)
     assert group_index is None
     assert clamp_limit == -1.0
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["disabled", "enabled"])
+def test_v41_recipe_couples_source_compressor_and_sparse_attention(converter_module, enabled):
+    from torchao_npu.configs import QuantCompressorConfig, QuantV41SparseAttentionConfig
+
+    from torchtitan_npu.config.configs import QuantizationExtensionConfig
+    from torchtitan_npu.models.deepseek_v4_1 import model_registry
+
+    spec = model_registry("deepseek_v4_1_debugmodel")
+    converted = converter_module.apply_quantization_converter(
+        spec,
+        QuantizationExtensionConfig(
+            enable_quantized_training=True,
+            enable_sparse_attention_quantization=enabled,
+            recipe="all_mxfp8",
+        ),
+        model_compile_enabled=False,
+    )
+
+    for layer in converted.model.layers:
+        compressor = layer.attention.compressor
+        compressor_quant = getattr(compressor, "_torchao_npu_config", None)
+        attention_quant = getattr(layer.attention.inner_attention, "_torchao_npu_config", None)
+        if enabled and compressor.is_source:
+            assert isinstance(compressor_quant, QuantCompressorConfig)
+            assert compressor_quant.group_size == 16
+            assert type(compressor)._owner.__name__ == "NpuQuantizedCompressor"
+        else:
+            assert compressor_quant is None
+        assert isinstance(attention_quant, QuantV41SparseAttentionConfig) is enabled
+
+
+@pytest.mark.parametrize("ratio", [1, 2], ids=["full-resolution", "compressed"])
+def test_converted_v41_compressor_quantizes_post_rope_and_preserves_gradients(converter_module, monkeypatch, ratio):
+    from torchtitan_npu.config.configs import QuantizationExtensionConfig
+    from torchtitan_npu.models.deepseek_v4_1 import model_registry
+
+    reference_spec = model_registry("deepseek_v4_1_debugmodel")
+    converted = converter_module.apply_quantization_converter(
+        model_registry("deepseek_v4_1_debugmodel"),
+        QuantizationExtensionConfig(
+            enable_quantized_training=True,
+            enable_sparse_attention_quantization=True,
+            recipe="all_mxfp8",
+        ),
+        model_compile_enabled=False,
+    )
+    layer_id = next(
+        i
+        for i, layer in enumerate(reference_spec.model.layers)
+        if layer.attention.compressor.is_source and layer.attention.compressor.compress_ratio == ratio
+    )
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(17)
+        reference = reference_spec.model.layers[layer_id].attention.compressor.build()
+        reference.init_states(buffer_device=torch.device("cpu"))
+        reference.to(dtype=torch.bfloat16)
+        quantized = converted.model.layers[layer_id].attention.compressor.build()
+        quantized.init_states(buffer_device=torch.device("cpu"))
+        quantized.to(dtype=torch.bfloat16)
+    quantized.load_state_dict(reference.state_dict())
+    captured = []
+    d = reference_spec.model.layers[layer_id].attention.compressor.wkv.out_features
+
+    def encode(cache, rows, slots, **kwargs):
+        captured.append(rows.detach().clone())
+        assert kwargs["quant_group_size"] == 16
+        assert kwargs["quant_mode"] == "mxfp4_bf16"
+        cache[:, : d // 2] = 0x21
+        scales = torch.full((rows.shape[0], d // 16), 0.5, dtype=torch.bfloat16)
+        cache[:, d // 2 : d // 2 + 2 * (d // 16)] = scales.view(torch.uint8)
+
+    monkeypatch.setattr(torch.ops.custom.kv_compress_epilog_v2, "default", encode)
+    dim = reference_spec.model.dim
+    x_ref = torch.linspace(-1, 1, 4 * dim, dtype=torch.bfloat16).reshape(1, 4, dim).requires_grad_()
+    x_quant = x_ref.detach().clone().requires_grad_()
+    positions = torch.arange(4).unsqueeze(0)
+
+    expected_kv, expected_latent = reference(x_ref, positions)
+    actual_kv, actual_latent = quantized(x_quant, positions)
+
+    assert len(captured) == 1
+    assert torch.equal(captured[0], expected_kv.detach().reshape(-1, d))
+    assert torch.equal(actual_latent, expected_latent)
+    expected_qdq = torch.tensor([0.25, 0.5], dtype=actual_kv.dtype).repeat(actual_kv.numel() // 2).reshape_as(actual_kv)
+    assert torch.equal(actual_kv, expected_qdq)
+    assert actual_kv.dtype == expected_kv.dtype
+    reuser = converted.model.layers[layer_id + 1].attention.compressor.build()
+    shared, latent = reuser(x_quant, positions, actual_kv)
+    assert shared is actual_kv
+    assert latent is None
+    assert len(captured) == 1
+
+    kv_grad = torch.linspace(-0.5, 0.5, actual_kv.numel()).reshape_as(actual_kv)
+    latent_grad = torch.linspace(0.25, 0.75, actual_latent.numel()).reshape_as(actual_latent)
+    ((expected_kv.float() * kv_grad).sum() + (expected_latent.float() * latent_grad).sum()).backward()
+    ((actual_kv.float() * kv_grad).sum() + (actual_latent.float() * latent_grad).sum()).backward()
+    torch.testing.assert_close(x_quant.grad, x_ref.grad, rtol=0, atol=0)
+    for (_, parameter), (_, reference_parameter) in zip(
+        quantized.named_parameters(), reference.named_parameters(), strict=True
+    ):
+        assert parameter.grad is not None
+        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=0, atol=0)

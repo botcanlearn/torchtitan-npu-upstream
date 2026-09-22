@@ -18,7 +18,7 @@ from torchao_npu.configs.module_swap import ModuleSwapConfig
 
 @dataclass(kw_only=True, slots=True)
 class QuantV41SparseAttentionConfig(ModuleSwapConfig):
-    """Install mixed quant sparse attention with FP8 SWA_KV / FP4 CMP_KV and BF16 scales."""
+    """Install FP8 SWA fake quantization; main KV is supplied by QuantCompressor."""
 
 
 def _quantized_forward(

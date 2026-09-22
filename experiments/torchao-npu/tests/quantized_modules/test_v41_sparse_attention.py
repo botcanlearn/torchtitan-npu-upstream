@@ -10,19 +10,6 @@ import torch
 from torchao_npu.quantized_modules import v41_sparse_attention as sparse_attention
 
 
-def test_quantized_cache_width_for_v41_head():
-    assert sparse_attention._quantized_cache_width(512, 32, "mxfp8_bf16") == 544
-    assert sparse_attention._quantized_cache_width(512, 16, "mxfp4_bf16") == 320
-    assert sparse_attention._quantized_cache_width(128, 32, "mxfp8_bf16") == 160
-    assert sparse_attention._quantized_cache_width(128, 16, "mxfp4_bf16") == 96
-
-
-@pytest.mark.parametrize("head_dim", [64, 65, 127, 513])
-def test_quantized_cache_width_rejects_unsupported_head_dim(head_dim):
-    with pytest.raises(ValueError, match="head_dim > 64 and divisible by 64"):
-        sparse_attention._quantized_cache_width(head_dim)
-
-
 def test_localize_indices_preserves_document_local_entries():
     """Global top-k coordinates outside a query document are invalidated."""
     topk_indices = torch.tensor([[0, 1, 3], [1, 2, 3], [2, 4, 5]], dtype=torch.int64)
@@ -31,7 +18,7 @@ def test_localize_indices_preserves_document_local_entries():
 
     localized = sparse_attention._localize_indices(topk_indices, doc_ids, cu_cmp)
 
-    expected = torch.tensor([[0, 1, -1], [1, -1, -1], [0, 2, 3]], dtype=torch.int64)
+    expected = torch.tensor([[0, 1, -1], [1, -1, -1], [0, 2, -1]], dtype=torch.int64)
     assert torch.equal(localized, expected)
 
 
@@ -61,11 +48,11 @@ def _fake_mla_apply(captured):
     [(0, False, 0), (1, True, 4), (2, True, 2)],
     ids=["window-only", "full-resolution-shared-kv", "compressed-shared-kv"],
 )
-def test_sparse_mla_forward_backward_uses_quantized_forward_and_original_backward(
+def test_sparse_mla_quantizes_only_swa_and_preserves_main_kv_in_both_passes(
     monkeypatch, ratio, with_shared, cmp_tokens
 ):
     """Exercise the custom autograd function around mocked NPU kernel boundaries."""
-    device = "npu"
+    device = "cpu"
     q = torch.ones((4, 2, 4), device=device, dtype=torch.bfloat16, requires_grad=True)
     swa_k = torch.ones((4, 1, 4), device=device, dtype=torch.bfloat16, requires_grad=True)
     cmp_k = (
@@ -100,7 +87,9 @@ def test_sparse_mla_forward_backward_uses_quantized_forward_and_original_backwar
         assert output.shape == q.shape
         assert saved_lse is lse
         torch.testing.assert_close(grad_output, torch.ones_like(q))
-        assert kwargs["ori_kv"] is swa_k
+        assert kwargs["ori_kv"] is forward_kwargs["ori_kv"]
+        assert kwargs["ori_kv"] is not swa_k
+        torch.testing.assert_close(kwargs["ori_kv"], torch.full_like(swa_k, 2))
         assert kwargs["cmp_kv"] is cmp_k
         assert kwargs["cmp_sparse_indices"] is indices
         assert kwargs["sinks"] is sinks
@@ -119,7 +108,7 @@ def test_sparse_mla_forward_backward_uses_quantized_forward_and_original_backwar
 
     monkeypatch.setattr(sparse_attention, "sparse_flash_mla_metadata", metadata)
     monkeypatch.setattr(sparse_attention, "sparse_flash_mla_grad_metadata", metadata)
-    monkeypatch.setattr(sparse_attention, "_fake_quantize_kv", fake_quantize)
+    monkeypatch.setattr(sparse_attention, "fake_quantize_mx_bf16", fake_quantize)
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla", sparse_flash_mla)
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad", sparse_flash_mla_grad)
 
@@ -139,15 +128,11 @@ def test_sparse_mla_forward_backward_uses_quantized_forward_and_original_backwar
 
     assert returned_lse is lse
     assert not returned_lse.requires_grad
-    assert len(quantize_calls) == (2 if with_shared else 1)
+    assert len(quantize_calls) == 1
+    assert quantize_calls[0][0] is swa_k
     assert quantize_calls[0][1:] == (32, "mxfp8_bf16")
-    if with_shared:
-        assert quantize_calls[1][1:] == (16, "mxfp4_bf16")
     torch.testing.assert_close(forward_kwargs["ori_kv"], swa_k + 1)
-    if with_shared:
-        torch.testing.assert_close(forward_kwargs["cmp_kv"], cmp_k + 1)
-    else:
-        assert forward_kwargs["cmp_kv"] is None
+    assert forward_kwargs["cmp_kv"] is cmp_k
     assert forward_kwargs["metadata"] is forward_metadata
     assert forward_kwargs["cmp_sparse_indices"] is indices
     assert forward_kwargs["sinks"] is sinks
