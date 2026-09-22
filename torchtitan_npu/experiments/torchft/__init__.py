@@ -17,3 +17,4 @@ except ModuleNotFoundError as error:
     ) from error
 
 from torchtitan_npu.patches import torchft as _torchft_patches  # noqa: F401
+from torchtitan_npu.patches.torchtitan.experiments import torchft as _torchtitan_torchft_patches  # noqa: F401

@@ -44,6 +44,14 @@ grep -L "Pending upstream PR: https://github.com/pytorch/torchtitan/pull/" \
 | [#4516](https://github.com/pytorch/torchtitan/pull/4516) | 去重跨 chunk 共享的 EP ready node，对应 `ep_ready_nodes_dedup` |
 | [#4651](https://github.com/pytorch/torchtitan/pull/4651) | 将同一 root 的 AllToAll dim-0 shape query 保留在 chunk 内，对应 `ep_shape_live_out` |
 | [#4734](https://github.com/pytorch/torchtitan/pull/4734) | 在支持的一维 SimpleFSDP 场景下，将 GraphTrainer 每个 microbatch 的 chunk-loss head 梯度 ReduceScatter 合并为一次，对应 `experiments/graph_trainer/chunked_loss` |
+| [#4534](https://github.com/pytorch/torchtitan/pull/4534) | 在 TorchFT 模型构造前应用配置 override 并重新校验配置，对应 `experiments/torchft/trainer.py` |
+| [#4575](https://github.com/pytorch/torchtitan/pull/4575) | 为 TorchFT 的 chunked loss 绑定 `lm_head`，覆盖普通训练及 PP 最后阶段，对应 `experiments/torchft/trainer.py` |
+| [#4578](https://github.com/pytorch/torchtitan/pull/4578) | 消除 TorchFT optimizer 递归分派，保留一次容器 hook 调用，对应 `experiments/torchft/optimizer.py` |
+| [#4598](https://github.com/pytorch/torchtitan/pull/4598) | 导出副本恢复状态前刷新缓存中的学习率等元数据，对应 `experiments/torchft/optimizer.py` 和 `checkpoint.py` |
+| [#4663](https://github.com/pytorch/torchtitan/pull/4663) | 按当前参与副本数平均 TorchFT 日志 loss，对应 `experiments/torchft/trainer.py` |
+| [#4664](https://github.com/pytorch/torchtitan/pull/4664) | 为每个 FSDP 参数组注册 TorchFT 梯度平均 hook，对应 `experiments/torchft/manager.py` |
+
+上述 6 个 TorchTitan PR（#4534、#4575、#4578、#4598、#4663、#4664）已在上游合入，但 `v0.3.0` 尚未包含这些修复。
 
 四个 EP overlap 补丁的作用、启用方式与排查手段见
 [`docs/feature_guides/graph_trainer_ep_overlap.md`](../../../docs/feature_guides/graph_trainer_ep_overlap.md)。
