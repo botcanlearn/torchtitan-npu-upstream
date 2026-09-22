@@ -75,6 +75,8 @@ _ops_to_preserve_subclass = {
     torch.ops.aten.squeeze.default,
     # required for TP - scatter_ is used to distribute weights
     torch.ops.c10d.scatter_.default,
+    torch.ops._c10d_functional.all_gather_into_tensor.default,
+    torch.ops._c10d_functional.wait_tensor.default,
 }
 
 # required for spmd_types sharding - this custom op splits parameters per rank
