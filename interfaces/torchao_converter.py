@@ -33,14 +33,15 @@ from torchao_npu.quantization.quant_configs import (
     HiF8QuantizeConfig,
     MXQuantizeConfig,
 )
+from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import derive
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.utils import validate_converter_order
+from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 
-from torchtitan_npu.config.configs import LIQuantization  # noqa: TC001 - Tyro resolves the converter Config at runtime.
 from torchtitan_npu.models.common.metadata_extension import (
     LightningIndexerKernelConfig,
     LightningIndexerMetadata,
@@ -53,9 +54,12 @@ from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 if TYPE_CHECKING:
     from torchao_npu.configs import QuantLightningIndexerConfig
     from torchtitan.protocols.model_spec import ModelSpec
-    from torchtitan.protocols.module import Module
 
-    from torchtitan_npu.config.configs import QuantizationExtensionConfig
+    from torchtitan_npu.config.configs import (
+        KVNormQuantizationConfig,
+        LIQuantization,
+        QuantizationExtensionConfig,
+    )
 
 
 class ConfigFilterFn(Protocol):
@@ -250,6 +254,204 @@ class NpuQuantizeConverter(QuantizationConverter):
         if converted == 0 and self.config.require_match:
             raise ValueError("NpuQuantizeConverter did not match any config nodes")
         logger.info("Converted %d config node(s) for torchao-npu", converted)
+        return model_config
+
+
+class FakeQuantizedNormFactory(Module):
+    """Config node that builds a fake-quantizing norm in place of a norm config.
+
+    The converter installs this node where a target config used to be; the node
+    keeps that config in ``norm`` so the override pass (e.g. ``rms_norm.asc``)
+    still finds and rewrites it.  ``build()`` then resolves the module class from
+    the wrapped config's owner -- the fused replacement when such an override ran,
+    the original module class otherwise -- and builds a generated subclass of it
+    that fake-quantizes the nope prefix of its output.
+
+    Consequences worth knowing:
+
+    - the built module keeps the norm's parameter names (``...kv_norm.weight``),
+      so checkpoints and state-dict adapters are unaffected;
+    - the built module is *not* ``type(config)._owner``;
+    - ``FakeQuantizedNormFactory`` itself is never instantiated.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        norm: Module.Config
+        """The config this node replaced (selected by the converter's targets)."""
+        _fake_quant_config: Annotated[MXQuantizeConfig | None, tyro.conf.Suppress] = None
+        """How the nope prefix is fake-quantized."""
+        head_dim: int
+        """Width of the norm's input and output; validated at run time."""
+        nope_head_dim: int
+        """Width of the fake-quantized prefix (the channels RoPE does not rotate)."""
+
+        def build(self, **kwargs):
+            owner = type(self.norm)._owner
+            if owner is None:
+                raise TypeError(
+                    f"{type(self.norm).__qualname__} has no owning module class; "
+                    "FakeQuantizedNormFactory cannot build it"
+                )
+            if self._fake_quant_config is None:
+                raise ValueError("FakeQuantizedNormFactory.Config requires _fake_quant_config")
+            # The generated Config's owner is the generated module class, so the
+            # framework's Module.Config.build does the construction and attaches
+            # ``_param_init``/``_sharding_config`` (the model writes the sharding
+            # declaration at this node, not on the wrapped config).
+            return derive(
+                self.norm,
+                _dynamic_norm_class(owner).Config,
+                fake_quant_config=self._fake_quant_config,
+                head_dim=self.head_dim,
+                nope_head_dim=self.nope_head_dim,
+                param_init=self.param_init,
+                sharding_config=self.sharding_config,
+            ).build(**kwargs)
+
+
+_DYNAMIC_NORM_CLASS_CACHE: dict[type[Module], type[Module]] = {}
+
+
+def _dynamic_norm_class(owner: type[Module]) -> type[Module]:
+    """
+    Generates a FakeQuantizedNorm via subclassing ``owner``.
+
+    The generated class is cached using owner as the key. So repeated
+    builds neither re-create classes nor re-trigger ``torch.compile``.
+
+    A FakeQuantizedNorm fake-quantizes the nope prefix of the output of
+    the Norm class it subclasses. Each FakeQuantizedNorm carries its own
+    widths and quantization config on the config,
+    """
+
+    if owner in _DYNAMIC_NORM_CLASS_CACHE:
+        return _DYNAMIC_NORM_CLASS_CACHE[owner]
+
+    class FakeQuantizedNorm(owner):  # type: ignore[valid-type, misc]
+        """``owner`` followed by a fake-quantization of the nope prefix."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(owner.Config):  # type: ignore[misc, valid-type]
+            fake_quant_config: MXQuantizeConfig
+            head_dim: int
+            nope_head_dim: int
+
+        def __init__(self, config: Config) -> None:
+            super().__init__(config)
+            self.fake_quant_config = config.fake_quant_config
+            self.head_dim = config.head_dim
+            self.nope_head_dim = config.nope_head_dim
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            if x.shape[-1] != self.head_dim:
+                raise ValueError(f"{type(self).__name__} expects a width-{self.head_dim} input, got {tuple(x.shape)}")
+            # Compute the norm first, then fake-quantize the nope prefix only: the
+            # trailing channels must reach RoPE untouched. The fake quantization
+            # carries straight-through gradients and ``cat`` keeps the whole
+            # path free of in-place writes.
+            y = super().forward(x)
+            return torch.cat(
+                [
+                    mx_fake_quantize(y[..., : self.nope_head_dim], -1, self.fake_quant_config),
+                    y[..., self.nope_head_dim :],
+                ],
+                dim=-1,
+            )
+
+    FakeQuantizedNorm.__name__ = FakeQuantizedNorm.__qualname__ = f"FakeQuantized{owner.__name__}"
+    _DYNAMIC_NORM_CLASS_CACHE[owner] = FakeQuantizedNorm
+    return FakeQuantizedNorm
+
+
+class KVNormFakeQuantConverter(QuantizationConverter):
+    """Install :class:`FakeQuantizedNormFactory` in front of the selected norms.
+
+    The nodes are selected by config-tree FQN suffix (``target_fqns``), so any
+    norm node can be targeted.
+    """
+
+    class _KVRopeGeometry(Protocol):
+        """The parent-config surface the converter reads."""
+
+        head_dim: int
+        rope_head_dim: int
+        rope: Module.Config
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        base_config: Annotated[MXQuantizeConfig | None, tyro.conf.Suppress] = None
+        target_fqns: tuple[str, ...] = ()
+        require_match: bool = True
+
+        def __post_init__(self) -> None:
+            if self.base_config is None:
+                raise ValueError("KVNormFakeQuantConverter.Config requires base_config")
+
+            if len(self.target_fqns) == 0:
+                raise ValueError("Must specify fqns of target Modules")
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.filter = match_config_fqn_suffix(*config.target_fqns)
+
+    def convert(self, model_config):
+        # Collect before mutating: traversal never re-visits a replaced node, and
+        # the factory keeps the wrapped config one level down.  There is no common
+        # norm config base class, so the walk is generic and the selection is
+        # entirely FQN-driven (``recurse=True`` walks the whole tree).
+        matches = [
+            (fqn, config, parent, attr)
+            for fqn, config, parent, attr in model_config.traverse(Module.Config, recurse=True)
+            if self.filter(cast("Module.Config", config), fqn)
+        ]
+
+        converted = 0
+        for fqn, config, parent, attr in matches:
+            if parent is None:
+                raise ValueError(f"the norm fake quantization does not support the root config ({fqn!r})")
+            # The parent carries the rope geometry: the nope span is exactly the
+            # prefix RoPE leaves untouched, so it must agree with the rope split.
+            parent_cfg = cast("KVNormFakeQuantConverter._KVRopeGeometry", parent)
+            head_dim = getattr(parent_cfg, "head_dim", None)
+            rope_head_dim = getattr(parent_cfg, "rope_head_dim", None)
+            if head_dim is None or rope_head_dim is None:
+                raise ValueError(
+                    f"target norm at {fqn!r} has no rope geometry on its parent; the nope span cannot be derived"
+                )
+            nope_head_dim = head_dim - rope_head_dim
+            split = getattr(getattr(parent_cfg, "rope", None), "split", nope_head_dim)
+            if not 0 < nope_head_dim <= head_dim:
+                raise ValueError(
+                    f"KV norm at {fqn!r} has an invalid nope span: head_dim={head_dim}, nope_head_dim={nope_head_dim}"
+                )
+            if split != nope_head_dim:
+                raise ValueError(
+                    f"KV norm at {fqn!r} disagrees with its rope split: "
+                    f"nope_head_dim={nope_head_dim}, rope split={split}"
+                )
+            replacement = derive(
+                config,
+                FakeQuantizedNormFactory.Config,
+                norm=config,
+                _fake_quant_config=self.config.base_config,
+                head_dim=head_dim,
+                nope_head_dim=nope_head_dim,
+            )
+            model_config = _replace_config(model_config, parent, attr, replacement)
+            converted += 1
+            logger.info(
+                "[Converter] %s.%s: model_spec.model.%s %s -> %s",
+                type(self).__module__,
+                type(self).__qualname__,
+                fqn,
+                type(config).__qualname__,
+                type(replacement).__qualname__,
+            )
+
+        if converted == 0 and self.config.require_match:
+            raise ValueError("KVNormFakeQuantConverter did not match any config nodes")
+        logger.info("Converted %d config node(s) for KV norm fake quantization", converted)
         return model_config
 
 
@@ -472,6 +674,7 @@ def _recipe_converters(
     model_compile_enabled: bool,
     li_quantization: LIQuantization | None = None,
     li_kernel_config: LightningIndexerKernelConfig | None = None,
+    kv_norm_quantization: KVNormQuantizationConfig | None = None,
 ) -> list[QuantizationConverter.Config]:
     converters: list[QuantizationConverter.Config]
     try:
@@ -554,6 +757,17 @@ def _recipe_converters(
                 "sparse_attention filter; skipping the sparse attention replacement.",
                 model_type,
             )
+
+    if kv_norm_quantization is not None and kv_norm_quantization.format is not None:
+        converters.append(
+            KVNormFakeQuantConverter.Config(
+                base_config=MXQuantizeConfig(
+                    elem_dtype=torch.float8_e4m3fn, block_size=kv_norm_quantization.block_size
+                ),
+                target_fqns=tuple(kv_norm_quantization.fqns),
+                model_compile_enabled=model_compile_enabled,
+            )
+        )
     return converters
 
 
@@ -616,6 +830,7 @@ def apply_quantization_converter(
         model_compile_enabled=model_compile_enabled,
         li_quantization=quantization_config.li_quantization,
         li_kernel_config=li_kernel_config,
+        kv_norm_quantization=quantization_config.kv_norm_quantization,
     )
     validate_converter_order(converters)
 
@@ -624,11 +839,14 @@ def apply_quantization_converter(
 
     logger.info(
         "Applied TorchAO-NPU recipe=%s, sparse_attention_quantization=%s, mxfp4_qat=%s, "
-        "li_quantization=%s, dst_type_max=%s, fsdp_prequantize=%s",
+        "li_quantization=%s, kv_norm_quantization=%s, kv_norm_block_size=%s, "
+        "dst_type_max=%s, fsdp_prequantize=%s",
         quantization_config.recipe,
         quantization_config.enable_sparse_attention_quantization,
         quantization_config.enable_mxfp4_qat,
         quantization_config.li_quantization,
+        quantization_config.kv_norm_quantization.format,
+        quantization_config.kv_norm_quantization.block_size,
         quantization_config.dst_type_max,
         quantization_config.fsdp_prequantize,
     )

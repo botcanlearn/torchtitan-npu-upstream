@@ -24,6 +24,7 @@ from torchtitan_npu.config import (
 )
 from torchtitan_npu.config import TrainingConfig as NPUTrainingConfig
 from torchtitan_npu.config import manager as config_manager
+from torchtitan_npu.config.configs import KVNormQuantizationConfig
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed import utils as distributed_utils
 from torchtitan_npu.extensions.graph_trainer import GraphTrainerEx
@@ -227,6 +228,12 @@ def test_config_manager_parses_quantization_extension(
             "--extension.quantization.enable-mxfp4-qat",
             "--extension.quantization.dst-type-max",
             "7.0",
+            "--extension.quantization.kv-norm-quantization.format",
+            "mxfp8",
+            "--extension.quantization.kv-norm-quantization.fqns",
+            ".attention.kv_norm,.attention.compressor.norm",
+            "--extension.quantization.kv-norm-quantization.block-size",
+            "64",
         ]
     )
 
@@ -236,6 +243,21 @@ def test_config_manager_parses_quantization_extension(
     assert quantization.enable_mxfp4_qat is True
     assert quantization.dst_type_max == 7.0
     assert quantization.fsdp_prequantize is False
+    assert quantization.kv_norm_quantization.format == "mxfp8"
+    assert quantization.kv_norm_quantization.fqns == [".attention.kv_norm", ".attention.compressor.norm"]
+    assert quantization.kv_norm_quantization.block_size == 64
+
+
+def test_kv_norm_quantization_config_validates_its_format():
+    """
+    Only the format is checked here; the block size is validated by the MX
+    configs that consume it (``MXQuantizeConfig.__post_init__``).
+    """
+    assert KVNormQuantizationConfig().format is None
+    assert KVNormQuantizationConfig(format="mxfp8", block_size=64).block_size == 64
+
+    with pytest.raises(ValueError, match="format must be None or one of: mxfp8"):
+        KVNormQuantizationConfig(format="fp8")  # pyrefly: ignore [bad-argument-type]
 
 
 def test_config_manager_materializes_muon_from_cli(monkeypatch, tmp_path):

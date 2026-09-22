@@ -403,3 +403,68 @@ def test_mx_fake_quantize_matches_quantize_then_dequantize_for_all_layouts(tenso
     # Idempotency: quantize -> dequantize -> quantize -> dequantize is a no-op.
     y2 = mx_fake_quantize(y, axis, config)
     assert torch.equal(y, y2), "fake quantization is not idempotent"
+
+
+@pytest.mark.parametrize("block_size", [32, 64, 96, 128])
+@pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float8_e5m2, torch.float4_e2m1fn_x2])
+def test_mx_fake_quantize_is_idempotent(elem_dtype, block_size):
+    """Fake quantizing an already fake-quantized tensor reproduces it exactly.
+
+    Reference-free by design: ``mxfp8_dequantize``/``mxfp4_dequantize`` only
+    implement ``block_size=32``, so above 32 the round trip is checked against
+    itself. ``scale_alg=0`` is the only algorithm that supports both FP4 and FP8
+    together with a ``block_size`` other than 32.
+    """
+    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
+
+    config = MXQuantizeConfig(elem_dtype=elem_dtype, block_size=block_size, scale_alg=0)
+    x = torch.randn(4, 384, device="npu", dtype=torch.bfloat16)
+
+    y = mx_fake_quantize(x, -1, config)
+    y2 = mx_fake_quantize(y, -1, config)
+
+    assert y.shape == x.shape, f"shape mismatch: {y.shape} vs {x.shape}"
+    assert y.dtype == x.dtype, f"dtype mismatch: {y.dtype} vs {x.dtype}"
+    assert not torch.equal(y, x), "the round trip must actually change values"
+    assert torch.equal(y, y2), "fake quantization is not idempotent"
+
+
+def test_mx_fake_quantize_is_straight_through_differentiable():
+    """The fake-quantized span keeps identity gradients instead of detaching."""
+    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
+
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    weight = torch.randn(4, 64, device="npu", dtype=torch.bfloat16)
+    x = torch.randn(4, 64, device="npu", dtype=torch.bfloat16, requires_grad=True)
+
+    y = mx_fake_quantize(x, -1, config)
+
+    assert y.dtype == x.dtype
+    assert not torch.equal(y, x), "the round trip must actually change values"
+
+    (y * weight).sum().backward()
+
+    # Identity through the quantized span: the gradient is the (unquantized) weight.
+    assert x.grad is not None, "the fake-quantized span must not detach the graph"
+    assert torch.equal(x.grad, weight)
+
+
+def test_mx_last_dim_fake_quantize_custom_op_passes_opcheck():
+    """Schema, mutation contract, autograd formula and fake metadata of the op."""
+    import torch.library
+    from torchao_npu.quantization.quant_primitives.mx import mx_last_dim_fake_quantize
+
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    x = torch.randn(4, 64, device="npu", dtype=torch.bfloat16)
+
+    torch.library.opcheck(
+        mx_last_dim_fake_quantize,
+        (
+            x,
+            config.npu_elem_dtype,
+            config.block_size,
+            config.round_mode,
+            config.scale_alg,
+            config.dst_type_max,
+        ),
+    )

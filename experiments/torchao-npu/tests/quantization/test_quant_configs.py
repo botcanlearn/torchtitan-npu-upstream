@@ -34,9 +34,19 @@ def test_mx_config_fp4_scale_alg_constraints():
         MXQuantizeConfig(elem_dtype=torch.float4_e2m1fn_x2, scale_alg=1)
 
 
+def test_mx_config_accepts_positive_multiples_of_32():
+    """Any positive multiple of 32 is a valid MX block size."""
+    assert MXQuantizeConfig(block_size=32).block_size == 32
+    assert MXQuantizeConfig(block_size=64).block_size == 64
+
+
 def test_mx_config_rejects_unsupported_block_size_and_dtype():
-    with pytest.raises(AssertionError, match="block_size must be 32"):
+    with pytest.raises(AssertionError, match="positive multiple of 32"):
         MXQuantizeConfig(block_size=16)
+    with pytest.raises(AssertionError, match="positive multiple of 32"):
+        MXQuantizeConfig(block_size=0)
+    with pytest.raises(AssertionError, match="positive multiple of 32"):
+        MXQuantizeConfig(block_size=-32)
     with pytest.raises(AssertionError, match="elem_dtype must be one of"):
         MXQuantizeConfig(elem_dtype=torch.float32)
 
@@ -74,7 +84,7 @@ def test_mx_config_npu_dtype_properties(elem_dtype, expected_elem_token, expecte
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"block_size": 16}, "block_size must be 32"),
+        ({"block_size": 16}, "positive multiple of 32"),
         ({"elem_dtype": torch.float32}, "elem_dtype must be"),
         (
             {

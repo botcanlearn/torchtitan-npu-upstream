@@ -32,6 +32,9 @@ QUANTIZATION_ARGS=(
     --extension.quantization.recipe all_block_fp8
     --extension.quantization.fsdp-prequantize
     --extension.quantization.li-quantization fp8
+    --extension.quantization.kv-norm-quantization.format mxfp8
+    --extension.quantization.kv-norm-quantization.fqns .attention.kv_norm,.attention.compressor.norm
+    --extension.quantization.kv-norm-quantization.block-size 64
 )
 
 # Disable swap optimizer for better performance

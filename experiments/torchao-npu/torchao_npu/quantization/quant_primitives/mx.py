@@ -5,12 +5,13 @@
 
 """MXFP4 low-level primitives for NPU.
 
-These are pure tensor helpers (no autograd, no matmul) used by higher-level
-ops in :mod:`torchao_npu.ops.mx_ops`
+These are pure tensor helpers (no matmul) used by higher-level ops in
+:mod:`torchao_npu.ops.mx_ops`
 (e.g., ``MXFP4FakeQuantize.forward`` calls :func:`mxfp4_dequantize`).
 """
 
 import functools
+from math import ceil
 
 import torch
 import torch_npu
@@ -125,12 +126,85 @@ def mx_quantize(
         return y, scale
 
 
+@torch.library.custom_op("torchao_npu::mx_last_dim_fake_quantize", mutates_args=(), device_types="npu")
+def mx_last_dim_fake_quantize(
+    x: torch.Tensor,
+    quant_elem_dtype: int,
+    block_size: int,
+    round_mode: str,
+    scale_alg: int,
+    quant_elem_dtype_max: float,
+) -> torch.Tensor:
+    """Quantize then immediately dequantize ``x`` along its trailing dimension.
+
+    the result is differentiable via a straight-through estimator.
+
+    Args:
+        x: Tensor to fake-quantize.
+        quant_elem_dtype: Element dtype of the quantized tensor, in the encoding
+            ``npu_dynamic_mx_quant`` expects; ``npu_anti_mx_quant`` decodes the same
+            dtype.
+        block_size: MX block size for both ops.
+        round_mode: Cast mode of the quantizer.
+        scale_alg: Scale algorithm of the quantizer.
+        quant_elem_dtype_max: Maximum of the target dtype; ``0.0`` infers it.
+
+    Returns:
+        The fake-quantized tensor: fresh, contiguous, with ``x``'s shape and dtype.
+
+    Raises:
+        AssertionError: If the dequantized values are not contiguous, which the NPU
+            kernels otherwise guarantee.
+    """
+    qdata, scale = torch_npu.npu_dynamic_mx_quant(
+        x,
+        axis=-1,
+        dst_type=quant_elem_dtype,
+        block_size=block_size,
+        round_mode=round_mode,
+        scale_alg=scale_alg,
+        dst_type_max=quant_elem_dtype_max,
+    )
+
+    # torch_npu.npu_anti_mx_quant only accepts scale of block_size==32.
+    # Turn dynamic's per-``block`` scale into the 32-keyed layout
+    # npu_anti_mx_quant expects. block_size is assumed to be multiples of 32,
+    # which should be guaranteed by the caller.
+    if block_size > 32:
+        flat = scale.reshape(*scale.shape[:-2], -1)  # merge pair dim
+        flat = flat.repeat_interleave(block_size // 32, dim=-1)  # duplicate scales
+
+        # because block_size >= 32, there is always enough padding rows for us to reuse
+        sdim_padded = ceil(ceil(x.shape[-1] / 32) / 2) * 2
+        flat = flat[..., :sdim_padded]  # trim the padded tail
+        scale = flat.reshape(*flat.shape[:-1], sdim_padded // 2, 2)  # re-form pack dim
+
+    dequant = torch_npu.npu_anti_mx_quant(qdata, scale, axis=-1, dst_type=x.dtype, src_type=quant_elem_dtype)
+    assert dequant.is_contiguous(), "``dequant`` is expected to be contiguous."
+    return dequant
+
+
+@mx_last_dim_fake_quantize.register_fake
+def _(x, quant_elem_dtype, block_size, round_mode, scale_alg, quant_elem_dtype_max):
+    """Metadata only: dense output mirroring ``x``'s shape and dtype."""
+    del quant_elem_dtype, block_size, round_mode, scale_alg, quant_elem_dtype_max
+    return torch.empty_like(x, memory_format=torch.contiguous_format)
+
+
+def mx_last_dim_fake_quantize_backward(ctx, grad_output):
+    """Straight-through: the tensor arg keeps its gradient, the scalars get none."""
+    return grad_output, None, None, None, None, None
+
+
+torch.library.register_autograd(mx_last_dim_fake_quantize, mx_last_dim_fake_quantize_backward)
+
+
 def mx_fake_quantize(
     tensor: torch.Tensor,
     axis: int,
     config: MXQuantizeConfig,
 ) -> torch.Tensor:
-    """MX fake-quantize ``tensor`` along ``axis``.
+    """MX fake-quantize ``tensor`` along ``axis`` (differentiable via a straight-through estimator).
 
     Quantizes with ``npu_dynamic_mx_quant`` and immediately dequantizes the result
     with ``npu_anti_mx_quant``, so the values are those of a real MX
@@ -162,22 +236,13 @@ def mx_fake_quantize(
     perm_indices.append(axis)
     tensor_p = tensor.permute(perm_indices)
 
-    y_p, scale_p = torch_npu.npu_dynamic_mx_quant(
+    y_fake_p = mx_last_dim_fake_quantize(
         tensor_p,
-        axis=-1,
-        dst_type=config.npu_elem_dtype,
-        block_size=config.block_size,
-        round_mode=config.round_mode,
-        scale_alg=config.scale_alg,
-        dst_type_max=config.dst_type_max,
-    )
-
-    y_fake_p = torch_npu.npu_anti_mx_quant(
-        y_p,
-        scale_p,
-        axis=-1,
-        dst_type=tensor_p.dtype,
-        src_type=config.npu_elem_dtype,
+        config.npu_elem_dtype,
+        config.block_size,
+        config.round_mode,
+        config.scale_alg,
+        config.dst_type_max,
     )
 
     # Inverse permutation: y_p dim j corresponds to tensor dim perm_indices[j].

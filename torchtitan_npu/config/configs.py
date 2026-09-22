@@ -16,6 +16,7 @@ from torchtitan.tools.profiler import Profiler as _BaseProfiler
 
 QuantizationRecipe = Literal["all_mxfp8", "mix", "all_block_fp8"]
 LIQuantization = Literal["mxfp4", "mxfp8", "fp8", "hif8"]
+KVNormQuantization = Literal["mxfp8"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,35 @@ class OptimizerConfig(OptimizersContainer.Config):
 
 
 @dataclass(kw_only=True, slots=True)
+class KVNormQuantizationConfig:
+    """KV norm fake quantization: the format and the norm sites to wrap.
+
+    Always present on the quantization config (so the CLI stays
+    ``--extension.quantization.kv-norm-quantization.<field>``); ``format=None``
+    disables the transform.
+    """
+
+    format: KVNormQuantization | None = None
+    """``mxfp8`` fake-quantizes the nope prefix (the channels RoPE leaves untouched)
+    with MX block scales. ``None`` disables it.
+    """
+    fqns: list[str] = field(default_factory=list)
+    """Config-tree FQN suffixes of the norm nodes to fake-quantize.
+
+    A node is selected when its FQN is one of the suffixes or ends with
+    ``"." + suffix``. Empty by default (nothing is selected): the
+    launch scripts state the sites explicitly.
+    """
+    block_size: int = 32
+    """MX block size of the fake quantization.
+    """
+
+    def __post_init__(self) -> None:
+        if self.format not in (None, "mxfp8"):
+            raise ValueError("format must be None or one of: mxfp8")
+
+
+@dataclass(kw_only=True, slots=True)
 class QuantizationExtensionConfig:
     """TorchAO-NPU quantized-training options.
 
@@ -124,6 +154,7 @@ class QuantizationExtensionConfig:
     """
     dst_type_max: float = 0.0
     fsdp_prequantize: bool = False
+    kv_norm_quantization: KVNormQuantizationConfig = field(default_factory=KVNormQuantizationConfig)
 
     def validate(self) -> None:
         if self.li_quantization not in (None, "mxfp4", "mxfp8", "fp8", "hif8"):

@@ -70,7 +70,9 @@ class MXQuantizeConfig(FakeQuantizeConfigBase):
         return _NPU_DTYPE_DICT[self.scale_dtype]
 
     def __post_init__(self):
-        assert self.block_size == 32, f"For MX formats, the block_size must be 32, block_size={self.block_size} passed."
+        assert self.block_size > 0 and self.block_size % 32 == 0, (
+            f"For MX formats, the block_size must be a positive multiple of 32, block_size={self.block_size} passed."
+        )
 
         assert self.elem_dtype in _SUPPORTED_MX_ELEM_DTYPES, (
             f"elem_dtype must be one of {_SUPPORTED_MX_ELEM_DTYPES}, got {self.elem_dtype}"
