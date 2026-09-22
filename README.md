@@ -8,7 +8,7 @@
 [![license](https://img.shields.io/badge/license-BSD_3--Clause-lightgrey.svg)](https://gitcode.com/cann/torchtitan-npu/tree/master/LICENSE)
 [![contributing](https://img.shields.io/badge/CONTRIBUTING-teal)](https://gitcode.com/cann/torchtitan-npu/blob/master/CONTRIBUTING.md)
 [![SIG](https://img.shields.io/badge/SIG-framework--adapter-yellow)](https://gitcode.com/cann/community/tree/master/CANN/sigs/framework-adapter)
-[![pypi](https://img.shields.io/badge/pypi-0.2.2.post1-blue)](https://pypi.org/project/torchtitan-npu/)
+[![pypi](https://img.shields.io/badge/pypi-0.2.2.post2-blue)](https://pypi.org/project/torchtitan-npu/)
 [![zread](https://img.shields.io/badge/Ask_Zread-_.svg?style=plastic&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff)](https://zread.ai/hicann/torchtitan-npu)
 
 </div>
@@ -44,7 +44,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 
 ---
 
-当前季度的规划见 `torchtitan-npu` [Roadmap](https://gitcode.com/cann/torchtitan-npu/issues/5)。欢迎访问。
+当前季度的规划见 `torchtitan-npu` [Roadmap](https://gitcode.com/cann/torchtitan-npu/issues/68)。欢迎访问。
 
 # 安装
 
@@ -54,6 +54,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 git clone https://gitcode.com/cann/torchtitan-npu.git
 cd torchtitan-npu
 git checkout master
+pip install -r requirements.txt
 pip install -e .
 ```
 
@@ -81,12 +82,39 @@ pip install -e .
     </tr>
   </thead>
   <tbody>
+    <!-- 训练模式 -->
+    <tr>
+      <td rowspan="4">训练模式</td>
+      <td>SFT 微调</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>多模态训练（<a href="examples/deepseek_v4_1/readme.md">图文</a>、<a href="examples/qwen3_5/readme.md">视频</a>）</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="docs/MTP.md">MTP</a></td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="docs/feature_guides/muon_optimizer.md">Muon 优化器（DistMuon / FlexShard）</a></td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
     <!-- 并行能力 -->
     <tr>
-      <td rowspan="3">并行能力</td>
+      <td rowspan="4">并行能力</td>
       <td>4D 并行 (FSDP2/TP/CP/PP)</td>
       <td>✅</td>
-      <td>❌</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>spmd_types / full_dtensor 权重切分</td>
+      <td>✅</td>
+      <td>✅（GraphTrainer 除外）</td>
     </tr>
     <tr>
       <td>专家并行 (EP)</td>
@@ -94,55 +122,104 @@ pip install -e .
       <td>✅</td>
     </tr>
     <tr>
-      <td>自定义 CP (DeepSeek-V3.2 CP/SDPA Ulysses CP)</td>
-      <td>❌</td>
+      <td>DeepEP（MoE dispatch/combine）</td>
+      <td>✅</td>
       <td>✅</td>
     </tr>
-    <!-- torch.compile -->
+    <!-- 图编译能力 -->
     <tr>
-      <td>torch.compile</td>
-      <td>torch.compile</td>
+      <td rowspan="2">图编译能力</td>
+      <td><a href="docs/feature_guides/torch_compile.md">torch.compile</a></td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="docs/feature_guides/deepseek_v4_graph_trainer.md">GraphTrainer 整图编译</a></td>
       <td>✅</td>
       <td>✅</td>
     </tr>
     <!-- 训练精度 -->
     <tr>
       <td rowspan="3">低精度训练</td>
-      <td><a href="docs/user-guides/quickstart.md#deepseek-v4-torchao-npu-低精度训练">MXFP8 低精度训练</a></td>
+      <td>MXFP4/MXFP8/Block FP8 低精度训练</td>
+      <td>❌（仅 MXFP8）</td>
+      <td>✅（Ascend 950）</td>
+    </tr>
+    <tr>
+      <td>HiFloat8 低精度训练</td>
+      <td>❌</td>
+      <td>✅（Ascend 950）</td>
+    </tr>
+    <tr>
+      <td>Attention KV 低精度训练</td>
+      <td>❌</td>
+      <td>✅（Ascend 950）</td>
+    </tr>
+    <!-- 权重与 Checkpoint -->
+    <tr>
+      <td rowspan="3">权重与 Checkpoint</td>
+      <td><a href="docs/developer_guides/checkpoint.md">分布式 Checkpoint（DCP）</a></td>
       <td>✅</td>
-      <td>✅（Ascend 950）</td>
+      <td>✅</td>
     </tr>
     <tr>
-      <td><a href="docs/user-guides/quickstart.md#deepseek-v4-torchao-npu-低精度训练">Block FP8 低精度训练</a></td>
-      <td>❌</td>
-      <td>✅（Ascend 950）</td>
+      <td><a href="docs/developer_guides/checkpoint.md">HF 权重加载与保存</a></td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <tr>
-      <td><a href="docs/user-guides/quickstart.md#deepseek-v4-torchao-npu-低精度训练">MXFP4 QAT</a></td>
-      <td>❌</td>
-      <td>✅（Ascend 950）</td>
+      <td>EMA 权重</td>
+      <td>✅</td>
+      <td>✅</td>
     </tr>
     <!-- 训练调试与监控 -->
     <tr>
       <td rowspan="2">训练调试与监控</td>
-      <td>分布式 Checkpoint</td>
+      <td><a href="docs/developer_guides/metrics_and_debugging.md">调试工具（Profiling、Memory Snapshot、指标解析）</a></td>
       <td>✅</td>
       <td>✅</td>
     </tr>
     <tr>
-      <td>调试工具</td>
+      <td>高可用（故障检测与弹性恢复）</td>
       <td>✅</td>
       <td>✅</td>
     </tr>
     <!-- 性能优化 -->
     <tr>
-      <td rowspan="2">性能优化</td>
+      <td rowspan="3">内存优化</td>
       <td><a href="docs/feature_guides/virtual_optimizer.md">Virtual Optimizer</a></td>
       <td>❌</td>
       <td>✅</td>
     </tr>
     <tr>
-      <td>NPU 融合算子适配</td>
+      <td>Swap Optimizer</td>
+      <td>❌</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>CPU offload（FSDP 参数、梯度、优化器状态）</td>
+      <td>✅</td>
+      <td>✅</td>
+    </tr>
+    <!-- 多语言算子 -->
+    <tr>
+      <td rowspan="4">多语言算子</td>
+      <td>AscendC 融合算子</td>
+      <td>❌</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td>Triton 融合算子</td>
+      <td>❌</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="torchtitan_npu/override/README.md">TileLang 融合算子</a></td>
+      <td>❌</td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="docs/feature_guides/fused_ops.md">PyPTO 融合算子</a></td>
       <td>❌</td>
       <td>✅</td>
     </tr>
@@ -151,25 +228,32 @@ pip install -e .
 
 # 项目结构
 
-`torchtitan-npu` 是 `torchtitan` 的 Ascend NPU 适配层，主要通过三类机制扩展上游能力：`override/` 使用配置级 `@override` 替换组件，并通过 `override.imports` 显式启用；`patches/` 补齐 PyTorch NPU backend 缺口，以及当前依赖版本尚未包含的临时上游能力；`extensions/` 提供 NPU 的扩展能力。模型实现与并行化策略放在 `models/`，CANN 和设备专属算子封装放在 `ops/`。
+`torchtitan-npu` 是 `torchtitan` 的 Ascend NPU 适配层，主要通过三类机制扩展上游能力：`override/` 使用配置级 `@override` 替换组件，并通过 `override.imports` 显式启用；`patches/` 补齐 PyTorch NPU backend 缺口，以及当前依赖版本尚未包含的临时上游能力；`extensions/` 提供 NPU 的扩展能力。模型实现与并行化策略放在 `models/`，CANN 和设备专属算子封装放在 `ops/`。此外，`config/` 提供配置注册与管理，`compile/` 提供编译期扩展，`distributed/` 提供 NPU 后端 HF32 控制。
 
 ```text
 torchtitan-npu/
 ├── torchtitan_npu/
-│   ├── models/                    # 模型与并行化实现等
-│   ├── override/
-│   │   ├── common/                # 模型无关的 NPU 组件替换
-│   │   ├── deepseek_v3_2/         # DeepSeek-V3.2 专属 override
-│   │   ├── deepseek_v4/           # DeepSeek-V4 专属 override
-│   │   └── qwen3_5/               # Qwen3.5 专属 override
-│   ├── patches/
-│   │   ├── torchtitan/            # 尚未进入当前上游版本的临时补丁
-│   │   └── workaround/            # NPU 运行时兼容处理
+│   ├── models/                    # 模型实现与并行化（DeepSeek-V3.2/V4/V4.1、Qwen3.5）
+│   ├── override/                  # 配置级组件替换，含 common 与各模型专属目录
+│   ├── patches/                   # 补齐 PyTorch NPU backend 缺口与临时上游能力
 │   ├── extensions/                # 随 package 导入自动生效的运行时扩展
+│   │   ├── components/            # 训练组件扩展（checkpoint/metrics 等）
+│   │   ├── novaswap/              # NovaSwap 显存交换扩展
+│   │   └── tools/                 # 工具扩展
+│   ├── config/                    # 配置注册与管理（configs/manager 等）
+│   ├── compile/                   # 编译期扩展（SDC checksum pass）
+│   ├── distributed/               # NPU 后端 HF32 控制（set_allow_hf32）
 │   ├── ops/                       # CANN 与 NPU 专属算子封装
-│   │   └── ascendc/               # AscendC 算子适配（导入时自动加载）
+│   │   ├── ascendc/               # AscendC 算子适配（导入时自动加载）
+│   │   ├── misc/                  # 杂项算子
+│   │   ├── pypto/                 # PyPTO 算子
+│   │   ├── tilelang/              # TileLang 融合算子
+│   │   └── triton/                # Triton 算子（MHC/GDN 等）
 │   ├── __init__.py                # 导入 package patch 与 extension
 │   └── train.py                   # 训练入口
+├── examples/                      # 各模型训练示例脚本与说明
+├── experiments/                   # 实验性适配包（torchao-npu 量化）
+├── interfaces/                    # 量化接入接口（torchao_converter）
 ├── scripts/                       # 训练与仓库辅助脚本
 ├── tests/                         # 单元测试和测试数据
 └── docs/                          # 使用指南与设计说明
@@ -182,7 +266,19 @@ torchtitan-npu/
 
 ---
 
-### 待测试
+### 2026.09
+
+System: Ascend 950，图模式
+
+| 模型 | NPU 数 | 量化 | GBS | 序列长度 | FSDP | TP | PP | CP | EP | 单卡吞吐 (tokens/s) | step time | BF16 MFU |
+| :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | MXFP8 | 512 | 4k | 64 | 1 | 1 | 1 | 64 | 2126 | 15.42 s | / |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | MXFP8 | 64 | 64k | 8 | 1 | 1 | 8 | 64 | 1501.6 | 43.64 s | / |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 128 | MXFP8 | 8 | 1M | 1 | 1 | 1 | 128 | 128 | 1325 | 49.46 s | / |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | BF16 | 512 | 4k | 64 | 1 | 1 | 1 | 64 | 1603 | 20.44 s | 28.81% |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | BF16 | 64 | 64k | 8 | 1 | 1 | 8 | 64 | 1421 | 46.12 s | 32.87% |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | QAT | 512 | 4k | 64 | 1 | 1 | 1 | 64 | 1576 | 20.79 s | / |
+| [DeepSeek-V4-Flash](torchtitan_npu/models/deepseek_v4/config_registry.py) | 64 | QAT | 64 | 64k | 8 | 1 | 1 | 8 | 64 | 1532 | 42.78 s | / |
 
 
 # 免责声明
