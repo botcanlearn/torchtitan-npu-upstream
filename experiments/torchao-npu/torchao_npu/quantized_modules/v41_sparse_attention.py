@@ -4,10 +4,21 @@
 # LICENSE file in the root directory of this source tree.
 """V4.1 sparse attention with FP8 SWA fake quantization.
 
-Main KV arrives already fake-quantized by the source Compressor and is shared
-by all consuming layers. Forward and backward use the same fake-quantized
-main KV and SWA values. SWA gradients pass directly to the original input
-with an identity STE.
+A copy of ``torchtitan_npu.override.deepseek_v4_1.sparse_attn.ascendc`` with the
+quantization inserted: the sliding-window KV is fake-quantized to FP8 (MXFP8,
+group 32) on the way into the kernel, and the same quantized tensor is replayed in
+the backward so both passes see identical operands.  Its gradient passes straight
+through to the original input, i.e. the Q/DQ is an identity STE.
+
+The main KV is *not* quantized here.  It arrives already fake-quantized: the
+source Compressor does the Q/DQ once, on the layer that produces it, and every
+consuming layer reuses that tensor (``QuantCompressor``).  Quantizing on
+consumption instead would repeat the work on all 40 layers rather than the four
+that own a compressor, and would quantize a second time on top of it.
+
+Everything else -- the TND layout, the metadata frames, the document-local
+selection and the kernel options -- is the port's behaviour, deliberately kept
+line-for-line so the quantized stack and the unquantized one cannot drift.
 """
 
 __all__ = ["QuantV41SparseAttention"]
@@ -23,16 +34,31 @@ try:
 except (AttributeError, TypeError):
     _IS_A5 = False
 
+# The SWA branch's quantization: FP8 with the group size the FP4 main-KV cache does not
+# use, because the two streams carry different precision budgets.
+_SWA_QUANT_GROUP_SIZE = 32
+_SWA_QUANT_MODE = "mxfp8_bf16"
 
-def _kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ratio, window_size):
+
+def _kernel_options(attention_masks, ratio, window_size):
+    """The kernel options, read off the metadata's frames.
+
+    Both the metadata call and the main call take these, and they must agree
+    option-for-option; reading one source is what makes that structural rather than a
+    convention two call sites have to keep in step.
+    """
+    # Only ratio 0 has no compressed axis, and the kernels spell that ``None``.  Every
+    # other ratio has one -- at ratio 1 it is the row itself and its frame carries no
+    # residual, which is exactly what the kernel wants there.
+    compressed = attention_masks.kernel.frame_for(ratio) if ratio > 0 else None
     return dict(
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_ori_kv=cu_seqlens_q,
-        cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-        cmp_residual_kv=cmp_residual_kv,
+        cu_seqlens_q=attention_masks.kernel.q.cu_seqlens,
+        cu_seqlens_ori_kv=attention_masks.kernel.swa_k.cu_seqlens,
+        cu_seqlens_cmp_kv=None if compressed is None else compressed.cu_seqlens,
+        cmp_residual_kv=None if compressed is None else compressed.residual,
         cmp_ratio=max(ratio, 1),
         ori_mask_mode=4,
-        cmp_mask_mode=0 if _IS_A5 and cu_seqlens_cmp_kv is None else 3,
+        cmp_mask_mode=0 if _IS_A5 and compressed is None else 3,
         ori_win_left=window_size - 1,
         ori_win_right=0,
         layout_q="TND",
@@ -40,31 +66,44 @@ def _kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ratio, win
     )
 
 
+def _kernel_geometry(topk_indices, cmp_k):
+    """The geometry both kernel calls are built with.
+
+    K can differ between the candidate and indexer paths, so it comes off the supplied
+    shape rather than the LI configuration's top-k.
+    """
+    return dict(
+        ori_topk=0,
+        cmp_topk=0 if topk_indices is None else topk_indices.shape[-1],
+        has_ori_kv=True,
+        has_cmp_kv=cmp_k is not None,
+    )
+
+
 class _SparseMLA(torch.autograd.Function):
+    """The port's SMLAG with the SWA input fake-quantized.
+
+    Identical to the override's Function except that ``swa_k`` is Q/DQ'd before the
+    kernel call and the *quantized* tensor is what gets saved, so the backward replays
+    the same operand the forward used.  The quantized tensor's gradient is the gradient
+    the originals would have received, which is the identity STE.
+    """
+
     @staticmethod
     def forward(  # pyrefly: ignore [bad-override]
         ctx,
         q,
         swa_k,
         cmp_k,
-        cmp_sparse_indices,
+        topk_indices,
         sinks,
-        cu_seqlens_q,
-        cu_seqlens_cmp_kv,
-        cmp_residual_kv,
+        attention_masks,
         softmax_scale,
         ratio,
         window_size,
     ):
-        options = _kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ratio, window_size)
-        # K can differ between the candidate and indexer paths. Use the actual
-        # supplied shape rather than assuming the LI configuration's top-k.
-        geometry = dict(
-            ori_topk=0,
-            cmp_topk=0 if cmp_sparse_indices is None else cmp_sparse_indices.shape[-1],
-            has_ori_kv=True,
-            has_cmp_kv=cmp_k is not None,
-        )
+        options = _kernel_options(attention_masks, ratio, window_size)
+        geometry = _kernel_geometry(topk_indices, cmp_k)
         smla_metadata = sparse_flash_mla_metadata(
             q.shape[1],
             1,
@@ -74,15 +113,12 @@ class _SparseMLA(torch.autograd.Function):
             **options,
             **geometry,
         )
-        smla_grad_metadata = sparse_flash_mla_grad_metadata(q.shape[1], 1, q.shape[2], **options, **geometry)
-
-        qdq_swa_k = fake_quantize_mx_bf16(swa_k, quant_group_size=32, quant_mode="mxfp8_bf16")
-
+        qdq_swa_k = fake_quantize_mx_bf16(swa_k, quant_group_size=_SWA_QUANT_GROUP_SIZE, quant_mode=_SWA_QUANT_MODE)
         output, lse = torch.ops.cann_ops_transformer.sparse_flash_mla(
             q,
             ori_kv=qdq_swa_k,
             cmp_kv=cmp_k,
-            cmp_sparse_indices=cmp_sparse_indices,
+            cmp_sparse_indices=topk_indices,
             ori_block_table=None,
             cmp_block_table=None,
             sinks=sinks,
@@ -91,21 +127,21 @@ class _SparseMLA(torch.autograd.Function):
             return_softmax_lse=True,
             **options,
         )
-
         ctx.save_for_backward(
             q,
             qdq_swa_k,
             cmp_k,
-            cmp_sparse_indices,
+            topk_indices,
             sinks,
-            cu_seqlens_q,
-            cu_seqlens_cmp_kv,
-            cmp_residual_kv,
             output,
             lse,
-            smla_grad_metadata,
         )
         ctx.softmax_scale, ctx.ratio, ctx.window_size = softmax_scale, ratio, window_size
+        # The mask is a dataclass, so ``save_for_backward`` cannot take it; it is a
+        # context attribute instead.  That is not extra retention: it holds the same
+        # boundary tensors the graph already keeps for the backward, and the node -- and
+        # with it this reference -- is released when that backward has run.
+        ctx.attention_masks = attention_masks
         # The teacher consumes the LSE as a detached constant.
         ctx.mark_non_differentiable(lse)
         return output, lse
@@ -113,30 +149,26 @@ class _SparseMLA(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output, grad_lse):  # pyrefly: ignore [bad-override]
         del grad_lse  # the LSE is a teacher signal, never a loss input
-        # A single read of the saved tensors: eager AC recomputation must see
-        # the same native metadata the forward produced.
-        (
-            q,
-            qdq_swa_k,
-            cmp_k,
-            cmp_sparse_indices,
-            sinks,
-            cu_seqlens_q,
-            cu_seqlens_cmp_kv,
-            cmp_residual_kv,
-            output,
-            lse,
-            smla_grad_metadata,
-        ) = ctx.saved_tensors
+        # Nothing but the operand tensors is saved, and ``swa_k`` here is the quantized
+        # one -- the backward has to differentiate the same graph the forward built.
+        q, swa_k, cmp_k, topk_indices, sinks, output, lse = ctx.saved_tensors
+        options = _kernel_options(ctx.attention_masks, ctx.ratio, ctx.window_size)
+        smla_grad_metadata = sparse_flash_mla_grad_metadata(
+            q.shape[1],
+            1,
+            q.shape[2],
+            **options,
+            **_kernel_geometry(topk_indices, cmp_k),
+        )
         dq, dswa_k, dcmp_k, dsinks, _, _ = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
             q,
             grad_output.contiguous(),
             output,
             lse,
-            ori_kv=qdq_swa_k,
+            ori_kv=swa_k,
             cmp_kv=cmp_k,
             ori_sparse_indices=None,
-            cmp_sparse_indices=cmp_sparse_indices,
+            cmp_sparse_indices=topk_indices,
             sinks=sinks,
             metadata=smla_grad_metadata,
             seqused_q=None,
@@ -145,27 +177,23 @@ class _SparseMLA(torch.autograd.Function):
             ori_topk_length=None,
             cmp_topk_length=None,
             softmax_scale=ctx.softmax_scale,
-            **_kernel_options(cu_seqlens_q, cu_seqlens_cmp_kv, cmp_residual_kv, ctx.ratio, ctx.window_size),
+            **options,
         )
-        # SWA Q/DQ runs inside this custom forward; apply its identity STE here.
-        return dq, dswa_k, dcmp_k if cmp_k is not None else None, None, dsinks, None, None, None, None, None, None
-
-
-def _localize_indices(
-    topk_indices: torch.Tensor, doc_ids_BL: torch.Tensor, cu_seqlens_cmp_kv: torch.Tensor
-) -> torch.Tensor:
-    """Global compressed-pool coordinates into the query's own document-local grid.
-
-    Entries outside the query's document become ``-1``; the caller compacts them.
-    The shared ``topk_indices``/``topk_scores`` are never modified in place.
-    """
-    starts = cu_seqlens_cmp_kv.to(dtype=torch.long, device=topk_indices.device)
-    doc_ids = doc_ids_BL.reshape(-1)
-    doc_start = starts[doc_ids].unsqueeze(-1)
-    doc_end = starts[doc_ids + 1].unsqueeze(-1)
-    indices = topk_indices.reshape(-1, topk_indices.shape[-1]).to(torch.long)
-    valid = (indices >= doc_start) & (indices < doc_end)
-    return torch.where(valid, indices - doc_start, -1).view_as(topk_indices)
+        # One gradient per forward input, in order: (q, swa_k, cmp_k, topk_indices,
+        # sinks, attention_masks, softmax_scale, ratio, window_size).  PyTorch silently
+        # ignores extra trailing entries, so a count mismatch here would not raise -- it
+        # would quietly starve a later input, which is why the list is spelled out.
+        return (
+            dq,
+            dswa_k,
+            dcmp_k if cmp_k is not None else None,
+            None,
+            dsinks,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class QuantV41SparseAttention(torch.nn.Module):
@@ -185,73 +213,29 @@ class QuantV41SparseAttention(torch.nn.Module):
         self,
         q,
         swa_k,
-        cmp_k,
-        *,
-        attention_masks,
-        topk_indices,
         attn_sink,
-        wants_teacher,
+        attention_masks,
+        *,
+        cmp_k=None,
+        topk_indices=None,
     ):
-        metadata = attention_masks
-        ratio = self.compress_ratio
-        if ratio not in (0, 1, 2):
-            raise ValueError(f"V4.1 fused sparse attention supports ratios 0/1/2, got {ratio}")
-        if q.ndim != 4 or q.shape[0] != 1 or swa_k.shape != (1, q.shape[1], q.shape[-1]):
-            raise ValueError("V4.1 SMLA requires CP1 packed Q [1,S,H,D] and original KV [1,S,D]")
-        if q.shape[-1] != 512:
-            raise ValueError("mixed quant V4.1 SMLA requires head_dim=512 with 64 trailing RoPE channels")
-        if attn_sink is None:
-            raise ValueError("V4.1 SMLA requires per-head attention sinks")
-        if q.dtype != torch.bfloat16 or swa_k.dtype != q.dtype:
-            raise ValueError("V4.1 SMLA requires BF16 Q/KV; no implicit precision conversion")
-        cu_seqlens_q = metadata.cu_seq_q
-        if cu_seqlens_q is None:
-            raise ValueError("V4.1 SMLA requires the packed document boundaries (cu_seq_q metadata)")
-        cmp_k_tnd = cu_seqlens_cmp_kv = cmp_residual_kv = cmp_sparse_indices = None
-        if ratio == 0:
-            if cmp_k is not None:
-                raise ValueError("window-only ratio 0 must not receive a second KV stream")
-        else:
-            if (
-                cmp_k is None
-                or cmp_k.ndim != 3
-                or cmp_k.shape[0] != 1
-                or cmp_k.shape[-1] != q.shape[-1]
-                or cmp_k.dtype != q.dtype
-            ):
-                raise ValueError("ratio 1/2 requires a BF16 second KV stream [1,N,D]")
-            if topk_indices is None:
-                raise ValueError("ratio 1/2 fused attention requires the model's selection indices")
-            if ratio == 1 and cmp_k.shape != swa_k.shape:
-                raise ValueError("ratio 1 requires full-resolution shared KV")
-            # Per-document alignment makes every document's compressed length
-            # exactly cu_seqlens_q // ratio, with no residual groups to carry.
-            cu_seqlens_cmp_kv = cu_seqlens_q // ratio
-            cmp_residual_kv = torch.zeros_like(cu_seqlens_cmp_kv[1:]) if ratio > 1 else None
-            cmp_k_tnd = cmp_k.flatten(0, 1)
-            # TND kernels consume document-local indices; cu_seqlens_cmp_kv supplies the
-            # document offsets. Preserve the reference cross-document mask.
-            local = _localize_indices(topk_indices, metadata.doc_ids_BL, cu_seqlens_cmp_kv)
-            # Packed documents can leave leading/interleaved invalid slots;
-            # compact them without changing the selected keys or their order.
-            order = (local < 0).to(torch.int32).argsort(dim=-1, stable=True)
-            cmp_sparse_indices = local.gather(-1, order).flatten(0, 1).to(torch.int32).unsqueeze(1).contiguous()
-            cmp_k_tnd = cmp_k_tnd.unsqueeze(1).contiguous()
-        output, lse = _SparseMLA.apply(
-            q.flatten(0, 1).contiguous(),
-            swa_k.flatten(0, 1).unsqueeze(1).contiguous(),
-            cmp_k_tnd,
-            cmp_sparse_indices,
+        # The selection arrives document-local from the fused selector, which chose it
+        # with the same kernel: the two share one coordinate system, and ``-1`` is how
+        # both spell an unused slot.  Order is left exactly as it came -- the selector
+        # already put it in position order, and the teacher's slot positions follow that
+        # order.  Only the layout is translated: the model carries ``[B, L, 1, K]`` while
+        # a TND kernel wants ``[T, N2, K]``.
+        # The port returns the attention output alone: the teacher's LSE never leaves
+        # SMLAG, which publishes the marginal on ``topk_scores``' gradient instead.
+        output, _lse = _SparseMLA.apply(
+            q.squeeze(0),
+            swa_k.squeeze(0).unsqueeze(1),
+            None if cmp_k is None else cmp_k.squeeze(0).unsqueeze(1),
+            None if topk_indices is None else topk_indices.reshape(-1, 1, topk_indices.shape[-1]),
             attn_sink.float(),
-            cu_seqlens_q,
-            cu_seqlens_cmp_kv,
-            cmp_residual_kv,
+            attention_masks,
             self.softmax_scale,
-            ratio,
+            self.compress_ratio,
             self.window_size,
         )
-        out = output.reshape_as(q)
-        if not wants_teacher:
-            return out, None
-        # The kernel returns the LSE as [1, S, H]; the teacher reads [B, H, L].
-        return out, lse.transpose(1, 2)
+        return output.reshape_as(q)

@@ -24,23 +24,22 @@ branch to the caller).  ``doc_ids`` is not an attention input: the indexer deriv
 entry-axis isolation from it while building the precomputed selection masks.  ``positions``
 is a per-forward argument, not metadata, and only drives RoPE.
 
-The attention is also where the indexer's distillation loss is applied.  The operator
-returns the per-head log-sum-exp of the full softmax (window, selected compressed entries
-and sink) and the student logits arrive as an input; the loss itself, including the
-teacher it rebuilds from them, lives on ``IndexerDistillLoss``.  The loss's inputs are
-detached at that call site: the distillation must train the indexer and nothing else.
-A query row with no reachable compressed entry is dropped from the distillation instead
-of contributing.
+The indexer's teacher belongs to a port, not to this core.  It is the operator's per-head
+log-sum-exp of the full softmax (window, selected compressed entries and sink), turned
+into the raw marginal mass ``p`` and emitted on ``topk_scores``' gradient, which the
+indexer's SLIKG backward consumes to train the indexer.  A query row with no reachable
+compressed entry contributes nothing.  Nothing in this file holds a loss.
 
 The projections use the rope module with the site's un-rotated prefix width.
-The reference forward owns Attention Gym attention and teacher reconstruction;
-fused ports replace the complete inner-attention forward.
+The reference forward owns Attention Gym attention; fused ports replace the complete
+inner-attention forward.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
-from attn_gym.sparse.selected_attention import AuxRequest, selected_attention
+from attn_gym.sparse.selected_attention import selected_attention
 from torch import nn
 from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.linear import Linear
@@ -48,11 +47,56 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 
-from torchtitan_npu.patches.torchtitan.models.common.aux_loss import LoggedAuxLoss
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .compressor import Compressor
 from .indexer import HierarchicalIndexer
+
+
+def _check_indexer_teacher_pair(
+    attn_cfg: "CompressedSparseInnerAttention2.Config", indexer_cfg: HierarchicalIndexer.Config
+) -> None:
+    """The fused indexer teacher is a pair: one port emits it, one consumes it.
+
+    ``topk_scores`` is carried only between the two kernel backwards.  The emitting
+    port writes the raw teacher on ``topk_scores``' gradient; the consuming selector
+    is the only thing that ever reads that edge.  Fusing one side alone therefore
+    breaks the objective -- silently, since neither half raises on its own -- so the
+    mismatch is rejected here instead of being discovered from a flat training curve.
+
+    Neither half is a usable fallback, and this check is the only thing that keeps
+    them from being reached:
+
+    - Selector without the fused core: ``topk_scores``' gradient is ``None``, so SLIKG
+      returns zero gradient and the indexer never updates.
+    - Fused core without the fused selector: the reference selector does pick the
+      teacher up off that edge, but it applies attention-level marginals to summed
+      per-head indexer logits.  The two sides are not the same quantity, so the
+      resulting training signal is wrong rather than merely different.  That path is
+      deliberately left unfixed -- it is unreachable while this check is in place.
+
+    Both halves are compile-time facts on the config classes, so this runs on the
+    configs rather than on the built modules: ``Module`` does not retain its config.
+    A ratio-0 layer is skipped: it has no second KV stream, so neither half has an
+    edge to offer or consume.
+    """
+    if attn_cfg.compress_ratio == 0:
+        return
+    fused_core = getattr(type(attn_cfg), "provides_indexer_teacher", False)
+    fused_selector = getattr(type(indexer_cfg.selector), "consumes_indexer_teacher", False)
+    if fused_core == fused_selector:
+        return
+    if fused_core:
+        active, missing = "sparse_attn.asc", "lightning_indexer.asc"
+        consequence = "the reference selector would take the teacher onto summed per-head logits"
+    else:
+        active, missing = "lightning_indexer.asc", "sparse_attn.asc"
+        consequence = "topk_scores would carry no teacher"
+    raise ValueError(
+        f"A fused V4.1 attention core and a fused selector must be enabled together: {active} is "
+        f"active without {missing}, so {consequence} and the indexer cannot be trained correctly. "
+        "Enable both or neither. See torchtitan_npu/override/README.md#deepseek-v41."
+    )
 
 
 class CompressedSparseInnerAttention2(Module):
@@ -64,64 +108,64 @@ class CompressedSparseInnerAttention2(Module):
     the layer's verified ratio (0 window-only, 1 a full-resolution second KV stream,
     2 the compressed shared KV): a fused port needs it to translate the metadata's
     document boundaries into its kernel layout, so it is never guessed from shapes.
+
+    A port that can produce the indexer's teacher replaces this forward wholesale and
+    emits it on ``topk_scores``' gradient; this core has no kernel to make one.  Such a
+    port's :class:`Config` sets ``provides_indexer_teacher``, which is what
+    :func:`_check_indexer_teacher_pair` pairs against the selector's
+    ``consumes_indexer_teacher``.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        # Declared on the config, not the module: the pair check runs on the config
+        # tree before anything is built, and ``Module`` does not keep its config.
+        provides_indexer_teacher: ClassVar[bool] = False
+
         window_size: int
         softmax_scale: float
         # The layer's compression ratio, carried explicitly for the fused ports.
         compress_ratio: int
-        # Indexer distillation loss, attached only on layers that consume the selection
-        # (``compress_ratio > 0`` with an index source at or before them).
-        aux_loss: LoggedAuxLoss.Config | None = None
-        score_gradient: str = "logits"
 
     def __init__(self, config: Config):
         super().__init__()
         self.window_size = config.window_size
         self.softmax_scale = config.softmax_scale
         self.compress_ratio = config.compress_ratio
-        if config.score_gradient not in ("logits", "teacher"):
-            raise ValueError(f"Unknown scores gradient mode: {config.score_gradient}")
-        self.score_gradient = config.score_gradient
-        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def forward(
         self,
         q: torch.Tensor,
         swa_k: torch.Tensor,
-        cmp_k: torch.Tensor | None = None,
-        *,
+        attn_sink: torch.Tensor,
         attention_masks,
+        *,
+        cmp_k: torch.Tensor | None = None,
         topk_indices: torch.Tensor | None = None,
         topk_scores: torch.Tensor | None = None,
-        attn_sink: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
             q: Queries of shape ``[B, L, H, Dk]``.
             swa_k: Sliding-window KV of shape ``[B, L, Dk]``, shared across heads.
-            cmp_k: Shared compressed KV of shape ``[B, N, Dk]``.
-            attention_masks: The forward's varlen metadata; the operator reads its
-                document ids for the sliding-window branch and the loss reads its
-                valid-token marks when the loader produced any.
-            topk_indices: Selected compressed entries ``[B, L, K]``, ``-1`` for unused.
-            topk_scores: Student logits at those entries ``[B, L, K]``.
             attn_sink: Per-head sink logits of shape ``[H]``.
+            attention_masks: The forward's varlen metadata; the operator reads its
+                document ids for the sliding-window branch.
+            cmp_k: Shared compressed KV of shape ``[B, N, Dk]``.
+            topk_indices: Selected compressed entries ``[B, L, K]``, ``-1`` for unused.
+            topk_scores: Accepted for the forward contract and unused here; it exists so
+                a port that produces the indexer's teacher has somewhere to carry it.
 
         Returns:
             Attention output of shape ``[B, L, H, Dk]``.
+
+        This core is the plain reference: it computes attention and nothing else.  The
+        indexer's distillation objective is not here -- it needs this operator's softmax
+        denominator, and a port that can produce it emits the teacher on ``topk_scores``'
+        gradient instead of returning it.
         """
         if (cmp_k is None) != (topk_indices is None):
             raise ValueError("cmp_k and topk_indices must be provided together.")
 
-        # The loss runs only while training: in eval there is nothing to distill and the
-        # extra ``lse`` the teacher needs would be dead output.  A compress layer that
-        # consumes the selection always has the teacher's other inputs -- ``cmp_k`` holds
-        # the scored entries and an index source precedes it -- which is exactly when the
-        # loss is attached.
-        aux_loss = self.aux_loss
-        wants_teacher = self.training and aux_loss is not None and cmp_k is not None
         batch, num_tokens, _, head_dim = q.size()
         local_kv_B1LD = swa_k.reshape(batch, 1, num_tokens, head_dim)
         if cmp_k is not None:
@@ -141,34 +185,15 @@ class CompressedSparseInnerAttention2(Module):
             sparse_kv_B1ND,
             kv_indices_BLK,
             attention_sink=attn_sink,
-            doc_ids=attention_masks.doc_ids_BL,
+            doc_ids=attention_masks.ref.doc_ids_BL,
             sliding_window_size=self.window_size,
             scale=self.softmax_scale,
             # TODO: run the fused kernels once they validate this path; ``impl`` is the
             # pinned attn-gym 0.0.9 argument, ``"reference"`` its eager PyTorch path.
             impl="reference",
-            return_aux=AuxRequest(lse=True) if wants_teacher else None,
         )
-        if not wants_teacher:
-            assert isinstance(result, torch.Tensor)
-            return result.transpose(1, 2)
-        assert isinstance(result, tuple)
-        attn_BHLD, aux = result
-        attn_BLHD, lse_BHL = attn_BHLD.transpose(1, 2), aux.lse
-        # ``wants_teacher`` paired cmp_k with topk_indices, so all three are present.
-        assert aux_loss is not None
-        assert lse_BHL is not None
-        # The teacher's sources are constants: the distillation must train the indexer and
-        # nothing else, and ``topk_scores`` is the one live input, carrying the gradient
-        # that trains it.  ``lse`` arrives as ``[B, H, L]``; the loss reads ``[B, L, H]``.
-        return aux_loss(
-            q.detach(),
-            cmp_k.detach(),
-            topk_indices,
-            lse_BHL.transpose(1, 2).detach(),
-            topk_scores,
-            carrier=attn_BLHD,
-        )
+        assert isinstance(result, torch.Tensor)
+        return result.transpose(1, 2)
 
 
 class Attention(BaseAttention):
@@ -220,6 +245,7 @@ class Attention(BaseAttention):
         self.compressor = cfg.compressor.build()
         self.indexer = cfg.indexer.build()
         self.inner_attention = cfg.inner_attention.build()
+        _check_indexer_teacher_pair(cfg.inner_attention, cfg.indexer)
 
     def forward(
         self,
@@ -280,11 +306,11 @@ class Attention(BaseAttention):
         o = self.inner_attention(
             q,
             swa_k,
-            cmp_k if uses_cmp else None,
-            attention_masks=attention_masks,
+            self.attn_sink,
+            attention_masks,
+            cmp_k=cmp_k if uses_cmp else None,
             topk_indices=topk_indices if uses_cmp else None,
             topk_scores=topk_scores if uses_cmp else None,
-            attn_sink=self.attn_sink,
         )
         o = self.rope(o, positions=positions, inverse=True)
 

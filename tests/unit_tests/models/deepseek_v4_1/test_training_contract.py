@@ -49,11 +49,6 @@ def test_full_ac_preserves_image_routing(monkeypatch, with_engram):
         if layer.engram is not None:
             layer.engram.table.vocab_size = 64
     config.vocab_size = 64
-    # The trainer's update_from_config fills the aux-loss denominators before the run.
-    from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
-
-    for _, loss_cfg, _, _ in config.traverse(IndexerDistillLoss.Config):
-        loss_cfg.global_batch_size = 1
     config.tok_embeddings.num_embeddings = 64
     config.lm_head.out_features = 64
     with torch.random.fork_rng(devices=[]):

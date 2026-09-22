@@ -14,71 +14,78 @@ from torchtitan_npu.models.deepseek_v4_1.model import DeepSeekV41Model
 from torchtitan_npu.override.deepseek_v4_1.sparse_attn import ascendc
 
 
-def _metadata(positions_1d: torch.Tensor):
-    """Build the metadata through the model's own construction.
+def _metadata(bounds: list[int], *, compress_ratios: tuple[int, ...] = (1, 2)):
+    """Build the metadata for one packed row of these document boundaries, via the model.
 
-    ``get_attention_masks`` only reads the model's ratio table off the
-    instance (its selection-mask precompute), so a minimal owner carrying
-    the ratios exercises the real logic instead of re-deriving it here.
+    The test states the boundaries it wants to exercise; the positions that produce them
+    are rebuilt here, so the metadata comes from the model's own builder rather than being
+    hand-rolled.  One ``arange`` per document, concatenated, is what a packed loader emits.
     """
+    positions = torch.cat([torch.arange(end - begin) for begin, end in pairwise(bounds)]).unsqueeze(0)
 
     class _ModelOwner:
-        compress_ratios = (1, 2)
-        get_attention_masks = DeepSeekV41Model.get_attention_masks
+        # ``get_attention_masks`` reads only the ratio table off the instance.
+        pass
 
-    return _ModelOwner().get_attention_masks(positions_1d.unsqueeze(0))
+    owner = _ModelOwner()
+    owner.compress_ratios = compress_ratios
+    return DeepSeekV41Model.get_attention_masks(owner, positions)
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("bounds", [[0, 8], [0, 4, 8]], ids=["single-doc", "two-docs"])
 def test_kernel_receives_document_local_indices(monkeypatch, ratio, bounds):
-    length = bounds[-1]
-    positions = torch.cat([torch.arange(end - begin) for begin, end in pairwise(bounds)])
-    metadata = _metadata(positions)
-    assert torch.equal(metadata.cu_seq_q, torch.tensor(bounds, dtype=torch.int32))
-    # The compressed boundary is the query boundary divided by the ratio: exact
-    # only when a document length is a multiple of the ratio, which nothing
-    # enforces.
-    cu_cmp = metadata.cu_seq_q // ratio
+    """The kernel gets the selection as the selector made it: document-local, in TND layout.
 
-    # Model indices are global compressed-pool coordinates, -1 for unused
-    # slots: another document's entry, the first/last valid entry, an unused
-    # slot and an exclusive-end index.
+    Nothing about the *values* is translated -- the fused selector and this port share one
+    coordinate system, and the port leaves the order alone because the teacher's slot
+    positions follow it.  The layout is translated: the model carries ``[B, L, 1, K]`` and
+    a TND kernel wants ``[T, N2, K]``.
+    """
+    length = bounds[-1]
+    metadata = _metadata(bounds)
+    assert torch.equal(metadata.kernel.q.cu_seqlens, torch.tensor(bounds, dtype=torch.int32))
+    cu_cmp = metadata.kernel.frame_for(ratio).cu_seqlens
+
+    # Document-local indices, -1 for unused slots, interleaved: another document's first
+    # entry, the first/last own entry, an unused slot and an exclusive-end index -- the
+    # last two are a document's own first entries repeated, so they are inert either way.
     indices = torch.empty((1, length, 5), dtype=torch.int32)
-    expected = torch.empty((length, 1, 5), dtype=torch.int32)
     for doc, (begin, end) in enumerate(pairwise(bounds)):
         start, stop = int(cu_cmp[doc]), int(cu_cmp[doc + 1])
-        foreign = 0 if start else int(cu_cmp[-1])
-        indices[0, begin:end] = torch.tensor([foreign, start, -1, stop - 1, stop])
-        last = stop - start - 1
-        # Invalid slots compact stably to the back; valid keys keep their order.
-        expected[begin:end, 0] = torch.tensor([0, last, -1, -1, -1])
+        own_last = stop - start - 1
+        indices[0, begin:end] = torch.tensor([0, -1, own_last, stop - start, stop])
 
     calls = []
 
-    def kernel(q, original, shared, local_indices, *args):
-        calls.append(local_indices)
+    def kernel(q, original, shared, selection, *args):
+        calls.append(selection)
         return torch.zeros_like(q), torch.zeros((1, q.shape[0], q.shape[1]))
 
     monkeypatch.setattr(ascendc._SparseMLA, "apply", kernel)
-    attention = ascendc.AscV41SparseAttention.Config(
-        window_size=2, softmax_scale=0.5, compress_ratio=ratio, aux_loss=None
-    ).build()
+    attention = ascendc.AscV41SparseAttention.Config(window_size=2, softmax_scale=0.5, compress_ratio=ratio).build()
     q = torch.zeros((1, length, 2, 4), dtype=torch.bfloat16)
     topk_before = indices.clone()
     out = attention(
         q,
         torch.zeros((1, length, 4), dtype=torch.bfloat16),
-        torch.zeros((1, int(cu_cmp[-1]), 4), dtype=torch.bfloat16),
-        attention_masks=metadata,
+        torch.zeros(2),
+        metadata,
+        cmp_k=torch.zeros((1, int(cu_cmp[-1]), 4), dtype=torch.bfloat16),
         topk_indices=indices,
-        attn_sink=torch.zeros(2),
+        # A training-mode layer with a compressed pool carries the teacher on this
+        # tensor's gradient, so the port requires the selection's student logits.
+        topk_scores=torch.zeros((1, length, indices.shape[-1]), dtype=torch.float32),
     )
     assert out.shape == q.shape
     assert len(calls) == 1
-    assert calls[0].is_contiguous()
-    torch.testing.assert_close(calls[0], expected, rtol=0, atol=0)
-    # The model's global indices are consumed, never rewritten in place.
+    # The kernel receives the selection verbatim: this port shares the selector's
+    # coordinate system and does not translate or reorder it, so ``-1`` stays where the
+    # selector left it.  A reorder here would permute the indices without permuting the
+    # logits the teacher is scattered back onto.
+    # ``[B, L, 1, K]`` in, ``[T, 1, K]`` at the kernel.
+    torch.testing.assert_close(calls[0], indices.reshape(-1, 1, indices.shape[-1]), rtol=0, atol=0)
+    # ... and never rewrites the caller's tensor in place.
     torch.testing.assert_close(indices, topk_before, rtol=0, atol=0)
 
 
@@ -94,8 +101,8 @@ def test_backward_routes_kernel_gradients_and_ignores_the_lse_gradient(monkeypat
     remainder = torch.zeros(1, dtype=torch.int32) if with_shared else None
     meta, lse = torch.tensor([7]), torch.zeros(4, 2)
     forward_args = {}
-    monkeypatch.setattr(ascendc, "sparse_flash_mla_metadata", lambda *a, **kw: meta)
-    monkeypatch.setattr(ascendc, "sparse_flash_mla_grad_metadata", lambda *a, **kw: meta)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_metadata", lambda *a, **kw: meta)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad_metadata", lambda *a, **kw: meta)
 
     def forward(q, **kwargs):
         forward_args.update(kwargs)
@@ -130,22 +137,19 @@ def test_backward_routes_kernel_gradients_and_ignores_the_lse_gradient(monkeypat
 
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla", forward)
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad", backward)
+    # The boundary triples are no longer arguments: they come out of the metadata.
     out, returned_lse = ascendc._SparseMLA.apply(
         q,
         original,
         shared,
         indices,
         sink,
-        cu,
-        cmp_cu,
-        remainder,
+        _metadata([0, 4]),  # attention_masks: the frames the kernels grid
         0.5,
         2 if with_shared else 0,
         2,
-        None,
-        None,
-        "logits",
-        None,
+        None,  # topk_scores: no teacher carrier in this test
+        False,  # wants_teacher
     )
     # The LSE passes through as a detached teacher signal.
     assert returned_lse is lse

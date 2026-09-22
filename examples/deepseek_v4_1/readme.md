@@ -1,6 +1,6 @@
 ### V4.1 独立训练基线与融合栈
 
-V4.1 的模型、图像路由、压缩 attention、metadata 和并行化均由 `torchtitan_npu/models/deepseek_v4_1` 持有，不依赖 V4 模型或其专属 override。模型默认算子是 Attention Gym 的 eager `selected_attention`（`CompressedSparseInnerAttention2`）、公共 MoE 工厂与上游默认的 indexer 蒸馏损失 `IndexerDistillLoss`（coeff=0.01）。
+V4.1 的模型、图像路由、压缩 attention、metadata 和并行化均由 `torchtitan_npu/models/deepseek_v4_1` 持有，不依赖 V4 模型或其专属 override。模型默认算子是 Attention Gym 的 eager `selected_attention`（`CompressedSparseInnerAttention2`）与公共 MoE 工厂；模型目录不含 indexer 训练目标，eager 路径也没有：它只在 A5 的两个融合 override 同开时由两者的反向传递，见下文。
 
 当前支持 **FSDP + EP、TP1 / CP1 / PP1、eager 执行与 torch.compile**，保留 FullAC 与图文输入。A3 脚本组织公共实验参数与融合列表，A5 调用 A3 并追加 CPU 亲和性、partial 文本 RoPE、两项 SwiGLUGroup、sparse attention 与 mHC Sinkhorn；两种入口均通过 `USE_GOLDEN=1` 选择 reference。A3 默认融合包含 RMSNorm、文本（`asc_complex`）与视觉 RoPE、MoE token dispatcher 和 mHC post；A5 将文本 RoPE 换为 `asc_partial` 并追加 routed/shared SwiGLUGroup、sparse 与 Sinkhorn。routed experts 的 grouped GEMM 是 reference 与融合共用的公共路径，不再作为独立融合开关。已接入量化入口及 Host Engram；不支持 MTP、DSpark、GraphTrainer；不支持的 TP、CP、PP 和 compile 配置在入口拒绝。
 
@@ -48,7 +48,7 @@ A5 的 `CPU_AFFINITY_CONF` 应按主机拓扑覆盖。通过 `CLI_OVERRIDES` 扩
 
 普通运行不强制随机种子和确定性；精度对照须在双方命令中追加 `--debug.seed 42 --debug.deterministic`。默认关闭 checkpoint 且设置 `load_only=True`；保存时同时传 `--checkpoint.enable --checkpoint.no-load-only`。`load_only` 表示禁止保存，与 model-only 加载不同。tokenizer 统一经 `--hf-assets-path` 提供（测试可用仓内 `tests/assets/deepseek_v3` mini tokenizer），该参数本身不加载模型权重。
 
-indexer 蒸馏损失由 `IndexerDistillLoss` 实现（上游默认 `coeff=0.01`）：每层只要消费了 selection 就挂一个损失，教师用该层自身 attention 的完整 softmax 分母（窗口 + 压缩条目 + sink）重建，按压缩切片的边际质量加权；梯度经 `_AuxLossInjection` 注入，只训练 indexer 自身参数，训练指标为 `indexer_distill_loss/mean`。打包 loader 标记的结构 padding 行不参与蒸馏（真实图像 token 保留训练资格）。
+indexer 的训练目标没有独立的损失项，它只走 A5 两个融合算子的反向夹具：`sparse_attn.asc` 的 SMLAG 反向按每个选中条目产出该层 attention 自身完整 softmax（窗口 + 压缩条目 + sink）的边际质量 `p`，写在 `topk_scores` 的梯度上；`lightning_indexer.asc` 的 SLIKG 反向把它当作教师，由 kernel 施加 `dI = Z·Y - p` 并产出 indexer 的 `q`/`k`/`w` 梯度。`topk_scores` 不参与任务损失，除这条边之外没有消费者，因此**A5 的两个 override 必须同开**：模型构造时按配置类标记检查这一对，只开一个直接报 `ValueError`，不会进入训练。单开 LI 时该梯度为 `None`、SLIKG 反向返回零梯度，indexer 全程不更新；单开 sparse attention 时 reference selector 会把 attention 级别的边际质量加到按 head 求和的 logits 上，训练信号是错的（该组合不做修复，仅由构造期检查拦住）。未使用的 top-k 槽位（`-1`）在教师上被置零。完整契约与 CPU 验证范围见 [override 说明](../../torchtitan_npu/override/README.md#deepseek-v41)。
 
 ### Flash 完整主干多机训练
 
@@ -159,8 +159,8 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
 | `common.rope.asc_complex`（A3 文本） | attention/compressor/indexer 的 split-aware 文本旋转（公共 `ComplexRoPE.Config`，保留 split/theta/YaRN） | Ascend rotary mul（interleave） |
 | `common.rope.asc_partial`（A5 文本） | 同上三处文本位点；单个 `inplace_partial_rotary_mul` 只旋转尾部 `dim` 通道 | AscendC partial rotary |
 | `common.rope.asc_half_rotation` | 视觉塔 2D 位置表的 half 旋转（半宽 cos/sin，融合前复制为全宽表，逐 batch 折叠保位置） | 同上 |
-| `sparse_attn.asc`（仅 A5） | 替换完整 attention forward，反向复用 SMLAG teacher，省去 `_teacher` 重建 | Ascend sparse flash MLA |
-| `sparse_attn.asc_li`（A5 默认） | 替换 score-and-select；候选池路径保留 eager | LI / SLIKG |
+| `sparse_attn.asc`（仅 A5，须与下一行同开） | 替换完整 attention forward；反向除自身梯度外还在 `topk_scores` 梯度上产出 indexer 教师 | Ascend sparse flash MLA |
+| `lightning_indexer.asc`（仅 A5，须与上一行同开） | 替换 selector 节点；候选池路径保留 eager | LI / SLIKG |
 | `common.swiglu_group.asc`（仅 A5） | `*.moe.routed_experts.inner_experts` 的 grouped SwiGLU（FQN 限定） | cann_ops_nn.swiglu_group |
 | `common.swiglu_group.asc_shared_experts`（仅 A5） | `*.moe.shared_experts` 的 SwiGLU（FQN 限定，不替换视觉 MLP） | 同上 |
 | `common.token_dispatcher.asc` | 公共 MoE 的 permute / re-routing / unpermute；reference 不启用 | Ascend token dispatcher |

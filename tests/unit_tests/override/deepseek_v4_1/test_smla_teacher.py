@@ -3,11 +3,9 @@ import torch
 
 from tests.unit_tests.models.mtp_test_utils import build_cpu_model
 from tests.unit_tests.override.deepseek_v4_1.test_sparse_fused_indices import _metadata
-from torchtitan_npu.models.deepseek_v4_1.indexer import IndexerDistillLoss
 from torchtitan_npu.override.deepseek_v4_1.sparse_attn import ascendc
 
 
-@pytest.mark.parametrize("mode", ["logits", "teacher"])
 @pytest.mark.parametrize(
     "checkpointed",
     [
@@ -24,18 +22,37 @@ from torchtitan_npu.override.deepseek_v4_1.sparse_attn import ascendc
         ),
     ],
 )
-def test_smla_reuses_teacher_without_loss_forward(monkeypatch, mode, checkpointed):
+def test_smla_carries_the_raw_teacher_to_slikg(monkeypatch, checkpointed):
+    """SMLAG's by-product reaches ``topk_scores``' gradient unchanged.
+
+    The teacher is the only thing that trains the indexer, and it travels on
+    ``topk_scores`` because SMLAG's backward runs after the indexer's forward.  So the
+    gradient this port produces must be the kernel's ``cmp_softmax_l1_norm`` verbatim --
+    no loss scaling, no ``Z * Y`` term -- because SLIKG applies ``dI = Z * Y - p`` itself
+    and would read anything else as the teacher.
+    """
     meta = torch.zeros(1, dtype=torch.int32)
-    monkeypatch.setattr(ascendc, "sparse_flash_mla_metadata", lambda *a, **k: meta)
-    monkeypatch.setattr(ascendc, "sparse_flash_mla_grad_metadata", lambda *a, **k: meta)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_metadata", lambda *a, **k: meta)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad_metadata", lambda *a, **k: meta)
     monkeypatch.setattr(
         torch.ops.cann_ops_transformer,
         "sparse_flash_mla",
         lambda q, **k: (q.clone(), torch.zeros(1, q.shape[0], q.shape[1])),
     )
 
+    mass = [0.1, 0.3, 9.0]
+
     def backward(q, *args, **kwargs):
-        p = torch.tensor([[[0.1, 0.3, 9.0]]]).expand(q.shape[0], 1, 3)
+        # What a real SMLAG reports.  Shape and dtype are the op's own: it allocates this
+        # output as ``cmp_sparse_indices.new_empty(cmp_sparse_indices.shape)`` in FP32 and
+        # its tiling asserts every dimension matches that input.  So it comes back in the
+        # selection's layout, with no mass on a slot the selection does not use (``-1``)
+        # -- including a row whose whole selection is padding.
+        indices = kwargs["cmp_sparse_indices"]
+        p = torch.zeros(indices.shape, dtype=torch.float32)
+        valid = indices >= 0
+        p[..., 1] = torch.where(valid[..., 1], mass[1], 0.0)
+        p[..., 2] = torch.where(valid[..., 2], mass[2], 0.0)
         return (
             torch.zeros_like(q),
             torch.zeros_like(kwargs["ori_kv"]),
@@ -46,22 +63,13 @@ def test_smla_reuses_teacher_without_loss_forward(monkeypatch, mode, checkpointe
         )
 
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad", backward)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("_teacher must not run under SMLA")
-
-    monkeypatch.setattr(IndexerDistillLoss, "_teacher", forbidden)
-    attn = build_cpu_model(
-        ascendc.AscV41SparseAttention.Config(
-            window_size=2,
-            softmax_scale=0.5,
-            compress_ratio=1,
-            score_gradient=mode,
-            aux_loss=IndexerDistillLoss.Config(coeff=2.0, reduce_mesh="batch", global_batch_size=1, softmax_scale=0.5),
-        )
-    )
+    attn = build_cpu_model(ascendc.AscV41SparseAttention.Config(window_size=2, softmax_scale=0.5, compress_ratio=1))
     metadata = _metadata(torch.arange(4))
-    scores = torch.tensor([[[-float("inf"), 1.0, 0.0]] * 4], requires_grad=True)
+    # The real carrier is FP32: the fused selector emits the kernel's FP32 relaxed scores,
+    # which is what lets the port forward SMLAG's FP32 mass without converting it.  An
+    # unused slot holds whatever the kernel wrote there (``-inf`` from the reference
+    # selector); nothing may depend on it, because SLIKG never reads a ``-1`` position.
+    scores = torch.tensor([[[float("-inf"), 1.0, 0.0]] * 4], dtype=torch.float32, requires_grad=True)
     indices = torch.tensor([[[-1, 0, 1]] * 4])
     indices[:, 3] = -1
     q = torch.zeros(1, 4, 1, 4, dtype=torch.bfloat16, requires_grad=True)
@@ -70,11 +78,11 @@ def test_smla_reuses_teacher_without_loss_forward(monkeypatch, mode, checkpointe
         return attn(
             q,
             q.squeeze(2),
-            q.squeeze(2),
-            attention_masks=metadata,
+            torch.zeros(1),
+            metadata,
+            cmp_k=q.squeeze(2),
             topk_indices=indices,
             topk_scores=scores,
-            attn_sink=torch.zeros(1),
         )
 
     if checkpointed:
@@ -83,29 +91,46 @@ def test_smla_reuses_teacher_without_loss_forward(monkeypatch, mode, checkpointe
         out = checkpoint(consume, q, scores, use_reentrant=False)
     else:
         out = consume(q, scores)
-    # A second consumer must add its own contribution to the same scores.
+    # The selection is shared across a layer group, so a second consumer drives the same
+    # edge.  Both outputs are zeroed before the backward, so the scores see only the
+    # teacher edge -- and it is delivered once per consumer's backward, not per forward.
     out2 = consume(q, scores)
     ((out.sum() + out2.sum()) * 0).backward()
-    # What this test owns is the plumbing, not the kernel's numbers: the fake
-    # backward reports a mass over all three slots while the pure-Python loss
-    # renormalises over the reachable ones, so the magnitudes legitimately differ.
-    # The fused path must distil exactly the reachable slots, drop a row with no
-    # reachable entry, and let both consumers accumulate onto the same logits.
+
     valid = (indices >= 0).reshape(4, 3)
     grad = scores.grad.reshape(4, 3)
-    # Slots the selection never reaches take no gradient.
-    assert torch.equal(grad[~valid], torch.zeros(int((~valid).sum())))
-    # Row 3 has no reachable entry at all: it trains nothing.
+    # The carrier is FP32 and SMLAG's mass is FP32, and the op returns it in the
+    # selection's own layout, so the port forwards it with no conversion and no
+    # reshaping at all -- the value that lands here is the kernel's tensor.
+    assert scores.dtype == torch.float32
+    assert scores.grad.dtype == scores.dtype
+    # No masking, no rescaling: the ``-inf`` an unused slot holds in the forward is never
+    # read, and its gradient stays zero because the kernel reported no mass for it -- not
+    # because the port cleaned it.
+    assert grad[0, 0] == 0
     assert not valid[3].any()
     assert torch.equal(grad[3], torch.zeros(3))
-    # Both consumers contributed, and the reachable slots carry the gradient.
     assert (grad[:3][valid[:3]] != 0).all()
-    assert torch.isfinite(attn.aux_loss.read())
-    assert float(attn.aux_loss.read()) > 0.0
+    # Each consumer's backward delivers the mass again, hence the doubling.
+    assert torch.equal(grad[0], torch.tensor([0.0, mass[1] * 2, mass[2] * 2]))
 
 
-@pytest.mark.parametrize("ratio,training,aux", [(0, True, True), (1, False, True), (2, True, False)])
-def test_attention_without_distillation_has_no_scores_edge(monkeypatch, ratio, training, aux):
+@pytest.mark.parametrize(
+    "ratio,training,with_pool",
+    [
+        (0, True, False),  # window-only in training: no selection, so no teacher
+        (1, False, True),  # eval: no indexer gradient to feed, so no teacher
+        (2, False, True),  # same, on the compressed path
+    ],
+)
+def test_attention_without_a_teacher_edge(monkeypatch, ratio, training, with_pool):
+    """No carrier reaches the kernel unless this layer is training with a compressed pool.
+
+    A compressed layer always receives its pool -- the port pairs ``cmp_k`` with
+    ``topk_indices`` -- so "no pool" only arises for a window-only layer; the other axis
+    is ``training``, which suppresses the teacher because there is no indexer gradient to
+    feed.
+    """
     captured = []
 
     def kernel(*args):
@@ -113,27 +138,28 @@ def test_attention_without_distillation_has_no_scores_edge(monkeypatch, ratio, t
         return args[0].clone(), torch.zeros(1, 4, 1)
 
     monkeypatch.setattr(ascendc._SparseMLA, "apply", kernel)
-    loss = (
-        IndexerDistillLoss.Config(coeff=1.0, reduce_mesh="batch", global_batch_size=1, softmax_scale=0.5)
-        if aux
-        else None
-    )
     attention = build_cpu_model(
-        ascendc.AscV41SparseAttention.Config(window_size=2, softmax_scale=0.5, compress_ratio=ratio, aux_loss=loss)
+        ascendc.AscV41SparseAttention.Config(window_size=2, softmax_scale=0.5, compress_ratio=ratio)
     )
     attention.train(training)
     q = torch.zeros(1, 4, 1, 4, dtype=torch.bfloat16)
-    indices = torch.zeros(1, 4, 1, dtype=torch.long) if ratio else None
-    shared = torch.zeros(1, 4 // ratio, 4, dtype=torch.bfloat16) if ratio else None
+    # The port pairs the pool and its selection: one without the other is a contract
+    # violation, so the no-pool case carries neither.
+    indices = torch.zeros(1, 4, 1, dtype=torch.long) if with_pool else None
+    shared = torch.zeros(1, 4 // ratio, 4, dtype=torch.bfloat16) if with_pool else None
     out = attention(
         q,
         q.squeeze(2),
-        shared,
-        attention_masks=_metadata(torch.arange(4)),
+        torch.zeros(1),
+        _metadata([0, 4]),
+        cmp_k=shared,
         topk_indices=indices,
         topk_scores=torch.ones(1, 4, 1, requires_grad=True),
-        attn_sink=torch.zeros(1),
     )
     torch.testing.assert_close(out, q)
-    assert captured[0][11] is None
-    assert captured[0][12] is None
+    # The apply args are (q, swa_k, cmp_k, topk_indices, sinks, attention_masks,
+    # softmax_scale, ratio, window_size, topk_scores, wants_teacher): the teacher travels
+    # as the carrier's gradient, so no carrier means this layer carries none.  The boundary
+    # tensors are no longer arguments -- they are read off the mask at position 5.
+    assert captured[0][9] is None
+    assert captured[0][10] is False

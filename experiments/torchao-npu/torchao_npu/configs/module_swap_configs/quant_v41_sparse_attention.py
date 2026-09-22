@@ -21,33 +21,22 @@ class QuantV41SparseAttentionConfig(ModuleSwapConfig):
     """Install FP8 SWA fake quantization; main KV is supplied by QuantCompressor."""
 
 
-def _quantized_forward(
-    self, q, swa_k, cmp_k=None, *, attention_masks, topk_indices=None, topk_scores=None, attn_sink=None
-):
+def _quantized_forward(self, q, swa_k, attn_sink, attention_masks, *, cmp_k=None, topk_indices=None, **kwargs):
     from torchao_npu.quantized_modules.v41_sparse_attention import QuantV41SparseAttention
 
-    if (cmp_k is None) != (topk_indices is None):
-        raise ValueError("cmp_k and topk_indices must be provided together.")
-    wants_teacher = self.training and self.aux_loss is not None and cmp_k is not None
-    output, lse = QuantV41SparseAttention.forward(
+    # Same argument order as the port this replaces, so the swap stays invisible to the
+    # host.  ``topk_scores`` may arrive in kwargs and is ignored: the teacher edge lives
+    # in the sparse-attention port, which threads ``topk_scores`` into SMLAG; this module
+    # replaces only the attention computation and returns the output unchanged.
+    del kwargs
+    return QuantV41SparseAttention.forward(
         self,
         q,
         swa_k,
-        cmp_k,
-        attention_masks=attention_masks,
+        attn_sink,
+        attention_masks,
+        cmp_k=cmp_k,
         topk_indices=topk_indices,
-        attn_sink=attn_sink,
-        wants_teacher=wants_teacher,
-    )
-    if not wants_teacher:
-        return output
-    return self.aux_loss(
-        q.detach(),
-        cmp_k.detach(),
-        topk_indices,
-        lse.transpose(1, 2).detach(),
-        topk_scores,
-        carrier=output,
     )
 
 

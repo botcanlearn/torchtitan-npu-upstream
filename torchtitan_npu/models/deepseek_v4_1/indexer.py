@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Lightning indexer for DeepSeek V4.1 (CSA2) and its distillation loss.
+"""Lightning indexer for DeepSeek V4.1 (CSA2).
 
 Shape legend for this file:
     B = batch, L = sequence length, D = model dimension,
@@ -18,14 +18,17 @@ Score of query ``t`` against compressed entry ``j``::
     I_{t,j}   = sum_h w_{t,h} * relu(S_{t,h,j})
 
 The top-``K`` entries of ``I_{t,.}`` are what the sparse attention reads.  Selection is
-discrete, hence carries no gradient: the indexer is trained *only* by
-:class:`IndexerDistillLoss`, which distills each consumer layer's attention mass on those
-entries -- a marginal weighted by that layer's own compressed share -- into
-``softmax(I_{t,.})``.
+discrete, hence carries no gradient.
+
+The distillation objective that trains the indexer is deliberately **not** in this file.
+It needs the attention's own softmax denominator (window + selected compressed + sink), so
+it belongs to the attention that produces it, not to the selector; the fused port carries
+it out through ``topk_scores``' gradient, on the edge SLIKG consumes.  Nothing here holds
+a reference to a loss.
 
 The whole computation is single-pass: no query chunking, which is a kernel-side concern
 and not something the reference implementation should carry.  A kernel-backed variant
-replaces the score-and-select half: the per-head weights and the relaxed score, the
+replaces :class:`Selector`'s forward: the per-head weights and the relaxed score, the
 visibility and candidate masking, and the top-k selection are what the NPU
 ``lightning_indexer`` forward and ``sparse_lightning_indexer_kl_loss_grad`` backward
 implement.
@@ -33,12 +36,13 @@ implement.
 Packed documents are handled exactly like ``selected_attention`` handles its window:
 ``doc_ids`` equality plus index arithmetic.  Entry ``j`` covers tokens
 ``[j * compress_ratio, (j + 1) * compress_ratio)``, so its document is
-``doc_ids[:, j * compress_ratio]`` and it is causally complete for query ``t`` iff
+``doc_ids[j * compress_ratio]`` and it is causally complete for query ``t`` iff
 ``j < (t + 1) // compress_ratio``.  An entry is selectable by ``t`` iff both hold.  This
 is exact only when every document segment is a multiple of ``compress_ratio`` tokens;
 otherwise a pooling group straddles a document edge and its entry mixes the two
-documents.  That case is deliberately left unhandled, and the loader pads each document
-to keep it from arising for documents that fit in one row.
+documents.  The loaders pad every document up to
+:func:`~torchtitan_npu.models.deepseek_v4_1.model.compression_alignment`, so the
+straddling group does not arise in the packed layout they produce.
 
 Every layer owns a :class:`HierarchicalIndexer`, statically assigned one of CSA2's three
 modes: Full Mode carries the parameters and produces both the index keys and the top-k,
@@ -50,18 +54,12 @@ so a misconfigured layer fails loudly instead of silently recomputing or silentl
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
 from torchtitan.protocols.module import Module
-
-from torchtitan_npu.patches.torchtitan.models.common.aux_loss import (
-    LoggedAuxLoss,
-    _AuxLossInjection,
-    _should_run_forward,
-)
 
 if TYPE_CHECKING:
     from torchtitan.models.common.linear import Linear
@@ -71,7 +69,7 @@ if TYPE_CHECKING:
     from .model import DeepSeekV41Metadata
 
 
-class IndexerMode(str, Enum):
+class IndexerMode(StrEnum):
     """CSA2's static per-layer modes (report section 2.3.1).
 
     ``FULL`` owns the main KV and projects its own index keys, ``REINDEX`` rescores the
@@ -90,32 +88,36 @@ REINDEX = IndexerMode.REINDEX
 REUSE = IndexerMode.REUSE
 
 
-def _selection_mask(doc_ids_BL: torch.Tensor, compress_ratio: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _selection_mask(doc_ids_L: torch.Tensor, compress_ratio: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Document isolation plus causal completeness over the compressed-entry axis.
 
-    Returns ``(visible_BLN, newest_BL1, newest_valid_BL1)`` for one ``compress_ratio``.
-    Entry ``j`` belongs to ``doc_ids_BL[:, j * compress_ratio]`` and is complete for query
-    ``t`` iff ``j < (t + 1) // compress_ratio``; the two conditions are exactly the
+    Returns ``(visible_LN, newest_L1, newest_valid_L1)`` for one ``compress_ratio``.
+    Entry ``j`` belongs to ``doc_ids_L[j * compress_ratio]`` and is complete for query ``t``
+    iff ``j < (t + 1) // compress_ratio``; the two conditions are exactly the
     ``selected_attention`` window rule one axis over.
-    """
-    num_tokens = doc_ids_BL.size(1)
-    num_cmp = num_tokens // compress_ratio
-    entry_BL1 = torch.arange(num_tokens, device=doc_ids_BL.device).view(1, -1, 1)
-    # Global number of complete groups up to and including each query.
-    complete_BL1 = (entry_BL1 + 1) // compress_ratio
-    entry_B1N = torch.arange(num_cmp, device=doc_ids_BL.device).view(1, 1, -1)
-    cmp_doc_ids_BN = doc_ids_BL[:, ::compress_ratio]
-    visible_BLN = (entry_B1N < complete_BL1) & (cmp_doc_ids_BN.unsqueeze(1) == doc_ids_BL.unsqueeze(-1))
 
-    newest_BL1 = complete_BL1 - 1
-    newest_valid_BL1 = (newest_BL1 >= 0) & (
-        cmp_doc_ids_BN.gather(1, newest_BL1.clamp_min(0).squeeze(-1)).unsqueeze(-1) == doc_ids_BL.unsqueeze(-1)
+    The model packs a single row (``local_batch_size = 1``, asserted in
+    ``update_from_config``), so the batch axis is not carried: the entry axis is the only
+    one that needs a second dimension, and ``doc_ids_L`` is 1-D.
+    """
+    num_tokens = doc_ids_L.size(-1)
+    num_cmp = num_tokens // compress_ratio
+    query_L1 = torch.arange(num_tokens, device=doc_ids_L.device).unsqueeze(-1)
+    # Global number of complete groups up to and including each query.
+    complete_L1 = (query_L1 + 1) // compress_ratio
+    entry_1N = torch.arange(num_cmp, device=doc_ids_L.device).unsqueeze(0)
+    cmp_doc_ids_N = doc_ids_L[::compress_ratio]
+    visible_LN = (entry_1N < complete_L1) & (cmp_doc_ids_N == doc_ids_L.unsqueeze(-1))
+
+    newest_L1 = complete_L1 - 1
+    newest_valid_L1 = (newest_L1 >= 0) & (
+        cmp_doc_ids_N.gather(0, newest_L1.clamp_min(0).squeeze(-1)).unsqueeze(-1) == doc_ids_L.unsqueeze(-1)
     )
-    return visible_BLN, newest_BL1, newest_valid_BL1
+    return visible_LN, newest_L1, newest_valid_L1
 
 
 def indexer_selection_masks(
-    doc_ids_BL: torch.Tensor, compress_ratios: tuple[int, ...]
+    doc_ids_L: torch.Tensor, compress_ratios: tuple[int, ...]
 ) -> dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """The indexer's selection masks for one forward, one per pooling ratio.
 
@@ -123,15 +125,21 @@ def indexer_selection_masks(
     ``compress_ratio``, so it is built once per forward and looked up by every indexer
     instead of being rebuilt per layer.  Ratios of 0 are skipped: those layers reuse a
     selection rather than make one.
+
+    ``doc_ids_L`` is the packed row's document id per token; the batch axis is not carried
+    because the masks hold no batch-dependent information.
     """
     return {
-        ratio: _selection_mask(doc_ids_BL, ratio) for ratio in sorted({ratio for ratio in compress_ratios if ratio > 0})
+        ratio: _selection_mask(doc_ids_L, ratio) for ratio in sorted({ratio for ratio in compress_ratios if ratio > 0})
     }
 
 
-class ScoreAndSelect(Module):
-    """The score-and-select computation, extracted so a fused kernel can
-    override it without replacing the whole indexer."""
+class Selector(Module):
+    """The selection node: scores every visible compressed entry and picks the top-k.
+
+    It is its own module so a fused kernel can replace ``forward`` without replacing the
+    whole indexer -- the indexer's projections, norms and rope stay where they are.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -142,10 +150,6 @@ class ScoreAndSelect(Module):
         index_topk: int
         candidate_topk_blocks: int
         candidate_block_size: int
-
-        @property
-        def score_gradient(self) -> str:
-            return "logits"
 
     def __init__(self, config: Config):
         super().__init__()
@@ -160,8 +164,8 @@ class ScoreAndSelect(Module):
     @staticmethod
     def select_candidate_blocks(
         scores_BLN: torch.Tensor,
-        newest_BL1: torch.Tensor,
-        newest_valid_BL1: torch.Tensor,
+        newest_L1: torch.Tensor,
+        newest_valid_L1: torch.Tensor,
         topk_blocks: int,
         block_size: int,
     ) -> torch.Tensor:
@@ -170,14 +174,17 @@ class ScoreAndSelect(Module):
         Args:
             scores_BLN: Index scores ``[B, L, N]``, already masked to ``-inf`` on entries
                 the query cannot select (other documents and incomplete groups).
-            newest_BL1: Index of each query's newest selectable entry, ``[B, L, 1]``.
-            newest_valid_BL1: Whether that entry exists (the query's document has at least
-                one complete group), ``[B, L, 1]``.
+            newest_L1: Index of each query's newest selectable entry, ``[L, 1]``.
+            newest_valid_L1: Whether that entry exists (the query's document has at least
+                one complete group), ``[L, 1]``.
             topk_blocks: Maximum number of blocks to keep.
             block_size: Positions per block.
 
         Returns:
             Boolean mask ``[B, L, N]`` selecting every position of the kept blocks.
+
+        The two entry-index tables are built once per forward from the row's document
+        ids, so they carry no batch axis and broadcast against ``scores_BLN``.
         """
         width = scores_BLN.size(-1)
         if width % block_size != 0:
@@ -190,9 +197,9 @@ class ScoreAndSelect(Module):
         # The block holding a query's newest selectable entry is only partly filled, and
         # must not be outscored by an older, full block.  A query whose document has no
         # complete group yet owns no such block and pins nothing.
-        last_BL1 = newest_BL1 // block_size
-        pin_BLB = torch.arange(num_blocks, device=scores_BLN.device).view(1, 1, -1) == last_BL1
-        block_scores_BLB = block_scores_BLB.masked_fill(pin_BLB & newest_valid_BL1, torch.inf)
+        last_L1 = newest_L1 // block_size
+        pin_LB = torch.arange(num_blocks, device=scores_BLN.device).unsqueeze(0) == last_L1
+        block_scores_BLB = block_scores_BLB.masked_fill(pin_LB & newest_valid_L1, torch.inf)
 
         top = block_scores_BLB.topk(min(topk_blocks, num_blocks), dim=-1)
         # Fewer reachable blocks than ``topk_blocks`` leaves -inf picks behind: drop them.
@@ -201,7 +208,7 @@ class ScoreAndSelect(Module):
         )
         return keep_BLB.repeat_interleave(block_size, dim=-1)[..., :width]
 
-    def _score_and_select(
+    def forward(
         self,
         idx_q_BLHiDi: torch.Tensor,
         idx_k_BNDi: torch.Tensor,
@@ -231,18 +238,18 @@ class ScoreAndSelect(Module):
             padded row is ``-1`` in the indices and ``-inf`` in the student logits, so
             that the distillation's softmax drops it without looking at the indices.
         """
-        visible_BLN, newest_BL1, newest_valid_BL1 = attention_masks.selection_masks[self.compress_ratio]
+        visible_LN, newest_L1, newest_valid_L1 = attention_masks.ref.selection_masks[self.compress_ratio]
 
         with torch.no_grad():
             scores_BLHiN = torch.einsum("blhd,bnd->blhn", idx_q_BLHiDi, idx_k_BNDi)
             scores_BLN = (scores_BLHiN.relu() * weights_BLHi.unsqueeze(-1)).sum(dim=2)
-            scores_BLN = scores_BLN.masked_fill(~visible_BLN, -torch.inf)
+            scores_BLN = scores_BLN.masked_fill(~visible_LN, -torch.inf)
 
             if self.mode is FULL and self.candidate_topk_blocks > 0:
                 candidates_BLN = self.select_candidate_blocks(
                     scores_BLN,
-                    newest_BL1,
-                    newest_valid_BL1,
+                    newest_L1,
+                    newest_valid_L1,
                     self.candidate_topk_blocks,
                     self.candidate_block_size,
                 )
@@ -254,40 +261,32 @@ class ScoreAndSelect(Module):
                 scores_BLN = scores_BLN.masked_fill(~candidates_BLN, -torch.inf)
 
             topk = min(self.index_topk, scores_BLN.size(-1))
-            # aten sort does not survive dynamo fake-eval under the spmd patch
-            # stack; the selected slot ids are distinct, so a full-width
-            # topk(largest=False, sorted=True) is the identical ascending sort.
+            # The selection is emitted in the same order the fused selector uses: position
+            # descending, so ``-1`` padding lands at the tail.  The picks are distinct slot
+            # ids, so the sort is over distinct keys and needs no stability.
             selected_BLK = scores_BLN.topk(topk, dim=-1, sorted=False).indices
-            selected_BLK = selected_BLK.topk(topk, dim=-1, largest=False, sorted=True).values
+            selected_BLK = selected_BLK.sort(dim=-1, descending=True).values
             # Entries the query cannot see yet, or that a pool excluded, come back as -1,
-            # which the sparse attention and the loss both skip.
-            topk_indices_BLK = torch.where(visible_BLN.gather(-1, selected_BLK), selected_BLK, -1)
+            # which the sparse attention and the loss both skip.  The visibility mask
+            # covers the real entries only, so it is gathered at the selected slots --
+            # the batch axis is re-added because ``gather`` needs matching rank -- and a
+            # padded slot beyond it resolves to False and is dropped.
+            topk_indices_BLK = torch.where(visible_LN.unsqueeze(0).gather(-1, selected_BLK), selected_BLK, -1)
 
         # The gradient this produces is what trains the indexer: it flows into
         # ``wq_b``, ``weights_proj``, and into the shared index keys' owner through
         # ``idx_k``.  It is built unconditionally so the returned contract is the same on
-        # every path; whether anything consumes it is the distillation loss's decision.
-        batch_index = torch.arange(idx_k_BNDi.size(0), device=idx_k_BNDi.device)[:, None, None]
-        selected_BLKDi = idx_k_BNDi[batch_index, topk_indices_BLK.clamp_min(0)]
+        # every path; whether anything consumes it is the teacher edge's decision.
+        # The keys are one packed row, so the batch axis is squeezed rather than indexed:
+        # ``squeeze`` keeps the axis when a batch ever arrives, so the einsum below fails
+        # loudly instead of silently scoring batch 0.
+        selected_BLKDi = idx_k_BNDi.squeeze(0)[topk_indices_BLK.squeeze(0).clamp_min(0)].unsqueeze(0)
         logits_BLHiK = torch.einsum("blhd,blkd->blhk", idx_q_BLHiDi, selected_BLKDi)
         logits_BLHiK = logits_BLHiK.relu() * weights_BLHi.unsqueeze(-1)
         # A ``-1`` slot scores against entry 0 and means nothing: it is marked with
         # the value that drops it from the distillation's student softmax.
         topk_scores_BLK = logits_BLHiK.sum(dim=2).masked_fill(topk_indices_BLK < 0, -torch.inf)
         return topk_indices_BLK, topk_scores_BLK, candidates_BLN
-
-    def forward(
-        self,
-        idx_q_BLHiDi: torch.Tensor,
-        idx_k_BNDi: torch.Tensor,
-        weights_BLHi: torch.Tensor,
-        attention_masks: DeepSeekV41Metadata,
-        *,
-        candidates_BLN: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        return self._score_and_select(
-            idx_q_BLHiDi, idx_k_BNDi, weights_BLHi, attention_masks, candidates_BLN=candidates_BLN
-        )
 
 
 class HierarchicalIndexer(Module):
@@ -339,7 +338,7 @@ class HierarchicalIndexer(Module):
         wq_b: Linear.Config | None = None
         weights_proj: Linear.Config | None = None
         # Present on Full Mode layers, which project their own keys:
-        score_and_select: ScoreAndSelect.Config
+        selector: Selector.Config
         wk: Linear.Config | None = None
         k_norm: RMSNorm.Config | None = None
 
@@ -352,7 +351,7 @@ class HierarchicalIndexer(Module):
         self.index_topk = config.index_topk
         self.candidate_topk_blocks = config.candidate_topk_blocks
         self.candidate_block_size = config.candidate_block_size
-        self.score_and_select = config.score_and_select.build()
+        self.selector = config.selector.build()
         if self.mode is REUSE:
             return
         if config.rope is None or config.wq_b is None or config.weights_proj is None:
@@ -365,20 +364,6 @@ class HierarchicalIndexer(Module):
                 raise ValueError("A Full Mode indexer requires wk and k_norm configs to project its own index keys.")
             self.wk = config.wk.build()
             self.k_norm = config.k_norm.build()
-
-    def _score_and_select(
-        self,
-        idx_q_BLHiDi: torch.Tensor,
-        idx_k_BNDi: torch.Tensor,
-        weights_BLHi: torch.Tensor,
-        attention_masks: DeepSeekV41Metadata,
-        *,
-        candidates_BLN: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Delegate to the extracted score-and-select node."""
-        return self.score_and_select(
-            idx_q_BLHiDi, idx_k_BNDi, weights_BLHi, attention_masks, candidates_BLN=candidates_BLN
-        )
 
     def forward(
         self,
@@ -458,7 +443,7 @@ class HierarchicalIndexer(Module):
         # per-head scores are averaged rather than summed.
         weights = self.weights_proj(x) * (self.index_head_dim**-0.5 * self.num_index_heads**-0.5)
 
-        topk_indices, topk_scores, candidates = self._score_and_select(
+        topk_indices, topk_scores, candidates = self.selector(
             idx_q,
             idx_k,
             weights,
@@ -466,192 +451,3 @@ class HierarchicalIndexer(Module):
             candidates_BLN=candidates,
         )
         return idx_k, topk_indices, topk_scores, candidates
-
-
-class IndexerDistillLoss(LoggedAuxLoss):
-    """Distill the attention's distribution over the top-k entries into the indexer.
-
-    The teacher is the head-averaged attention mass on the selected entries, with the full
-    softmax denominator (sliding window, selected compressed entries and sink alike).
-    That mass is a *marginal* ``p`` whose row sum ``Z <= 1``: the window and the sink hold
-    the rest of the probability.  The objective scores the conditional teacher ``t = p / Z``
-    against the student ``softmax(I)`` and weights the row by ``Z``::
-
-        L = sum_t sum_j p_{t,j} (log t_{t,j} - log Y_{t,j}),   dI = Z * Y - p
-
-    So it takes roughly the form of a KL from the student to the teacher, weighted by the
-    row's compressed mass.  ``p`` is deliberately left *unnormalised*: pre-normalising it to
-    ``t`` would set ``Z = 1`` everywhere and quietly drop that weight.
-
-    Like ``MicrobatchWiseLoadBalanceLoss``, the loss owns the whole computation: the
-    attention hands over the tensors the teacher needs (queries, compressed keys, the
-    selected entries and the operator's LSE) plus the student logits, and the forward
-    builds the teacher, forms the weighted KL and injects the gradient on the carrier.  The
-    caller passes the teacher's sources as constants -- the distillation must train the
-    indexer and nothing else -- which leaves ``topk_scores`` the only differentiable input.
-
-    One instance is attached per layer that consumes the selection, and they all score the
-    *same* student logits, because the indexer's ``topk_scores`` tensor is shared across
-    the group.  Each layer's backward therefore flows into that shared tensor, so the
-    indexer accumulates the gradient of every consumer; ``dI`` being affine in the teacher
-    is what makes this per-layer sum equal to the single pooled-teacher loss.
-
-    The loss is summed over rows and normalized by the step's global valid-token count
-    by the :class:`LoggedAuxLoss` framework, exactly like the MoE balance loss.
-
-    The fused NPU counterpart is ``sparse_lightning_indexer_kl_loss_grad`` in
-    ops-transformer (see ``deepseek_v41_indexer_distill_findings.md``): it reads the
-    teacher verbatim and derives ``p_reduce = Z`` as its row sum, so the tensor handed
-    over here (``p``, not ``p / Z``) is what that kernel expects, and ``q``/``k``/``w``
-    must be exactly the post-RoPE projections the forward used.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(LoggedAuxLoss.Config):
-        """The ``LoggedAuxLoss`` fields plus the teacher's temperature."""
-
-        score_gradient: str = "logits"
-
-        softmax_scale: float
-        """Attention softmax scale; the teacher recomputes its logits with the same
-        temperature as the sparse attention that produced the LSE."""
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.softmax_scale = config.softmax_scale
-        if config.score_gradient not in ("logits", "teacher"):
-            raise ValueError(f"Unknown scores gradient mode: {config.score_gradient}")
-        self.score_gradient = config.score_gradient
-
-    @property
-    def normalization_scale(self) -> float:
-        if self.global_batch_size is None or self.global_batch_size <= 0:
-            raise ValueError("Indexer loss requires a positive global valid-token count")
-        return self._mesh_scale_factor / self.global_batch_size
-
-    def teacher_alpha(self) -> float:
-        return self.coeff * self.normalization_scale
-
-    @torch.no_grad()
-    def record_teacher(self, scores, p, valid) -> None:
-        t = p / p.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
-        value = self._logged_kl(p, t, scores.float(), valid).sum()
-        self._acc.add_(value * self.normalization_scale)
-
-    def _teacher(
-        self,
-        q_BLHD: torch.Tensor,
-        cmp_k_BND: torch.Tensor,
-        topk_indices_BLK: torch.Tensor,
-        lse_BLH: torch.Tensor,
-    ) -> torch.Tensor:
-        """Raw head-averaged attention mass on the selected entries, ``[B, L, K]``.
-
-        ``lse_BLH`` is the operator's per-head log-sum-exp over window + selected
-        compressed + sink, so ``exp(logit - lse)`` is each head's probability on that
-        entry with the full denominator.  Averaging over heads gives the *marginal* mass
-        ``p``, whose row sum ``Z <= 1`` is the compressed slice's share of the full
-        softmax: the window and the sink hold the rest.  A head whose mass sits on the
-        window or the sink therefore contributes ``m_h = exp(compressed_lse_h - lse_h) < 1``,
-        instead of every head contributing unit compressed mass.  The head mean (not the
-        sum) is what the kernel reduces with, and it is what keeps ``Z`` a share rather
-        than a multiple of it.
-
-        ``p`` is deliberately returned unnormalised.  The loss weights each row's KL by
-        ``Z``, so pre-normalising to ``p / Z`` would set ``Z = 1`` and change the
-        objective; the caller derives the conditional teacher.
-
-        The per-head term is evaluated as ``m_h * softmax_h(logit)``: the conditional is a
-        plain softmax over the selected support, stable without any shift, and only the
-        mass needs the ``lse`` difference.  A row whose mass underflows fp32 returns zeros,
-        which is the correct limit: there is no compressed mass left to distil.
-        """
-        valid_BLK = topk_indices_BLK >= 0
-        row_valid_BL = valid_BLK.any(dim=-1)
-        batch_index = torch.arange(cmp_k_BND.size(0), device=cmp_k_BND.device)[:, None, None]
-        selected_BLKD = cmp_k_BND[batch_index, topk_indices_BLK.clamp_min(0)]
-        logits_BLHK = torch.einsum("blhd,blkd->blhk", q_BLHD, selected_BLKD).float() * self.softmax_scale
-        logits_BLHK = logits_BLHK.masked_fill(~valid_BLK.unsqueeze(2), -torch.inf)
-
-        comp_lse_BLH = torch.logsumexp(logits_BLHK, dim=-1)
-        mass_BLH = torch.exp(comp_lse_BLH - lse_BLH.float())
-        # A row with no valid slot has an all -inf softmax row; its mass is zero anyway.
-        conditional_BLHK = torch.softmax(logits_BLHK.masked_fill(~row_valid_BL[:, :, None, None], 0.0), dim=-1)
-        return (mass_BLH.unsqueeze(-1) * conditional_BLHK).sum(dim=2) / q_BLHD.size(2)
-
-    def _logged_kl(
-        self,
-        p_BLK: torch.Tensor,
-        t_BLK: torch.Tensor,
-        logits_BLK: torch.Tensor,
-        slot_valid_BLK: torch.Tensor,
-    ) -> torch.Tensor:
-        """The reference KL value the metric accumulates (per-element)."""
-        log_student_BLK = F.log_softmax(
-            logits_BLK.masked_fill(~slot_valid_BLK, -torch.inf).masked_fill(~slot_valid_BLK.any(-1, keepdim=True), 0.0),
-            dim=-1,
-        )
-        weighted = torch.special.xlogy(p_BLK, t_BLK) - p_BLK * log_student_BLK
-        return weighted.masked_fill(~slot_valid_BLK, 0.0)
-
-    def forward(
-        self,
-        q_BLHD: torch.Tensor,
-        cmp_k_BND: torch.Tensor,
-        topk_indices_BLK: torch.Tensor,
-        lse_BLH: torch.Tensor,
-        topk_scores_BLK: torch.Tensor,
-        *,
-        carrier: torch.Tensor,
-    ) -> torch.Tensor:
-        """Build the teacher, score the student against it, inject the gradient.
-
-        The gradient is roughly a KL gradient: row ``(b, l)`` contributes
-        ``sum_j p_j (log t_j - log Y_j)``, the conditional teacher ``t = p / Z`` scored
-        against the student and weighted by the row's marginal mass ``Z`` through ``p``.
-        That is ``Z * KL(t || Y)``, whose gradient w.r.t. the student logits is
-        ``Z * Y - p``.  ``p`` stays unnormalised on purpose: ``Z`` is the compressed
-        slice's share of the full softmax, and normalising ``p`` first would set it to 1.
-
-        Args:
-            q_BLHD: Attention queries ``[B, L, H, Dk]``; a constant (detached by the
-                caller).
-            cmp_k_BND: Shared compressed KV ``[B, N, Dk]``; a constant.
-            topk_indices_BLK: Selected compressed entries ``[B, L, K]``; ``-1`` unused.
-            lse_BLH: Per-head log-sum-exp of the sparse softmax, ``[B, L, H]``; a constant.
-            topk_scores_BLK: Student logits at the selected entries ``[B, L, K]``, with
-                the indexer's ``-inf`` marking an unused slot.  The one live input.
-            carrier: Tensor whose backward path carries the injected gradient (the
-                attention output).
-
-        Returns:
-            ``carrier`` unchanged.
-        """
-        p_BLK = self._teacher(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH)
-        # The conditional teacher; a row whose mass underflowed keeps t = 0 and its p = 0
-        # makes the contribution vanish.
-        eps = torch.finfo(torch.float32).tiny
-        t_BLK = p_BLK / p_BLK.sum(dim=-1, keepdim=True).clamp_min(eps)
-
-        logits_BLK = topk_scores_BLK.float()
-        # A row with no reachable entry is all -inf, which log_softmax would turn into NaN.
-        # It carries no teacher mass either, so it is zeroed and contributes nothing.
-        row_valid_BL = torch.isfinite(logits_BLK).any(dim=-1)
-
-        logits_BLK = logits_BLK.masked_fill(~row_valid_BL.unsqueeze(-1), 0.0)
-        if self.score_gradient == "teacher":
-            logits_BLK = logits_BLK.detach()
-        weighted_BLK = self._logged_kl(
-            p_BLK, t_BLK, logits_BLK, torch.isfinite(logits_BLK) & row_valid_BL.unsqueeze(-1)
-        )
-        if self.score_gradient == "teacher":
-            if self.training and _should_run_forward():
-                self._acc.add_(weighted_BLK.sum().detach() * self.normalization_scale)
-            linear = (
-                p_BLK
-                * torch.where(
-                    row_valid_BL.unsqueeze(-1) & torch.isfinite(topk_scores_BLK), topk_scores_BLK.float(), 0.0
-                )
-            ).sum()
-            return _AuxLossInjection.apply(carrier, linear * self.teacher_alpha())
-        return self.inject(carrier, weighted_BLK.sum())

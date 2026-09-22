@@ -10,29 +10,15 @@ import torch
 from torchao_npu.quantized_modules import v41_sparse_attention as sparse_attention
 
 
-def test_localize_indices_preserves_document_local_entries():
-    """Global top-k coordinates outside a query document are invalidated."""
-    topk_indices = torch.tensor([[0, 1, 3], [1, 2, 3], [2, 4, 5]], dtype=torch.int64)
-    doc_ids = torch.tensor([0, 0, 1], dtype=torch.int64)
-    cu_cmp = torch.tensor([0, 2, 5], dtype=torch.int64)
-
-    localized = sparse_attention._localize_indices(topk_indices, doc_ids, cu_cmp)
-
-    expected = torch.tensor([[0, 1, -1], [1, -1, -1], [0, 2, -1]], dtype=torch.int64)
-    assert torch.equal(localized, expected)
-
-
 def _fake_mla_apply(captured):
-    def apply(q, swa_k, cmp_k, indices, sinks, cu_q, cu_cmp, remainder, scale, ratio, window):
+    def apply(q, swa_k, cmp_k, indices, sinks, attention_masks, scale, ratio, window):
         captured.update(
             q=q,
             swa_k=swa_k,
             cmp_k=cmp_k,
             indices=indices,
             sinks=sinks,
-            cu_q=cu_q,
-            cu_cmp=cu_cmp,
-            remainder=remainder,
+            attention_masks=attention_masks,
             scale=scale,
             ratio=ratio,
             window=window,
@@ -118,9 +104,7 @@ def test_sparse_mla_quantizes_only_swa_and_preserves_main_kv_in_both_passes(
         cmp_k,
         indices,
         sinks,
-        cu_q,
-        cu_cmp,
-        remainder,
+        forward_metadata,
         0.5,
         ratio,
         2,
@@ -164,21 +148,19 @@ def test_forward_ratio_zero_passes_window_only_inputs_to_mla(monkeypatch):
         compress_ratio=0,
     )
 
-    output, teacher_lse = module(
+    output = module(
         q,
         swa_k,
-        None,
-        attention_masks=metadata,
+        torch.zeros(2, device=device, dtype=torch.float32),
+        metadata,
+        cmp_k=None,
         topk_indices=None,
-        attn_sink=torch.zeros(2, device=device, dtype=torch.float32),
-        wants_teacher=True,
     )
 
     assert output.shape == q.shape
-    assert teacher_lse.shape == (1, 2, 4)
     assert captured["cmp_k"] is None
     assert captured["indices"] is None
-    assert captured["cu_cmp"] is None
+    assert captured["attention_masks"] is metadata
     assert captured["ratio"] == 0
     assert captured["window"] == 3
 
@@ -201,24 +183,21 @@ def test_forward_ratio_one_uses_full_resolution_shared_kv_without_residual(monke
         compress_ratio=1,
     )
 
-    output, teacher_lse = module(
+    output = module(
         q,
         swa_k,
-        cmp_k,
-        attention_masks=metadata,
+        torch.zeros(2, device=device, dtype=torch.float32),
+        metadata,
+        cmp_k=cmp_k,
         topk_indices=torch.zeros((1, 4, 2), device=device, dtype=torch.int64),
-        attn_sink=torch.zeros(2, device=device, dtype=torch.float32),
-        wants_teacher=True,
     )
 
     assert output.shape == q.shape
-    assert teacher_lse.shape == (1, 2, 4)
-    assert captured["cu_cmp"].tolist() == [0, 4]
-    assert captured["remainder"] is None
+    assert captured["attention_masks"] is metadata
     assert captured["cmp_k"].shape == (4, 1, 512)
 
 
-def test_forward_ratio_two_localizes_and_compacts_indices(monkeypatch):
+def test_forward_ratio_two_passes_the_selection_through_in_tnd_layout(monkeypatch):
     captured = {}
     monkeypatch.setattr(sparse_attention._SparseMLA, "apply", _fake_mla_apply(captured))
 
@@ -241,21 +220,19 @@ def test_forward_ratio_two_localizes_and_compacts_indices(monkeypatch):
         compress_ratio=2,
     )
 
-    output, teacher_lse = module(
+    output = module(
         q,
         swa_k,
-        cmp_k,
-        attention_masks=metadata,
+        torch.zeros(2, device=device, dtype=torch.float32),
+        metadata,
+        cmp_k=cmp_k,
         topk_indices=topk_indices,
-        attn_sink=torch.zeros(2, device=device, dtype=torch.float32),
-        wants_teacher=True,
     )
 
     assert output.shape == q.shape
-    assert teacher_lse.shape == (1, 2, 4)
-    assert captured["cu_cmp"].tolist() == [0, 1, 2]
-    assert captured["remainder"].tolist() == [0, 0]
+    # ``[B, L, 1, K]`` -> ``[T, 1, K]``, values untouched: the selector speaks
+    # document-local coordinates already and its order is the teacher's slot order.
     assert captured["indices"].shape == (4, 1, 2)
-    assert captured["indices"].tolist() == [[[0, -1]], [[0, -1]], [[0, -1]], [[0, -1]]]
+    assert captured["indices"].reshape(1, 4, 2).tolist() == topk_indices.tolist()
     assert captured["cmp_k"].shape == (2, 1, 512)
     assert captured["ratio"] == 2

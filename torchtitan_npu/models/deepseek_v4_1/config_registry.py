@@ -20,7 +20,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.protocols.model_spec import ModelSpec
 
-from torchtitan_npu.config import MuonOptimizerProfile, OptimizerConfig
+from torchtitan_npu.config import MuonOptimizerProfile, OptimizerConfig, TrainingConfig
 from torchtitan_npu.extensions.components.gradient_clipping import GradientClippingTrainer
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.trainer import TrainerEx
@@ -226,6 +226,12 @@ def _make_trainer_config(flavor: str) -> TrainerEx.Config:
     vision = isinstance(model_spec.model, DeepSeekV41MultimodalModel.Config)
 
     return DeepSeekV41Trainer.Config(
+        # One packed row per rank, which is what the model asserts and the loaders
+        # produce: documents are packed into a single row and the row is cut at
+        # ``seq_len``.  Upstream's default is 8, so the recipe states it rather than
+        # inheriting it -- a launcher that wants a different value still overrides the
+        # flag, and the model rejects it.
+        training=TrainingConfig(local_batch_size=1),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_spec),

@@ -25,7 +25,7 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_INDEX_SOURCE_LAYERS,
     V41_KV_SOURCE_LAYERS,
 )
-from torchtitan_npu.models.deepseek_v4_1.indexer import REUSE, IndexerDistillLoss
+from torchtitan_npu.models.deepseek_v4_1.indexer import REUSE
 
 _TOKENS = torch.arange(128).remainder(32).unsqueeze(0)
 _POSITIONS = torch.arange(128).unsqueeze(0)
@@ -60,9 +60,6 @@ def _tiny_debug_model(monkeypatch):
     monkeypatch.setattr(registry, "_make_v41_config", tiny_config)
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
     config.vocab_size = config.tok_embeddings.num_embeddings = config.lm_head.out_features = 64
-    # The trainer's update_from_config fills the aux-loss denominators before the run.
-    for _, loss_cfg, _, _ in config.traverse(IndexerDistillLoss.Config):
-        loss_cfg.global_batch_size = 1
     with torch.random.fork_rng(devices=[]):
         model = build_cpu_model(config)
     return model, config
@@ -80,7 +77,9 @@ def _record_module_forwards(model):
         handles.append(layer.register_forward_hook(record_block, with_kwargs=True))
 
         def record_core(module, args, kwargs, output, *, name=name):
-            cores_in[name] = (args[2], kwargs.get("topk_indices"))
+            # The core's signature is (q, swa_k, attn_sink, attention_masks, *, cmp_k, ...),
+            # so the compressed container travels as a keyword like the selection does.
+            cores_in[name] = (kwargs.get("cmp_k"), kwargs.get("topk_indices"))
 
         handles.append(layer.attention.inner_attention.register_forward_hook(record_core, with_kwargs=True))
     return blocks_in, blocks_out, cores_in, handles
@@ -218,7 +217,7 @@ def test_metadata_document_ids_restart_per_packed_document(monkeypatch) -> None:
 
     # torch.cumsum promotes the int32 input, so the document ids come back int64.
     torch.testing.assert_close(
-        metadata.doc_ids_BL,
+        metadata.ref.doc_ids_BL,
         torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1, 2, 2]], dtype=torch.int64),
         rtol=0,
         atol=0,
@@ -226,9 +225,9 @@ def test_metadata_document_ids_restart_per_packed_document(monkeypatch) -> None:
 
     # The indexer's selection masks are precomputed once per forward, one per pooling
     # ratio, so no layer rebuilds them.
-    assert set(metadata.selection_masks) == {ratio for ratio in model.compress_ratios if ratio > 0}
-    for ratio, (visible, _, _) in metadata.selection_masks.items():
-        assert visible.shape == (1, positions.size(1), positions.size(1) // ratio)
+    assert set(metadata.ref.selection_masks) == {ratio for ratio in model.compress_ratios if ratio > 0}
+    for ratio, (visible, _, _) in metadata.ref.selection_masks.items():
+        assert visible.shape == (positions.size(1), positions.size(1) // ratio)
 
 
 def test_weightless_compressor_passes_the_container_through(monkeypatch) -> None:
@@ -313,55 +312,6 @@ def test_unreachable_selection_slots_are_marked_in_the_student_logits(monkeypatc
         unreachable += int((indices < 0).sum())
     # Early queries cannot fill index_topk slots, so the marking is actually exercised.
     assert unreachable > 0
-
-
-def test_distill_loss_gets_detached_teacher_sources(monkeypatch) -> None:
-    """Only the student logits stay live when the loss is applied.
-
-    ``inject`` seeds the aux value with ones on backward, so a teacher source that also
-    feeds the attention output -- q, cmp_k or the operator's lse -- would collect that
-    seed on top of its real gradient.  The call site detaches all three, and the indexer
-    detaches its own trunk inputs, which is what keeps the distillation training the
-    indexer and nothing else.
-    """
-    model, _ = _tiny_debug_model(monkeypatch)
-    indexer_module = importlib.import_module("torchtitan_npu.models.deepseek_v4_1.indexer")
-    registered_forward = indexer_module.IndexerDistillLoss.forward
-    seen = []
-
-    def record_forward(self, q, cmp_k, topk_indices, lse, topk_scores, *, carrier):
-        seen.append(
-            (
-                q.requires_grad,
-                cmp_k.requires_grad,
-                lse.requires_grad,
-                topk_scores.requires_grad,
-                carrier.requires_grad,
-            )
-        )
-        return registered_forward(
-            self,
-            q,
-            cmp_k,
-            topk_indices,
-            lse,
-            topk_scores,
-            carrier=carrier,
-        )
-
-    monkeypatch.setattr(indexer_module.IndexerDistillLoss, "forward", record_forward)
-    _, _, kwargs = model.build_attention_masks(_TOKENS, _TOKENS, {"positions": _POSITIONS})
-    model(_TOKENS, **kwargs)
-
-    assert seen, "the debug model attaches the loss to every layer that consumes a selection"
-    for q_live, cmp_k_live, lse_live, scores_live, carrier_live in seen:
-        assert not q_live
-        assert not cmp_k_live
-        assert not lse_live
-        # The one live input carries the gradient that trains the indexer, and the
-        # carrier is the attention output the injection hands back.
-        assert scores_live
-        assert carrier_live
 
 
 def test_weightless_indexer_passes_the_selection_through(monkeypatch) -> None:

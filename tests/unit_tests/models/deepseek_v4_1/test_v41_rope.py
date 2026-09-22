@@ -131,9 +131,6 @@ def test_a5_launcher_selects_the_full_fused_stack(launcher_config):
     inner = cfg.layers[2].attention.inner_attention
     assert type(inner) is AscV41SparseAttention.Config
     assert issubclass(AscV41SparseAttention, CompressedSparseInnerAttention2)
-    assert inner.aux_loss is not None
-    assert inner.aux_loss.coeff == 0.01
-    assert inner.aux_loss.softmax_scale == inner.softmax_scale
     assert inner.compress_ratio == cfg.layers[2].attention.compress_ratio
 
     # field preservation through derive() is covered by test_mhc_adapters;

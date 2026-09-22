@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
@@ -81,28 +81,95 @@ def compression_alignment(compress_ratios: tuple[int, ...]) -> int:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class DeepSeekV41Metadata:
-    """Per-forward varlen metadata, built by :meth:`V41Model.get_attention_masks`.
+class KernelFrame:
+    """One tensor's coordinate frame: the boundaries the kernel needs to address it.
 
-    ``doc_ids_BL`` is the only per-token field: a non-decreasing document index per token,
-    built from the positions resetting to 0 at every packed segment start.  The same
-    tensor serves both consumers, which is why they agree by construction:
-    ``selected_attention`` applies ``doc_ids[q] == doc_ids[k]`` to its sliding-window
-    branch, and the indexer applies the same equality one axis over, entry ``j``
-    covering tokens ``[j * compress_ratio, (j + 1) * compress_ratio)``.
+    The tensors of a forward -- the query row and the two KV streams -- do **not** share a
+    frame in general, so each carries its own and the kernel reads the frame of the tensor
+    it is addressing rather than assuming one of them.
 
-    ``selection_masks`` precomputes the indexer's document-isolation and causal-
-    completeness views for this forward, keyed by ``compress_ratio``.  That rule depends
-    only on ``doc_ids`` and the ratio, so every indexer looks its own up instead of
-    rebuilding it.
+    ``cu_seqlens`` are the ragged document boundaries (``int32``, ``n_documents + 1``), the
+    form both kernels take as ``cu_seqlens_*``.  ``seqused`` is the per-document prefix this
+    frame's consumer needs, ``residual`` the trailing partial group of a compressed axis
+    (``None`` where the axis is not compressed, which the kernels reject a value for).
 
-    ``cu_seq_q`` carries the ragged cumulative boundary form the fused sparse kernel
-    consumes, and is ``None`` for loaders that do not provide it.
+    **Context parallel.**  With one packed row per rank and no sharding, every frame is the
+    row itself.  CP will move the query side's boundaries and the KV side's
+    ``seqused``/``residual`` -- that is, this dataclass and nothing else -- which is why the
+    frames are named after the tensor rather than after the field.
+    """
+
+    cu_seqlens: torch.Tensor
+    seqused: torch.Tensor
+    residual: torch.Tensor | None = None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class KernelMetadata:
+    """The kernel half of the metadata: the frames the fused ports address tensors in.
+
+    ``q`` and ``swa_k`` run at full resolution, so one frame each serves the whole forward.
+    The compressed streams do not: every ratio>0 layer pools at *its own* ratio, so there is
+    one frame per ratio the stack uses, precomputed here and looked up by each layer -- the
+    same shape as ``ref.selection_masks``.  The kernel never derives a boundary of its own,
+    which is what keeps the metadata call and the main call gridding the same axes.
+    """
+
+    q: KernelFrame
+    swa_k: KernelFrame
+    cmp_k: dict[int, KernelFrame]
+
+    def frame_for(self, ratio: int) -> KernelFrame | None:
+        """The frame of the compressed stream a layer at this ``ratio`` addresses.
+
+        A ratio-1 layer still consumes a compressed stream, but it does not pool: its
+        ``cmp_k`` is the row at full resolution, so its frame is ``q``'s and the kernels
+        reject a ``residual`` for it.  Only ratios above 1 are pooled and stored.
+        """
+        if ratio <= 0:
+            return None
+        return self.q if ratio == 1 else self.cmp_k[ratio]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class ReferenceMetadata:
+    """The reference half: what the torch-native path reads, in the global row frame.
+
+    ``doc_ids_BL`` is a non-decreasing document index per token, built from the positions
+    resetting to 0 at every packed segment start.  The same tensor serves both consumers,
+    which is why they agree by construction: ``selected_attention`` applies
+    ``doc_ids[q] == doc_ids[k]`` to its sliding-window branch, and the indexer applies the
+    same equality one axis over, entry ``j`` covering tokens
+    ``[j * compress_ratio, (j + 1) * compress_ratio)``.
+
+    ``selection_masks`` precomputes the indexer's document-isolation and
+    causal-completeness views for this forward, keyed by ``compress_ratio``.  That rule
+    depends only on ``doc_ids`` and the ratio, so every indexer looks its own up instead of
+    rebuilding it.  The views carry no batch axis (``[L, N]`` and ``[L, 1]``) because the
+    row is the batch: the model asserts ``local_batch_size == 1`` in
+    ``update_from_config``.
     """
 
     doc_ids_BL: torch.Tensor  # noqa: N815
     selection_masks: Mapping[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
-    cu_seq_q: torch.Tensor | None = None
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class DeepSeekV41Metadata:
+    """Per-forward varlen metadata, built by :meth:`V41Model.get_attention_masks`.
+
+    Two halves, because the reference path and the fused kernels do not read the same
+    thing and must not be confused for one another:
+
+    - ``ref`` is the torch-native view, in the **global** row frame, and is all
+      ``CompressedSparseInnerAttention2`` and the selection masks need;
+    - ``kernel`` is the fused ports' view, one frame per addressed tensor.  At CP=1 the
+      frames coincide with the row, so the distinction is invisible here -- it exists so CP
+      can shard the query side without touching ``ref``.
+    """
+
+    ref: ReferenceMetadata
+    kernel: KernelMetadata
 
 
 class DeepSeekV41TransformerBlock(TransformerBlock):
@@ -219,6 +286,15 @@ class DeepSeekV41Model(Decoder):
 
         def update_from_config(self, *, config, **kwargs):
             parallelism = config.parallelism
+            if config.training.local_batch_size != 1:
+                # V4.1 packs one row per rank: the document boundaries, the compressor's
+                # group grid and the fused kernels' ragged layout are all defined on that
+                # single row.  The model relies on it, so it is checked here rather than
+                # left to each launcher.
+                raise ValueError(
+                    "DeepSeek V4.1 requires one packed row per rank "
+                    f"(training.local_batch_size=1), got {config.training.local_batch_size}"
+                )
             if parallelism.tensor_parallel_degree != 1:
                 raise NotImplementedError("DeepSeek V4.1 currently supports TP=1 only")
             pp = parallelism.pipeline_parallel_degree
@@ -343,20 +419,6 @@ class DeepSeekV41Model(Decoder):
             return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
-        # Resolve the cross-layer scores contract on configs before modules exist.
-        mode = "logits"
-        layers = []
-        for layer in config.layers:
-            attention = layer.attention
-            if attention.indexer.mode is not IndexerMode.REUSE:
-                mode = attention.indexer.score_and_select.score_gradient
-            inner = attention.inner_attention
-            loss = inner.aux_loss
-            if loss is not None:
-                loss = replace(loss, score_gradient=mode)
-            inner = replace(inner, score_gradient=mode, aux_loss=loss)
-            layers.append(replace(layer, attention=replace(attention, inner_attention=inner)))
-        config = replace(config, layers=layers)
         super().__init__(config)
         cfg = config
         self.hc_mult = cfg.hc_mult
@@ -365,28 +427,59 @@ class DeepSeekV41Model(Decoder):
     def get_attention_masks(  # pyrefly: ignore [bad-override]
         self, positions: torch.Tensor
     ) -> DeepSeekV41Metadata:
-        """Build the per-forward varlen metadata: a document id per token and the
-        indexer's selection masks.
+        """Build the per-forward varlen metadata: the reference view and the kernel frames.
 
         ``selected_attention`` consumes the document ids for the window branch, and the
-        indexer derives its entry-axis ``doc_ids[:, ::compress_ratio]`` rule from them —
-        a rule that depends only on the ratio, so it is evaluated here once per ratio
-        rather than inside each indexer.  ``cu_seq_q`` flattens the same boundaries
-        into the ragged cumulative form the fused sparse kernel takes (CP1, one
-        packed row per rank).
+        indexer derives its entry-axis ``doc_ids[::compress_ratio]`` rule from them — a
+        rule that depends only on the ratio, so it is evaluated here once per ratio rather
+        than inside each indexer.  Those are the ``ref`` half and stay in the global row
+        frame.
+
+        The ``kernel`` half is the same row expressed as one frame per addressed tensor,
+        precomputed for every ratio the stack pools with so no consumer derives a boundary
+        of its own.  One packed row per rank means every frame is the row itself, which is
+        why this is a pure function of the row.
         """
         if positions is None:
             raise ValueError("DeepSeek V4.1 requires positions to build its attention metadata")
         doc_ids_BL = torch.cumsum((positions == 0).to(torch.int32), dim=-1) - 1
-        cu_seq_q = None
-        if positions.size(0) == 1:
-            starts = (positions[0] == 0).nonzero().flatten().to(torch.int32)
-            total = torch.tensor([positions.numel()], dtype=torch.int32, device=positions.device)
-            cu_seq_q = torch.cat((starts, total))
+        doc_ids_L = doc_ids_BL.reshape(-1)
+        selection_masks = indexer_selection_masks(doc_ids_L, self.compress_ratios)
+
+        # The boundaries are the row's start plus every document reset after it, then the
+        # row's end.  ``positions == 0`` marks the row start as well, so the resets are the
+        # markers past index 0 -- taking them all would put index 0 in the array twice and
+        # turn a single-document row into one document per token.
+        resets = (positions.reshape(-1) == 0).nonzero().flatten()[1:]
+        zeros = torch.zeros(1, dtype=torch.int32, device=doc_ids_L.device)
+        total = torch.tensor([doc_ids_L.numel()], dtype=torch.int32, device=doc_ids_L.device)
+        cu_seqlens = torch.cat((zeros, resets.to(torch.int32), total))
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+
+        def frame(ratio: int) -> KernelFrame:
+            if ratio == 1:
+                # The uncompressed case: the frame is the row's own boundaries, and the
+                # kernels reject a ``residual`` for an axis they do not compress.
+                return KernelFrame(cu_seqlens=cu_seqlens, seqused=lengths)
+            # A document need not be a whole number of groups: the compressed axis'
+            # boundaries are the query's rounded down, and ``residual`` is what that
+            # rounding dropped, per document.
+            return KernelFrame(
+                cu_seqlens=(cu_seqlens // ratio).to(torch.int32),
+                seqused=(lengths // ratio).to(torch.int32),
+                residual=(lengths % ratio).to(torch.int32),
+            )
+
+        # One frame per ratio the stack actually pools with -- ratios 0 and 1 have no
+        # compressed stream to describe -- so a layer's lookup is a dict hit rather than a
+        # boundary derivation, exactly like its ``selection_masks`` lookup.
         return DeepSeekV41Metadata(
-            doc_ids_BL=doc_ids_BL,
-            selection_masks=indexer_selection_masks(doc_ids_BL, self.compress_ratios),
-            cu_seq_q=cu_seq_q,
+            ref=ReferenceMetadata(doc_ids_BL=doc_ids_BL, selection_masks=selection_masks),
+            kernel=KernelMetadata(
+                q=frame(1),
+                swa_k=frame(1),
+                cmp_k={ratio: frame(ratio) for ratio in sorted({r for r in self.compress_ratios if r > 1})},
+            ),
         )
 
     def build_attention_masks(self, inputs, labels, extra_kwargs, *, cp_mesh=None, load_balancer_type=None):
@@ -399,7 +492,22 @@ class DeepSeekV41Model(Decoder):
         del load_balancer_type
         if cp_mesh is not None:
             raise NotImplementedError("DeepSeek V4.1 has no context-parallel layout yet")
-        extra_kwargs["attention_masks"] = self.get_attention_masks(extra_kwargs.get("positions"))
+        attention_masks = self.get_attention_masks(extra_kwargs.get("positions"))
+        # Every document must be a whole number of pooling groups, so the compressed axes
+        # have no partial trailing group and ``cmp_residual_kv`` is zero throughout.  A
+        # non-zero value here means the loader's document alignment and the stack's
+        # ``compress_ratios`` disagree -- the kernels would then grid an axis the pooling
+        # did not produce -- so it is checked rather than passed on.
+        for ratio, frame in attention_masks.kernel.cmp_k.items():
+            residual = frame.residual
+            if residual is not None and bool(residual.any()):
+                raise ValueError(
+                    f"compress_ratio {ratio} has a partial trailing group: a document "
+                    f"length is not a multiple of the pooling ratio ({residual.tolist()}). "
+                    "The dataloader's document alignment must be a multiple of every "
+                    "ratio in the stack's compress_ratios."
+                )
+        extra_kwargs["attention_masks"] = attention_masks
         return inputs, labels, extra_kwargs
 
     def _embedded_inputs(

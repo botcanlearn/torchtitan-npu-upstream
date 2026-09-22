@@ -169,22 +169,22 @@ def test_hook_builds_metadata_and_forwards_nothing_extra():
 
     metadata = extra["attention_masks"]
     elapsed = torch.cumsum((positions == 0).to(torch.int32), dim=-1) - 1
-    torch.testing.assert_close(metadata.doc_ids_BL, elapsed, rtol=0, atol=0)
+    torch.testing.assert_close(metadata.ref.doc_ids_BL, elapsed, rtol=0, atol=0)
     # The ragged cumulative form of the two document starts plus the row total.
     expected_cu = torch.tensor([0, 4, 10], dtype=torch.int32)
-    torch.testing.assert_close(metadata.cu_seq_q, expected_cu, rtol=0, atol=0)
-    assert metadata.selection_masks.keys() == {2}
+    torch.testing.assert_close(metadata.kernel.q.cu_seqlens, expected_cu, rtol=0, atol=0)
+    assert metadata.ref.selection_masks.keys() == {2}
     # Two documents of four and six tokens: entry j covers tokens [2j, 2j + 2) and is
     # visible to a query only when the group is complete (j < (t + 1) // 2) and belongs
     # to the query's own document -- an entry's document is the one its *first* token is
-    # in, which is what the alignment padding exists to keep unambiguous.
-    visible, _, _ = metadata.selection_masks[2]
-    assert visible.shape == (1, 10, 5)
-    assert visible[0, 1, 0]  # query 1 sees entry 0: complete, same document
-    assert not visible[0, 0, 0]  # query 0 does not: entry 0 is not complete yet
-    assert visible[0, 4, 1] is not None and not visible[0, 4, 1]  # entry 1 is document 0's
-    assert visible[0, 9, 4]  # entry 4 covers tokens 8-9, document 1's only group
-    assert not visible[0, 9, 1]  # ... and document 0's entries stay invisible to it
+    # in, which the loader's alignment invariant keeps a whole number of groups.
+    visible, _, _ = metadata.ref.selection_masks[2]
+    assert visible.shape == (10, 5)
+    assert visible[1, 0]  # query 1 sees entry 0: complete, same document
+    assert not visible[0, 0]  # query 0 does not: entry 0 is not complete yet
+    assert visible[4, 1] is not None and not visible[4, 1]  # entry 1 is document 0's
+    assert visible[9, 4]  # entry 4 covers tokens 8-9, document 1's only group
+    assert not visible[9, 1]  # ... and document 0's entries stay invisible to it
 
 
 def test_the_metadata_carries_no_validity_marks():

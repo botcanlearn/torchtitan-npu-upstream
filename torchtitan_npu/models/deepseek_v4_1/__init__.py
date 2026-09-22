@@ -28,7 +28,7 @@ from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .attention import Attention, CompressedSparseInnerAttention2
 from .compressor import Compressor
-from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, IndexerDistillLoss, ScoreAndSelect
+from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, Selector
 from .mhc import HcPost, HcPre
 from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, DeepSeekV41TransformerBlock
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
@@ -236,7 +236,7 @@ def _make_indexer_config(
     wants_pool = is_candidate_source or uses_candidates
     return HierarchicalIndexer.Config(
         mode=mode,
-        score_and_select=ScoreAndSelect.Config(
+        selector=Selector.Config(
             mode=mode,
             compress_ratio=compress_ratio,
             num_index_heads=num_index_heads,
@@ -320,7 +320,6 @@ def _make_v41_attn_config(
     candidate_block_size: int,
     layer_id: int,
     index_source_layers: tuple[int, ...],
-    indexer_loss_coeff: float | None,
 ) -> Attention.Config:
     if source_key and external_key:
         raise ValueError("an indexer cannot own its source-key projection and consume an external key at the same time")
@@ -344,18 +343,6 @@ def _make_v41_attn_config(
         is_source=owns_compressor,
         rope=attention_rope if owns_compressor else None,
     )
-    # The distillation loss is attached on every layer that consumes the selection:
-    # the teacher is rebuilt from that layer's own attention mass, and because ``dI`` is
-    # affine in the teacher, the per-layer losses sum to the pooled-teacher objective.
-    compresses = compress_ratio > 0
-    aux_loss = None
-    if indexer_loss_coeff is not None and compresses and any(source <= layer_id for source in index_source_layers):
-        aux_loss = IndexerDistillLoss.Config(
-            coeff=indexer_loss_coeff,
-            reduce_mesh="batch",
-            softmax_scale=softmax_scale,
-        )
-
     # Every layer carries an indexer; only a source carries its weights and its rope.
     indexer_cfg = _make_indexer_config(
         dim=dim,
@@ -379,7 +366,6 @@ def _make_v41_attn_config(
         window_size=window_size,
         softmax_scale=softmax_scale,
         compress_ratio=compress_ratio,
-        aux_loss=aux_loss,
     )
     return Attention.Config(
         n_heads=n_heads,
@@ -523,7 +509,6 @@ def _make_v41_config(
     non_blocking_capacity_factor: float | None,
     vision: bool,
     num_experts: int,
-    indexer_loss_coeff: float | None = 0.01,
     dim: int,
     n_heads: int,
     head_dim: int,
@@ -635,7 +620,6 @@ def _make_v41_config(
             candidate_block_size=_CANDIDATE_BLOCK_SIZE,
             layer_id=layer_id,
             index_source_layers=index_source_layers,
-            indexer_loss_coeff=indexer_loss_coeff,
         )
         moe_cfg = _make_v41_moe_config(
             layer_id=layer_id,
@@ -934,13 +918,10 @@ def model_registry(
 
 
 def _register_step_pre_hooks(optimizers, model_parts, parallel_dims) -> None:
-    """Register MoE balancing and auxiliary-loss step hooks."""
+    """Register the MoE balancing step hook."""
     from torchtitan.components.optimizer import register_moe_load_balancing_hook
 
-    from torchtitan_npu.patches.torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
-
     register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
 __all__ = [

@@ -20,8 +20,8 @@ from torchtitan_npu.models.deepseek_v4_1.indexer import FULL, REINDEX, REUSE, _s
 def test_index_selection_mask_is_document_isolated_and_causal() -> None:
     """Entry j is visible to query t of the same document iff group j is complete at t."""
     # Two documents of four tokens each; entry j covers tokens [2j, 2j + 2).
-    doc_ids_BL = torch.tensor([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=torch.int32)
-    visible, newest, newest_valid = _selection_mask(doc_ids_BL, 2)
+    doc_ids_L = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32)
+    visible, newest, newest_valid = _selection_mask(doc_ids_L, 2)
 
     expected_visible = torch.tensor(
         [
@@ -34,18 +34,18 @@ def test_index_selection_mask_is_document_isolated_and_causal() -> None:
             [False, False, True, False],
             [False, False, True, True],
         ]
-    ).unsqueeze(0)
+    )
     torch.testing.assert_close(visible, expected_visible, rtol=0, atol=0)
     torch.testing.assert_close(
         newest.squeeze(-1),
-        torch.tensor([[-1, 0, 0, 1, 1, 2, 2, 3]]),
+        torch.tensor([-1, 0, 0, 1, 1, 2, 2, 3]),
         rtol=0,
         atol=0,
     )
     # A fresh document with no complete group yet pins no block.
     torch.testing.assert_close(
         newest_valid.squeeze(-1),
-        torch.tensor([[False, True, True, True, False, True, True, True]]),
+        torch.tensor([False, True, True, True, False, True, True, True]),
         rtol=0,
         atol=0,
     )

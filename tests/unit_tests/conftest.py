@@ -51,9 +51,13 @@ _FAKE_FUNCTIONS = (
 # ``_ASC_SPARSEATTN_HOOK`` bundle); they are never invoked on CPU.
 _TORCH_OPS_FUNCTIONS = (
     "lightning_indexer",
+    "lightning_indexer_metadata",
     "sparse_flash_mla",
+    "sparse_flash_mla_metadata",
     "sparse_flash_mla_grad",
+    "sparse_flash_mla_grad_metadata",
     "sparse_lightning_indexer_kl_loss_grad",
+    "sparse_lightning_indexer_kl_loss_grad_metadata",
 )
 
 # The two partial-RoPE mutator ops: unlike the recorder functions above they

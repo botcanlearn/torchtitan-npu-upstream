@@ -100,6 +100,25 @@ torchtitan_npu/override/
         └── pypto.py
 ```
 
+`deepseek_v4_1/` 按 target 拆分，且不带 `__init__.py`（见
+[DeepSeek-V4.1](#deepseek-v41)）：
+
+```text
+torchtitan_npu/override/deepseek_v4_1/
+├── mhc.py
+├── vision_language_dataloader.py
+├── engram/
+│   ├── __init__.py
+│   ├── ascendc.py
+│   └── mxfp8.py
+├── lightning_indexer/
+│   ├── __init__.py
+│   └── ascendc.py
+└── sparse_attn/
+    ├── __init__.py
+    └── ascendc.py
+```
+
 - `common/` 存放只依赖 TorchTitan 公共组件、不依赖具体模型配置或元数据契约的实现。
 - `checkpoint/` 存放 checkpoint manager replacement 及其文件级完整性校验逻辑。
 - `<model>/` 存放依赖模型专属 target、配置字段、张量布局或元数据契约的实现。
@@ -401,6 +420,68 @@ TND 数据约定见 [DeepSeek-V4 TND 适配](../../docs/feature_guides/deepseek_
 runtime，安装方法参见 [PyPTO 安装文档](https://gitcode.com/cann/pypto/blob/master/docs/zh/install/build_and_install.md)，
 安装后可用 `python3 -c "import pypto"` 检查。
 
+### DeepSeek-V4.1
+
+以下入口省略 `torchtitan_npu.override.deepseek_v4_1.` 前缀：
+
+| 入口 | Target | Replacement | 说明 |
+| --- | --- | --- | --- |
+| `sparse_attn.asc` | `CompressedSparseInnerAttention2.Config`（精确匹配） | `AscV41SparseAttention.Config` | SMLA 前后向；`topk_scores` 作为教师边 |
+| `lightning_indexer.asc` | `Selector.Config`（精确匹配） | `AscSelector.Config` | 融合 LI 选分与 SLIKG 反向 |
+| `mhc.asc_sinkhorn` | `HcPre.Config`（精确匹配） | `AscV41HcPre.Config` | 仅融合 Sinkhorn，保留调用方的 pre mix |
+| `mhc.asc_hc_post` | `HcPost.Config`（精确匹配） | `AscV41HcPost.Config` | `cann_ops_transformer.ops.mhc_post` |
+| `engram.host_offload` | `HostEngramTable.Config`（精确匹配） | `HostOffloadEngramTable.Config` | CANN EngramFetch/EngramFetchGrad |
+| `engram.host_offload_mxfp8` | `HostEngramTable.Config`（精确匹配） | `MXFP8HostOffloadEngramTable.Config` | MXFP8 数据与 E8M0 scale |
+| `vision_language_dataloader.sft` | `DeepSeekV41DataLoader.Config`（`fqns=["dataloader"]`） | V4.1 结构化多模态 SFT dataloader | 数据行不覆盖 `thinking_mode` 等策略字段 |
+
+```text
+torchtitan_npu.override.deepseek_v4_1.sparse_attn.asc
+torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc
+torchtitan_npu.override.deepseek_v4_1.mhc.asc_sinkhorn
+```
+
+`deepseek_v4_1/` 没有 `__init__.py`：导入该 package 不注册任何 V4.1 override，每个入口
+只在 `override.imports` 按完整 `module.function` 列名导入时注册。`mhc` 下的两个入口
+只替换单个阶段，`HcPost` 的 kernel 调用因此要求显式的 `[B, T, D]` 流；`engram` 下的两个
+入口都要求 `num_max_tokens_per_rank`，取值需覆盖该次运行的最大 batch。启用方式见
+[V4.1 独立训练基线](../../examples/deepseek_v4_1/readme.md)。
+
+#### indexer 只在两个 override 同开时学习
+
+`sparse_attn.asc` 与 `lightning_indexer.asc` 各自替换独立的配置节点，但**必须同时启用**：
+模型构造时会检查这一对，只开其中一个直接报 `ValueError`，不会进入训练。检查在
+`Attention.__init__` 中按配置类的
+`provides_indexer_teacher` / `consumes_indexer_teacher` 标记配对，只对
+`compress_ratio > 0` 的层生效（纯窗口层没有压缩条目，两侧都没有这条边）。
+
+原因是 indexer 的训练目标只存在于两个 kernel 反向之间：
+
+- `sparse_attn.asc` 的 SMLAG 反向按每个 key 产生 attention 自身的完整 softmax
+  边际质量 `p`（窗口 + 选中压缩条目 + sink），写在 `topk_scores` 的梯度上。
+- `lightning_indexer.asc` 的 SLIKG 反向把该梯度当作教师：`dI = Z·Y - p` 由 kernel
+  自己施加，据此产出 indexer 的 `q`/`k`/`w` 梯度。
+- `topk_scores` 不参与任务损失，除这条边之外没有任何消费者。只开
+  `lightning_indexer.asc` 时该梯度为 `None`，SLIKG 反向直接返回零梯度，indexer
+  全程拿不到更新。
+- 只开 `sparse_attn.asc` 时 reference selector 会接住这条边，但它把
+  attention 级别的边际质量加到按 head 求和的 indexer logits 上，两侧不是同一个
+  量，得到的训练信号是错的而不是「另一种」。这条组合当前不做修复，由上面的
+  构造期检查拦住，使该路径不可达。
+
+V4.1 的 `index_source_layers` 都落在 `compress_ratio` 为 1 或 2 的层上，纯窗口层
+不携带 indexer，也不参与这条边。
+
+两个 override 覆盖同一份文档局部 index 坐标：SMLAG 的教师按文档局部位置散布回
+`topk_scores`，SLIKG 也按文档局部 index 计算，所以两侧都不做坐标转换。不要用其他
+来源写入 `topk_scores` 的梯度：该边被约定为原始 `p`，写入带符号的值会被 SLIKG
+当作教师并翻转 indexer 的梯度方向。
+
+CPU 测试用 eager 替身覆盖这条边：整模型前反向跑通后逐个断言 indexer 参数都有有限
+梯度，并覆盖只开一侧被拒绝、两侧同开可构建
+（`tests/unit_tests/override/deepseek_v4_1/test_lightning_indexer_fused.py`）。替身验证的
+是模型侧的搬运契约，SMLAG、SLIKG 和 LI 算子本身没有在 CPU 上执行过；NPU 上的数值和
+是否真的产生非零梯度仍需在设备上确认。
+
 ## Override 与 package patch
 
 | 维度 | 配置级 override | Package patch |
@@ -428,6 +509,7 @@ runtime，安装方法参见 [PyPTO 安装文档](https://gitcode.com/cann/pypto
 | 没有匹配节点 | `target`、`exact`、`fqns` 及 converter 后的配置类型 |
 | 同节点或嵌套冲突 | 移除互斥入口，或通过 `fqns` 缩小范围 |
 | 训练继续但替换未生效 | 检查 `[Override]` 日志和 `Applied N override(s)` |
+| V4.1 构建报 `must be enabled together` | `sparse_attn.asc` 与 `lightning_indexer.asc` 必须同开（见 [DeepSeek-V4.1](#deepseek-v41)） |
 
 TorchTitan override 机制、per-entry kwargs、checkpoint 和并行相关的完整说明见上游
 `torchtitan/overrides/README.md`。
