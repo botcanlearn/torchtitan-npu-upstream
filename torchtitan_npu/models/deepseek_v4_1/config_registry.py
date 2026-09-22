@@ -135,6 +135,9 @@ def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         }
         dense_shardings[f"layers.{layer_id}.moe.router.gate.weight"] = owned
         dense_shardings[f"layers.{layer_id}.hc_ffn_pre.hc_fn"] = owned
+        if layer_config.engram is not None:
+            # q_weight/k_weight are normalization scales, not projections.
+            dense_shardings[f"layers.{layer_id}.engram.gate.wkv"] = owned
         routed_shardings = {
             f"layers.{layer_id}.moe.routed_experts.inner_experts.{projection}": expert_sharding
             for projection in routed_expert_projections
@@ -157,6 +160,7 @@ def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         rf"moe\.shared_experts\.(?:{'|'.join(expert_projections)})\.weight|"
         rf"moe\.routed_experts\.inner_experts\.(?:{'|'.join(routed_expert_projections)})|"
         r"moe\.router\.gate\.weight|"
+        r"engram\.gate\.wkv|"
         rf"(?:{'|'.join(hc_pre_modules)})\.hc_fn"
         r")$"
     )

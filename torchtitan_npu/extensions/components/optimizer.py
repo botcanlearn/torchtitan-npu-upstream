@@ -35,7 +35,9 @@ def _sparse_grad_squared_norm(table: Any) -> torch.Tensor:
 
 
 @torch.no_grad()
-def clip_grad_norm_with_host_sparse_tables(parameters, max_norm, norm_type=2.0, *args, tables, clipper, **kwargs):
+def clip_grad_norm_with_host_sparse_tables(
+    parameters, max_norm, norm_type=2.0, *args, tables, clipper, scale_dense_gradients=None, **kwargs
+):
     """Clip dense and Host Engram sparse gradients against one global norm.
 
     TorchTitan's clipper only sees parameters whose ``.grad`` is set, and the
@@ -87,9 +89,12 @@ def clip_grad_norm_with_host_sparse_tables(parameters, max_norm, norm_type=2.0, 
 
     correction = float(total_coef / dense_coef)
     if correction != 1.0:
-        for parameter in parameters:
-            if parameter.grad is not None:
-                parameter.grad.mul_(correction)
+        if scale_dense_gradients is not None:
+            scale_dense_gradients(parameters, correction)
+        else:
+            for parameter in parameters:
+                if parameter.grad is not None:
+                    parameter.grad.mul_(correction)
     scale = float(total_coef)
     if scale != 1.0:
         for table in tables:
@@ -186,8 +191,14 @@ class HostSparseOptimizersContainer(OptimizersContainer):
             max_norm,
             tables=list(self._iter_host_tables()),
             clipper=clip_grad_norm_,
+            scale_dense_gradients=self._scale_dense_gradients,
             **kwargs,
         )
+
+    def _scale_dense_gradients(self, parameters, correction: float) -> None:
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.mul_(correction)
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         super().zero_grad(set_to_none=set_to_none)

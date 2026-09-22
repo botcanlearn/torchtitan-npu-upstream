@@ -101,6 +101,8 @@ class TestMuonPlacement:
         for fqn in (
             "layers.0.attention.wq_a.weight",
             "layers.0.attention.wkv.weight",
+            "layers.1.engram.gate.wkv",
+            "layers.14.engram.gate.wkv",
             "layers.0.moe.router.gate.weight",
             "layers.0.hc_attn_pre.hc_fn",
         ):
@@ -149,7 +151,7 @@ class TestRealModelReconciliation:
                 fqn.startswith(("vision_encoder", "tok_embeddings", "lm_head", "norm.", "image_marker_embeddings"))
                 or fqn.endswith((".attn_sink", "_norm.weight", ".norm.weight", ".hc_base", ".hc_scale", ".bias_vl"))
                 or ".indexer." in fqn
-                or ".engram." in fqn
+                or fqn.endswith((".engram.table.weight", ".engram.gate.q_weight", ".engram.gate.k_weight"))
             )
         }
         assert not unexpected, sorted(unexpected)[:5]
@@ -172,3 +174,15 @@ class TestRealModelReconciliation:
         # overrides from a launcher are dead after materialize).
         assert distmuon.optimizer_kwargs["lr"] == 1.23e-4
         assert adamw.optimizer_kwargs["lr"] == 1.23e-4
+
+        # Check first-match assignment, including 2-D normalization scales.
+        for layer_id in (1, 14):
+            prefix = f"layers.{layer_id}.engram"
+            for suffix, expected in (
+                ("table.weight", "SparseAdam"),
+                ("gate.wkv", "DistMuon"),
+                ("gate.q_weight", "AdamW"),
+                ("gate.k_weight", "AdamW"),
+            ):
+                selected = next(group for group in groups if re.search(group.pattern, f"{prefix}.{suffix}"))
+                assert selected.optimizer_name == expected

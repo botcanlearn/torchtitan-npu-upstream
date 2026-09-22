@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -52,6 +52,7 @@ class _PendingClip:
     coefficient: Tensor
     ready_event: Any | None
     gradients: dict[int, _CachedGradient]
+    corrections: list[float] = field(default_factory=list)
 
 
 class GradientClipChannel:
@@ -65,7 +66,8 @@ class GradientClipChannel:
     calls with no data path between them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, preserve_coefficient_dtype: bool = False) -> None:
+        self._preserve_coefficient_dtype = preserve_coefficient_dtype
         self._consumers = 0
         self._pending: _PendingClip | None = None
 
@@ -147,8 +149,25 @@ class GradientClipChannel:
         if state.ready_event is not None:
             current = torch.get_device_module(tensor.device).current_stream(tensor.device)
             current.wait_event(state.ready_event)
-        tensor.mul_(state.coefficient.to(dtype=tensor.dtype))
+        # HostSparse follows eager coefficient precision even on steps without
+        # a sparse correction. Ordinary offload retains its existing cast.
+        coefficient = (
+            state.coefficient if self._preserve_coefficient_dtype else state.coefficient.to(dtype=tensor.dtype)
+        )
+        tensor.mul_(coefficient)
+        for correction in state.corrections:
+            tensor.mul_(correction)
         return tensor
+
+    def rescale_pending(self, correction: float) -> bool:
+        """Include additional gradient norms before optimizers consume the cache."""
+        state = self._pending
+        if state is None:
+            return False
+        # Eager HostSparse scales gradients twice. Folding the factors into
+        # one coefficient changes rounding (and can change Muon's direction).
+        state.corrections.append(correction)
+        return True
 
     # -- lifecycle ------------------------------------------------------------
 

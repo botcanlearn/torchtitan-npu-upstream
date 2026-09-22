@@ -550,7 +550,9 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
         # The channel is the explicit clip->optimizer handoff: injected into
         # the optimizers below and exposed to the patched clip through the
         # module-level active handle (see GradientClipChannel).
-        self._clip_channel = clip_state.GradientClipChannel()
+        self._clip_channel = clip_state.GradientClipChannel(
+            preserve_coefficient_dtype=isinstance(self, HostSparseOptimizersContainer),
+        )
         clip_state.set_active_channel(self._clip_channel)
         self._closed = False
         super().__init__(config=config, model_parts=model_parts)
@@ -609,6 +611,8 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
         super().zero_grad(set_to_none=set_to_none)
 
     def _resolve_optimizer_factory(self, name: str) -> Callable[..., Optimizer]:
+        if name == "SparseAdam":
+            return torch.optim.SparseAdam
         if name in {"DistributedMuon", "DistMuon"}:
             return partial(
                 build_cpu_offload_distributed_muon,
@@ -624,6 +628,24 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
         raise ValueError(f"CPU-offload optimizer does not support {name}")
 
 
+class CpuOffloadHostSparseOptimizersContainer(  # pyrefly: ignore [inconsistent-inheritance]
+    CpuOffloadOptimizersContainer, HostSparseOptimizersContainer
+):
+    """Stage dense updates on NPU while retaining CPU sparse-table updates."""
+
+    # CpuOffload goes first to own staging/channel setup; Config puts
+    # HostSparse first so materialize() keeps SparseAdam groups ahead of Muon.
+    @dataclass(kw_only=True, slots=True)
+    class Config(HostSparseOptimizersContainer.Config, CpuOffloadOptimizersContainer.Config):
+        pass
+
+    def _scale_dense_gradients(self, parameters, correction: float) -> None:
+        # Offloaded dense gradients may already be cached on NPU. Correct the
+        # deferred coefficient, not the CPU copy that the optimizer will bypass.
+        if not self._clip_channel.rescale_pending(correction):
+            super()._scale_dense_gradients(parameters, correction)
+
+
 @override(
     target=OptimizersContainer.Config,
     description="Keep optimizer canonical state on CPU and execute updates on NPU",
@@ -637,6 +659,8 @@ def cpu_offload(
             "without it FSDP keeps parameters on NPU, the CPU-offload optimizers cannot "
             "run, and gradients would clip through the bounded fallback path"
         )
+    if isinstance(cfg, HostSparseOptimizersContainer.Config):
+        return derive(cfg, CpuOffloadHostSparseOptimizersContainer.Config)
     return derive(cfg, CpuOffloadOptimizersContainer.Config)
 
 
@@ -931,7 +955,7 @@ def swap_optimizer(
     cfg: OptimizersContainer.Config,
 ) -> OptimizersContainer.Config:
     if getattr(cfg, "_cpu_offload", False):
-        return derive(cfg, CpuOffloadOptimizersContainer.Config)
+        return cpu_offload(cfg)
     if isinstance(cfg, HostSparseOptimizersContainer.Config):
         return derive(cfg, HostSparseOptimizerStateSwapContainer.Config)
     return derive(cfg, OptimizerStateSwapContainer.Config)
