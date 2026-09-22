@@ -27,8 +27,8 @@ def asc(cfg: CompressedSparseInnerAttention2.Config):
     exact=True,
     description=(
         "The score-and-select node fused with its SLIKG backward in one "
-        "autograd.Function (pool-free indexers; pool layers keep the eager "
-        "score-and-select)"
+        "autograd.Function (every indexer layer; the candidate pool is not "
+        "part of the fused path)"
     ),
 )
 def asc_li(cfg: ScoreAndSelect.Config):

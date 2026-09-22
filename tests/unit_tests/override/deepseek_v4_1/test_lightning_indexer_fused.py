@@ -10,7 +10,8 @@ The NPU kernels are replaced by eager math with their exact contract
 ``dI = Z * Y - p``), so these tests pin the wiring: the fused score-and-select
 matches the reference path's selection and scores, the gradient carrier
 delivers the teacher to the fused backward, the distillation loss logs the
-reference value, and the pool indexers keep the eager path.
+reference value, and every layer -- pool-configured ones included -- runs the
+fused path.
 """
 
 import importlib
@@ -72,29 +73,40 @@ def _fake_lightning_indexer(
     cmp_ratio,
     **_,
 ):
-    """The LI v2 forward: doc-local top-k of the relaxed score, -1/-inf padded."""
+    """The LI v2 forward: doc-local top-k of the relaxed score, -1/-inf padded.
+
+    The relaxed score and the selection run through the reference path's
+    exact expressions over the packed batch: a per-doc contraction or a
+    doc-sliced top-k rounds and tie-breaks differently (relu zeroes tie at
+    the top-k boundary), which the parity tests must not mistake for a
+    wiring difference.  The picks come back in document-local coordinates
+    with -1/-inf padding, the kernel's contract.
+    """
     total = q.shape[0]
     indices = torch.full((total, 1, topk), -1, dtype=torch.int32)
     values = torch.full((total, 1, topk), float("-inf"))
+    scores_blhn = torch.einsum("blhd,bnd->blhn", q.unsqueeze(0), k.squeeze(1).unsqueeze(0))
+    scores_bln = (scores_blhn.relu() * w.unsqueeze(0).unsqueeze(-1)).sum(dim=2)
     cu_q = cu_seqlens_q.to(torch.long).tolist()
     cu_k = cu_seqlens_k.to(torch.long).tolist()
+    visible = torch.zeros_like(scores_bln, dtype=torch.bool)
+    starts = torch.zeros(total, dtype=torch.long)
     for doc in range(len(cu_q) - 1):
         q0, q1 = cu_q[doc], cu_q[doc + 1]
         k0, k1 = cu_k[doc], cu_k[doc + 1]
-        qd = q[q0:q1].float()
-        kd = k[k0:k1].float()
-        relaxed = torch.einsum("shd,jhd->sjh", qd, kd).relu() * w[q0:q1].unsqueeze(1)
-        relaxed = relaxed.sum(-1)
         token_pos = torch.arange(q1 - q0)
-        visible = torch.arange(k1 - k0).view(1, -1) < ((token_pos + 1) // cmp_ratio).view(-1, 1)
-        relaxed = relaxed.masked_fill(~visible, float("-inf"))
-        pick = min(topk, k1 - k0)
-        val, idx = relaxed.topk(pick, dim=-1)
-        # The real kernel pads unreachable picks: -1 in the indices, -inf in
-        # the values.
-        reachable = torch.isfinite(val)
-        indices[q0:q1, 0, :pick] = torch.where(reachable, idx, torch.full_like(idx, -1)).to(torch.int32)
-        values[q0:q1, 0, :pick] = val
+        visible[0, q0:q1, k0:k1] = (
+            torch.arange(k1 - k0).view(1, -1) < ((token_pos + 1) // cmp_ratio).view(-1, 1)
+        )
+        starts[q0:q1] = k0
+    relaxed = scores_bln.masked_fill(~visible, float("-inf"))
+    pick = min(topk, relaxed.size(-1))
+    selected = relaxed.topk(pick, dim=-1, sorted=False).indices
+    selected = selected.topk(pick, dim=-1, largest=False, sorted=True).values[0]
+    reachable = visible[0].gather(-1, selected)
+    local = torch.where(reachable, selected - starts.unsqueeze(-1), torch.full_like(selected, -1))
+    indices[:, 0, :pick] = local.to(torch.int32)
+    values[:, 0, :pick] = relaxed[0].gather(-1, selected)
     return indices, values
 
 
@@ -147,7 +159,7 @@ def _fake_kernels(monkeypatch):
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_lightning_indexer_kl_loss_grad", _fake_slig)
 
 
-def _tiny_model(monkeypatch, *, fused: bool, smla: bool = False):
+def _tiny_model(monkeypatch, *, fused: bool, smla: bool = False, pools: bool = True):
     """The registered debug flavor at CPU-sized widths, optionally with the LI override."""
     monkeypatch.setattr(DefaultDeviceType, "_default_device_type", "cpu")
     registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
@@ -173,6 +185,10 @@ def _tiny_model(monkeypatch, *, fused: bool, smla: bool = False):
     )
     config = registry.model_registry("deepseek_v4_1_debugmodel").model
     config.vocab_size = config.tok_embeddings.num_embeddings = config.lm_head.out_features = 64
+    if not pools:
+        for _, cfg, _, _ in config.traverse(HierarchicalIndexer.Config):
+            cfg.score_and_select.candidate_topk_blocks = 0
+            cfg.score_and_select.candidate_block_size = 0
     if fused:
         for _, cfg, parent, attr in config.traverse(HierarchicalIndexer.Config):
             cfg.score_and_select = derive(cfg.score_and_select, AscScoreAndSelect.Config)
@@ -196,19 +212,22 @@ def _run_forward_backward(model):
 
 
 def test_pool_free_indexers_match_the_reference_end_to_end(monkeypatch):
-    """The fused path reproduces the reference model's output, loss and gradients.
+    """The fused path reproduces the pool-free reference model's output, loss and gradients.
 
     With the kernels faked to the reference math, the only structural
     difference is the loss's student term (the linear carrier instead of the
     log-softmax), which the SLIKG closed form matches exactly -- so outputs,
-    the logged distillation value, and every pool-free indexer's gradients
-    agree with the eager model.
+    the logged distillation value, and every indexer's gradients agree with
+    the eager model.  The candidate pool is not part of the fused path: every
+    layer selects over all visible entries, so the reference is the same
+    eager model with pools disabled.
     """
-    eager = _tiny_model(monkeypatch, fused=False)
+    eager = _tiny_model(monkeypatch, fused=False, pools=False)
     fused = _tiny_model(monkeypatch, fused=True)
 
-    # The pool-free sources run the fused path; the pool source and its
-    # searchers keep the reference score-and-select.
+    # Every layer runs the fused node, the pool source and its searchers
+    # included: the candidate pool is bypassed, so the eager reference is
+    # the same model with pools disabled.
     fused_sources = [fused.layers[k].attention.indexer.score_and_select for k in ("2", "8", "14")]
     fused_pool = [fused.layers[k].attention.indexer.score_and_select for k in ("20", "24", "28")]
     assert all(isinstance(m, AscScoreAndSelect) for m in fused_sources)
@@ -252,7 +271,8 @@ def test_fused_selection_matches_the_reference_score_and_select(monkeypatch):
     assert fi.dtype == torch.long
     # The kernel contract's float32 scores, unlike the eager model-dtype logits.
     assert fs.dtype == torch.float32
-    # Same reachable selection per row (order differs by design), and the
+    # Same reachable selection per row (the fake emits the reference's
+    # ascending order; the real kernel's order is unspecified), and the
     # fused scores are the reference scores at the same entries.
     for t in range(l):
         eager_row = {int(j): float(v) for j, v in zip(ei[0, t].tolist(), es[0, t].tolist()) if j >= 0}
@@ -408,7 +428,9 @@ def test_full_model_smla_has_no_teacher_reconstruction(monkeypatch):
         _run_forward_backward(model)
     for layer_id in ("2", "3", "8", "14", "20", "21", "24", "28"):
         inner = model.layers[layer_id].attention.inner_attention
-        assert inner.score_gradient == ("teacher" if int(layer_id) < 20 else "logits")
+        # Every layer -- the pool group included -- hands the teacher to the
+        # fused backward.
+        assert inner.score_gradient == "teacher"
         assert torch.isfinite(inner.aux_loss.read())
     for name, parameter in model.named_parameters():
         if ".indexer." in name:

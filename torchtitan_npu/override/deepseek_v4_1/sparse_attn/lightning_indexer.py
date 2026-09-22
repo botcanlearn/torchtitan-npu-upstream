@@ -106,13 +106,16 @@ class _LightningIndexerTND(torch.autograd.Function):
 
 
 class AscScoreAndSelect(ScoreAndSelect):
-    """The fused LI/SLIKG score-and-select for pool-free indexer layers."""
+    """The fused LI/SLIKG score-and-select for the V4.1 indexer layers."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ScoreAndSelect.Config):
         @property
         def score_gradient(self) -> str:
-            return "logits" if self.candidate_topk_blocks else "teacher"
+            # The node always runs the LI/SLIKG kernel -- pool-configured
+            # layers included, their candidate pool bypassed -- so every
+            # layer's loss must hand the teacher to the fused backward.
+            return "teacher"
 
     def _score_and_select(
         self,
@@ -123,16 +126,6 @@ class AscScoreAndSelect(ScoreAndSelect):
         *,
         candidates_BLN: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        if self.candidate_topk_blocks > 0:
-            # The candidate pool is a cross-layer hierarchy over the full
-            # entry-axis scores, which the LI kernel never materializes; the
-            # pool-building source and the pool-searching layers keep the
-            # reference path.  Pool-free layers (the fused path's contract)
-            # never reach this branch.
-            return super()._score_and_select(
-                idx_q_BLHiDi, idx_k_BNDi, weights_BLHi, attention_masks, candidates_BLN=candidates_BLN
-            )
-
         cu_seqlens_q = attention_masks.cu_seq_q
         if cu_seqlens_q is None:
             raise ValueError("The fused LightningIndexer requires the packed document boundaries (cu_seq_q).")
