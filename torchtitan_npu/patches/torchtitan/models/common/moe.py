@@ -198,11 +198,15 @@ class HashMoE(MoE):
         input_ids: torch.Tensor | None = None,
         image_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward through the router (with optional ``input_ids``) and experts.
+        """Forward through the router and experts.
 
-        The body mirrors upstream ``MoE.forward``; ``input_ids`` is only
-        consumed by the router's hash path and ``image_mask`` only by its
-        multimodal vision bias.
+        The body mirrors upstream ``MoE.forward``.  Both keywords are optional and
+        belong to the two models that extend the shared stack, so a model that has
+        neither passes neither: ``input_ids`` is read only by the router's hash path
+        (DSV4, whose every hash layer needs it) and ``image_mask`` only by its
+        multimodal vision bias (DSV4.1's multimodal flavor).  The router holds both
+        requirements itself -- it rejects a hash layer without ``input_ids`` -- so a
+        caller cannot silently drop an argument its configuration depends on.
         """
         _B, L, _D = x_BLD.shape
         sp_size = getattr(self.routed_experts.token_dispatcher, "sp_size", 1)

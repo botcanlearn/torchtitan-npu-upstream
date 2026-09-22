@@ -40,11 +40,11 @@ _POSITIONS = torch.cat([torch.arange(64), torch.arange(64)]).unsqueeze(0)
 
 def _metadata(positions_1d: torch.Tensor):
     """Build the model's varlen metadata for a packed two-document batch."""
-    from torchtitan_npu.models.deepseek_v4_1.model import V41Model
+    from torchtitan_npu.models.deepseek_v4_1.model import DeepSeekV41Model
 
     class _ModelOwner:
         compress_ratios = (1, 2)
-        get_attention_masks = V41Model.get_attention_masks
+        get_attention_masks = DeepSeekV41Model.get_attention_masks
 
     return _ModelOwner().get_attention_masks(positions_1d.unsqueeze(0))
 

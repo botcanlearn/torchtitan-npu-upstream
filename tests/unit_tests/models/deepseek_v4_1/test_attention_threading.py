@@ -82,9 +82,7 @@ def _record_module_forwards(model):
         def record_core(module, args, kwargs, output, *, name=name):
             cores_in[name] = (args[2], kwargs.get("topk_indices"))
 
-        handles.append(
-            layer.attention.inner_attention.register_forward_hook(record_core, with_kwargs=True)
-        )
+        handles.append(layer.attention.inner_attention.register_forward_hook(record_core, with_kwargs=True))
     return blocks_in, blocks_out, cores_in, handles
 
 
@@ -342,7 +340,12 @@ def test_distill_loss_gets_detached_teacher_sources(monkeypatch) -> None:
             )
         )
         return registered_forward(
-            self, q, cmp_k, topk_indices, lse, topk_scores,
+            self,
+            q,
+            cmp_k,
+            topk_indices,
+            lse,
+            topk_scores,
             carrier=carrier,
         )
 

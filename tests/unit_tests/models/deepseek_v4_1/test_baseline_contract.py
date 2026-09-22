@@ -24,6 +24,7 @@ def test_plain_weights_use_routed_experts_and_track_empty_experts():
         load_balance_coeff=1e-3,
         moe_comm_backend="standard",
         non_blocking_capacity_factor=None,
+        vision_enabled=False,
     )
     with torch.random.fork_rng(devices=[]):
         moe = build_cpu_model(config)
@@ -75,6 +76,7 @@ def test_v41_moe_rides_the_common_stack_with_an_opt_in_vision_bias():
         load_balance_coeff=1e-3,
         moe_comm_backend="standard",
         non_blocking_capacity_factor=None,
+        vision_enabled=True,
     )
     assert config.router.vision_enabled and config.router.sorted_topk
 
@@ -131,3 +133,39 @@ def test_trainer_config_rejects_a_ratio_table_shorter_than_the_stack():
     model_config.compress_ratios = model_config.compress_ratios[:-1]
     with pytest.raises(ValueError, match="compress_ratios must match n_layers"):
         model_config.update_from_config(config=config)
+
+
+def test_vision_bias_follows_the_factory_switch():
+    """``vision_enabled`` is the MoE factory's parameter, and it is the only thing that
+    decides whether the router builds a ``bias_vl`` parameter at all."""
+    from torchtitan_npu.models.deepseek_v4_1 import _make_v41_moe_config
+
+    def build(vision_enabled: bool):
+        config = _make_v41_moe_config(
+            layer_id=0,
+            dim=8,
+            moe_inter_dim=8,
+            num_experts=4,
+            num_shared_experts=1,
+            top_k=2,
+            route_scale=1.5,
+            route_norm=True,
+            load_balance_coeff=1e-3,
+            moe_comm_backend="standard",
+            non_blocking_capacity_factor=None,
+            vision_enabled=vision_enabled,
+        )
+        with torch.random.fork_rng(devices=[]):
+            return config, build_cpu_model(config)
+
+    config, moe = build(True)
+    assert config.router.vision_enabled
+    assert moe.router.bias_vl is not None and moe.router.bias_vl.requires_grad
+
+    config, moe = build(False)
+    assert not config.router.vision_enabled
+    assert moe.router.bias_vl is None
+    # The selection order is not a modality property: every V4.1 layer keeps it.
+    assert config.router.sorted_topk
+    named = dict(moe.router.named_parameters())
+    assert "bias_vl" not in named

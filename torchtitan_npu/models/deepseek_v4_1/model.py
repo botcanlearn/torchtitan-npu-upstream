@@ -3,14 +3,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""DeepSeek V4.1 text backbone.
+"""DeepSeek V4.1 backbones: the text stack and its multimodal extension.
 
 Shape legend for this file:
     B = batch, L = sequence length, D = model dimension, hc = ``hc_mult`` residual
     branches.
 
-A plain :class:`torchtitan.models.common.decoder.Decoder` — no MTP depths, no
-context-parallel sharding (both rejected in ``update_from_config``).
+:class:`DeepSeekV41Model` is the text-only backbone — a plain
+:class:`torchtitan.models.common.decoder.Decoder` with no MTP depths and no vision
+tower.  :class:`DeepSeekV41MultimodalModel` subclasses it and adds the vision tower, the
+image markers and the modality-routing bias; the only things that differ are the input
+embedding construction and whether an ``image_mask`` reaches the block, so the text
+stack carries no vision parameter, no vision branch and no vision import.
 
 The block carries the residual stream as ``hc`` parallel branches and threads the
 cross-layer attention state (compressed KV, index keys, selected entries, student
@@ -36,7 +40,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import nn
@@ -45,8 +49,6 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from .engram import Engram  # noqa: TC001
 from .indexer import IndexerMode, indexer_selection_masks
 from .mhc import HcPost, HcPre
-from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings  # noqa: TC001
-from .vision.data import scatter_image_features
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -54,6 +56,7 @@ if TYPE_CHECKING:
     from torchtitan.models.common.moe import MoE
 
     from .attention import Attention
+    from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings
 
 
 def compression_alignment(compress_ratios: tuple[int, ...]) -> int:
@@ -137,12 +140,12 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         pre_mix: torch.Tensor,
-        image_mask: torch.Tensor | None = None,
         cmp_k: torch.Tensor | None = None,
         idx_k: torch.Tensor | None = None,
         topk_indices: torch.Tensor | None = None,
         topk_scores: torch.Tensor | None = None,
         candidates: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -156,6 +159,10 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
 
         ``pre_mix`` is the attention-input coefficient the next block must consume, and
         the shared attention tensors are this block's contribution to the chain.
+        ``image_mask`` is the block's only modality input and comes last, after the
+        cross-layer attention state: the text stack's forward signature is that state
+        and nothing else.  It is ``None`` whenever the caller has no modality, which is
+        every text-only forward, and both consumers already read that as "no modality".
         """
         if self.engram is not None:
             x = self.engram(x, input_ids, positions, image_mask=image_mask)
@@ -175,57 +182,32 @@ class DeepSeekV41TransformerBlock(TransformerBlock):
 
         residual = x
         x, ffn_pre, post, comb = self.hc_ffn_pre(x, attn_pre)
-        x = self.moe(self.ffn_norm(x), input_ids=input_ids, image_mask=image_mask)
+        x = self.moe(self.ffn_norm(x), image_mask=image_mask)
         x = self.hc_post(x, residual, post, comb)
         return x, ffn_pre, cmp_k, idx_k, topk_indices, topk_scores, candidates
 
 
-def _vision_encoder_anchor(hidden: torch.Tensor, visual: torch.Tensor) -> torch.Tensor:
-    """Keep the vision tower in the autograd graph when nothing is scattered.
+class DeepSeekV41Model(Decoder):
+    """DeepSeek-V4.1 text backbone: CSA2 policy over the packed varlen contract.
 
-    A batch can carry a tower whose features have no slot to go to (no spans and no
-    feature indices, or empty spans).  DDP/FSDP require every parameter to take part in
-    the backward pass, so the hidden states keep a zero-valued contribution from the
-    tower instead of dropping it -- and this makes that intent explicit rather than a
-    bare multiply-by-zero.
+    No MTP depths, no vision tower, no modality input: the stack consumes tokens,
+    positions and the model-owned metadata, and nothing else.  The multimodal stack is
+    :class:`DeepSeekV41MultimodalModel`, which only changes how the input embeddings are
+    built and whether an ``image_mask`` reaches the blocks.
     """
-    return hidden + visual.sum() * 0
-
-
-def scatter_image_embeddings(
-    hidden: torch.Tensor,
-    visual: torch.Tensor,
-    spans: torch.Tensor,
-) -> torch.Tensor:
-    """Scatter padded visual features into ``[batch, seq, hidden]`` embeddings."""
-    if spans.ndim != 2 or spans.shape[-1] != 3:
-        raise ValueError(f"image spans must have shape [num_images, 3], got {tuple(spans.shape)}")
-    if visual.ndim != 3 or visual.shape[0] != spans.shape[0]:
-        raise ValueError(
-            "visual features must have shape [num_images, tokens, hidden] "
-            f"matching spans, got visual={tuple(visual.shape)}, spans={tuple(spans.shape)}"
-        )
-    output = hidden.clone()
-    for image_idx, (sample_idx, start, length) in enumerate(spans.detach().cpu().tolist()):
-        sample_idx, start, length = int(sample_idx), int(start), int(length)
-        if sample_idx < 0 or sample_idx >= hidden.shape[0]:
-            raise ValueError(f"invalid image span {(sample_idx, start, length)}")
-        if start < 0 or length < 0:
-            raise ValueError(f"invalid image span {(sample_idx, start, length)}")
-        if start + length > hidden.shape[1] or length > visual.shape[1]:
-            raise ValueError(
-                f"image span {(sample_idx, start, length)} exceeds hidden/visual shapes "
-                f"{tuple(hidden.shape)}/{tuple(visual.shape)}"
-            )
-        output[sample_idx, start : start + length] = visual[image_idx, :length].to(output.dtype)
-    return output
-
-
-class V41Model(Decoder):
-    """DeepSeek-V4.1 backbone with CSA2 policy and the vision tower wired in."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
+        # Whether this stack can run under context parallelism: the text stack is the one
+        # the CP layout is being built for, and the multimodal config overrides this to
+        # ``False`` until the vision path has a CP story.
+        #
+        # The flag lives on the config because that is the only thing
+        # ``update_from_config`` has -- it runs before any module exists -- and
+        # :meth:`_check_context_parallel` is its only reader.  Declaring it on the model
+        # class as well would be a second copy nobody reads.
+        accepts_context_parallel: ClassVar[bool] = True
+
         n_layers: int
         hc_mult: int = 4
         compress_ratios: tuple[int, ...]
@@ -234,22 +216,18 @@ class V41Model(Decoder):
         candidate_source_layer: int = 20
         candidate_topk_blocks: int = 2048
         candidate_block_size: int = 8
-        vision_encoder: DeepSeekV41VisionEncoder.Config | None = None
-        image_marker_embeddings: ImageMarkerEmbeddings.Config | None = None
 
         def update_from_config(self, *, config, **kwargs):
             parallelism = config.parallelism
             if parallelism.tensor_parallel_degree != 1:
                 raise NotImplementedError("DeepSeek V4.1 currently supports TP=1 only")
-            cp = parallelism.context_parallel_degree
             pp = parallelism.pipeline_parallel_degree
-            if cp != 1:
-                raise NotImplementedError(f"DeepSeek V4.1 currently supports CP=1 only; got CP={cp}")
             if pp != 1:
                 raise NotImplementedError(f"DeepSeek V4.1 does not support pipeline parallelism; got PP={pp}")
             # compile (aot_eager / inductor) is supported: the cross-layer
             # state is threaded explicitly and the sparse core is the
             # traceable selected_attention reference implementation.
+            self._check_context_parallel(parallelism.context_parallel_degree)
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
             if len(self.compress_ratios) != self.n_layers:
@@ -298,12 +276,26 @@ class V41Model(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
+        def _check_context_parallel(self, context_parallel_degree: int) -> None:
+            """Reject a CP degree this stack cannot run.
+
+            The text stack can be sharded once the CP layout lands; the multimodal stack
+            cannot, so its config overrides :attr:`accepts_context_parallel`.  Reading the
+            class attribute rather than branching on the config class keeps the gate one
+            line and lets the text stack accept CP without touching this method.
+            """
+            if context_parallel_degree != 1 and not type(self).accepts_context_parallel:
+                raise NotImplementedError(
+                    "DeepSeek V4.1 rejects context parallelism on the multimodal stack; "
+                    f"got CP={context_parallel_degree}"
+                )
+
         def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
             from typing import cast
 
             from torchtitan.models.utils import get_moe_model_nparams_and_flops
 
-            deepseek_v4_1_model = cast("V41Model", model)
+            deepseek_v4_1_model = cast("DeepSeekV41Model", model)
             first_attention = self.layers[0].attention
             head_dims = 2 * first_attention.head_dim
             nparams, num_flops_per_token = get_moe_model_nparams_and_flops(
@@ -370,40 +362,19 @@ class V41Model(Decoder):
         self.hc_mult = cfg.hc_mult
         self.compress_ratios = tuple(cfg.compress_ratios)
 
-        self.vision_encoder = config.vision_encoder.build() if config.vision_encoder is not None else None
-        self.image_marker_embeddings = (
-            config.image_marker_embeddings.build() if config.image_marker_embeddings is not None else None
-        )
-
     def apply_activation_checkpointing_extensions(self, policy) -> None:
-        """Apply the shared AC policy to the V4.1 vision blocks.
+        """Apply the selected AC policy to model-specific extension blocks.
 
-        ``_wrap_block`` is private because the pinned torchtitan exposes no public hook
-        for wrapping a block that is not part of a ``Decoder`` layer list.
+        The text stack has none: every block is a decoder layer, which the policy
+        already walks.  The multimodal stack wraps its vision tower here.
         """
-        if self.vision_encoder is None:
-            return
-        for name, block in self.vision_encoder.blocks.named_children():
-            self.vision_encoder.blocks.register_module(
-                name,
-                policy._wrap_block(block, base_fqn=f"vision_encoder.blocks.{name}"),
-            )
 
     def apply_fsdp_extensions(self, *, dp_mesh, training, parallelism, parallel_dims) -> None:
-        """FSDP-wrap the V4.1 vision tower before the shared decoder wrapper."""
-        if self.vision_encoder is None:
-            return
-        from torchtitan.config import TORCH_DTYPE_MAP
-        from torchtitan.distributed.fsdp import apply_fsdp_to_vision_encoder
+        """Parallelize model-specific submodules before the shared decoder wrapper.
 
-        apply_fsdp_to_vision_encoder(
-            self.vision_encoder,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            pp_enabled=parallel_dims.pp_enabled,
-        )
+        The text stack has none; the multimodal stack FSDP-wraps its vision tower
+        here, before ``apply_fsdp_to_decoder`` sees the decoder.
+        """
 
     def get_attention_masks(  # pyrefly: ignore [bad-override]
         self, positions: torch.Tensor
@@ -441,54 +412,29 @@ class V41Model(Decoder):
         """
         del load_balancer_type
         if cp_mesh is not None:
-            raise NotImplementedError("DeepSeek V4.1 currently supports CP=1 only")
+            raise NotImplementedError("DeepSeek V4.1 has no context-parallel layout yet")
         extra_kwargs["attention_masks"] = self.get_attention_masks(extra_kwargs.get("positions"))
         return inputs, labels, extra_kwargs
 
-    def _prepare_multimodal_embeddings(
+    def _embedded_inputs(
         self,
         tokens: torch.Tensor,
         *,
-        pixel_values: torch.Tensor,
-        image_grid: torch.Tensor,
-        image_spans: torch.Tensor | None,
-        image_feature_indices: torch.Tensor | None = None,
-        token_types: torch.Tensor | None = None,
+        input_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.vision_encoder is None:
-            raise ValueError("image inputs were provided but no vision encoder is configured")
-        if pixel_values.ndim == 4:
-            pixel_values = pixel_values.flatten(0, 1)
-        if image_grid.ndim == 3:
-            image_grid = image_grid.flatten(0, 1)
-        if image_spans is None or image_spans.numel() == 0:
-            image_spans = None
-        elif image_spans.ndim == 3:
-            image_spans = image_spans.flatten(0, 1)
-        hidden = self.tok_embeddings(tokens)
-        visual = self.vision_encoder(pixel_values, image_grid)
-        if self.image_marker_embeddings is not None and token_types is not None:
-            hidden = self.image_marker_embeddings(hidden, token_types)
-        if image_feature_indices is not None:
-            counts = (
-                (image_grid[:, 0].to(torch.long) + self.vision_encoder.aligner.downsample_ratio - 1)
-                // self.vision_encoder.aligner.downsample_ratio
-            ) * (
-                (image_grid[:, 1].to(torch.long) + self.vision_encoder.aligner.downsample_ratio - 1)
-                // self.vision_encoder.aligner.downsample_ratio
-            )
-            flat_visual = (
-                torch.cat(
-                    [features[: int(count)] for features, count in zip(visual, counts.tolist(), strict=True)],
-                    dim=0,
-                )
-                if counts.numel()
-                else visual.new_empty((0, visual.shape[-1]))
-            )
-            return scatter_image_features(hidden, flat_visual, image_feature_indices)
-        if image_spans is None:
-            return _vision_encoder_anchor(hidden, visual)
-        return scatter_image_embeddings(hidden, visual, image_spans)
+        """Return the input embedding stream of one forward.
+
+        The text stack takes a caller-supplied stream or embeds the tokens itself.  The
+        multimodal stack keeps this contract and derives the modality mask in its own
+        override, because the mask is an input to the stack rather than part of the
+        embedding stream.
+        """
+        tok_embeddings = self.tok_embeddings
+        if input_embeds is not None:
+            return input_embeds
+        if tok_embeddings is None:
+            return tokens
+        return tok_embeddings(tokens)
 
     def forward(  # pyrefly: ignore [bad-override]
         self,
@@ -496,38 +442,19 @@ class V41Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: DeepSeekV41Metadata | None = None,
         *,
-        pixel_values: torch.Tensor | None = None,
-        image_grid: torch.Tensor | None = None,
-        image_spans: torch.Tensor | None = None,
-        image_feature_indices: torch.Tensor | None = None,
-        token_types: torch.Tensor | None = None,
         input_embeds: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
     ):
-        """V4.1 forward with Single-Pass mHC for vision and text-only batches.
+        """V4.1 forward with Single-Pass mHC.
 
         The cross-layer attention state is threaded through the stack as ordinary local
         variables: an attention source layer returns the tensors it produced, and every
-        other layer returns what it was handed.
+        other layer returns what it was handed.  ``image_mask`` is the stack's only
+        modality input: it is ``None`` on the text stack, which never has one, and the
+        multimodal stack hands it the mask it derives from ``token_types``.
         """
-        if pixel_values is None:
-            image_mask = token_types.ge(0) if token_types is not None else None
-            embeds = input_embeds
-        else:
-            if image_grid is None or (image_spans is None and image_feature_indices is None):
-                raise ValueError("pixel_values requires image_grid and image_spans or image_feature_indices")
-            image_mask = token_types.ge(0) if token_types is not None else None
-            embeds = self._prepare_multimodal_embeddings(
-                tokens,
-                pixel_values=pixel_values,
-                image_grid=image_grid,
-                image_spans=image_spans,
-                image_feature_indices=image_feature_indices,
-                token_types=token_types,
-            )
-
-        tok_embeddings = self.tok_embeddings
+        hidden = self._embedded_inputs(tokens, input_embeds=input_embeds)
         input_ids = tokens.detach().long()
-        hidden = embeds if embeds is not None else (tok_embeddings(tokens) if tok_embeddings is not None else tokens)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)
 
         pre_mix = HcPre.identity_pre_mix(hidden, self.hc_mult)
@@ -551,12 +478,12 @@ class V41Model(Decoder):
                 attention_masks,
                 positions,
                 pre_mix=pre_mix,
-                image_mask=image_mask,
                 cmp_k=cmp_k,
                 idx_k=idx_k,
                 topk_indices=topk_indices,
                 topk_scores=topk_scores,
                 candidates=candidates,
+                image_mask=image_mask,
             )
 
         # The stack has no learned output head: it collapses with the last block's
@@ -567,3 +494,157 @@ class V41Model(Decoder):
         if self._skip_lm_head or self.lm_head is None:
             return main_hidden
         return self.lm_head(main_hidden)
+
+
+class DeepSeekV41MultimodalModel(DeepSeekV41Model):
+    """DeepSeek-V4.1 backbone with the vision tower wired in.
+
+    Everything the text stack does is inherited; the multimodal half is the three
+    pieces that only exist with images: the tower and the markers, the input-embedding
+    construction that scatters visual features into the token positions, and the two
+    parallelization hooks that reach the tower.  The ``image_mask`` it derives is the
+    single modality input the residual-stream consumers read.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(DeepSeekV41Model.Config):
+        # Context parallelism is defined for the text stack; the vision path has no CP
+        # contract yet, so the multimodal stack keeps rejecting it.
+        accepts_context_parallel: ClassVar[bool] = False
+
+        # Required rather than optional: a config with neither is the text stack, and
+        # that is a different class.
+        vision_encoder: DeepSeekV41VisionEncoder.Config
+        image_marker_embeddings: ImageMarkerEmbeddings.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.vision_encoder = config.vision_encoder.build()
+        self.image_marker_embeddings = config.image_marker_embeddings.build()
+
+    def apply_activation_checkpointing_extensions(self, policy) -> None:
+        """Apply the shared AC policy to the V4.1 vision blocks.
+
+        ``_wrap_block`` is private because the pinned torchtitan exposes no public hook
+        for wrapping a block that is not part of a ``Decoder`` layer list.
+        """
+        for name, block in self.vision_encoder.blocks.named_children():
+            self.vision_encoder.blocks.register_module(
+                name,
+                policy._wrap_block(block, base_fqn=f"vision_encoder.blocks.{name}"),
+            )
+
+    def apply_fsdp_extensions(self, *, dp_mesh, training, parallelism, parallel_dims) -> None:
+        """FSDP-wrap the V4.1 vision tower before the shared decoder wrapper."""
+        from torchtitan.config import TORCH_DTYPE_MAP
+        from torchtitan.distributed.fsdp import apply_fsdp_to_vision_encoder
+
+        apply_fsdp_to_vision_encoder(
+            self.vision_encoder,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            pp_enabled=parallel_dims.pp_enabled,
+        )
+
+    def _modality_inputs(
+        self,
+        tokens: torch.Tensor,
+        *,
+        input_embeds: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_grid: torch.Tensor | None = None,
+        image_feature_indices: torch.Tensor | None = None,
+        token_types: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Return ``(embeddings, image_mask)`` for one forward.
+
+        The mask is derived here rather than only where visual features are scattered,
+        so a text-only batch of the multimodal stack still masks its Engram n-grams and
+        routes with the load-balancing bias.  It is ``None`` when the batch carries no
+        token types at all, which the consumers read as "no modality".
+        """
+        image_mask = token_types.ge(0) if token_types is not None else None
+        if pixel_values is None:
+            if input_embeds is not None:
+                return input_embeds, image_mask
+            hidden = self.tok_embeddings(tokens)
+            return hidden, image_mask
+        if image_grid is None or image_feature_indices is None:
+            raise ValueError("pixel_values requires image_grid and image_feature_indices")
+        return self._scatter_visual_features(
+            tokens,
+            pixel_values=pixel_values,
+            image_grid=image_grid,
+            image_feature_indices=image_feature_indices,
+            token_types=token_types,
+        ), image_mask
+
+    def _scatter_visual_features(
+        self,
+        tokens: torch.Tensor,
+        *,
+        pixel_values: torch.Tensor,
+        image_grid: torch.Tensor,
+        image_feature_indices: torch.Tensor,
+        token_types: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run the tower and write its features into the token embeddings."""
+        from .vision.data import scatter_image_features
+
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values.flatten(0, 1)
+        if image_grid.ndim == 3:
+            image_grid = image_grid.flatten(0, 1)
+        hidden = self.tok_embeddings(tokens)
+        visual = self.vision_encoder(pixel_values, image_grid)
+        if token_types is not None:
+            hidden = self.image_marker_embeddings(hidden, token_types)
+        ratio = self.vision_encoder.aligner.downsample_ratio
+        counts = ((image_grid[:, 0].to(torch.long) + ratio - 1) // ratio) * (
+            (image_grid[:, 1].to(torch.long) + ratio - 1) // ratio
+        )
+        flat_visual = (
+            torch.cat(
+                [features[: int(count)] for features, count in zip(visual, counts.tolist(), strict=True)],
+                dim=0,
+            )
+            if counts.numel()
+            else visual.new_empty((0, visual.shape[-1]))
+        )
+        return scatter_image_features(hidden, flat_visual, image_feature_indices)
+
+    def forward(  # pyrefly: ignore [bad-override]
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_masks: DeepSeekV41Metadata | None = None,
+        *,
+        pixel_values: torch.Tensor | None = None,
+        image_grid: torch.Tensor | None = None,
+        image_feature_indices: torch.Tensor | None = None,
+        token_types: torch.Tensor | None = None,
+        input_embeds: torch.Tensor | None = None,
+    ):
+        """The text forward plus the modality inputs the vision tower consumes.
+
+        The image tensors are keyword-only and translated into the one modality value
+        the stack understands, so the rest of the forward -- the cross-layer state
+        thread, the mHC collapse and the head -- is the inherited implementation.
+        """
+        embeds, image_mask = self._modality_inputs(
+            tokens,
+            input_embeds=input_embeds,
+            pixel_values=pixel_values,
+            image_grid=image_grid,
+            image_feature_indices=image_feature_indices,
+            token_types=token_types,
+        )
+        return super().forward(
+            tokens,
+            positions,
+            attention_masks,
+            input_embeds=embeds,
+            image_mask=image_mask,
+        )

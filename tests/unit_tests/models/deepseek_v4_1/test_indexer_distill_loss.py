@@ -75,9 +75,7 @@ def test_invalid_slots_contribute_nothing() -> None:
     topk_indices_BLK = torch.tensor([[[0, 1], [-1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
     lse_BLH = log_two.expand(1, 2, 1).clone()
-    student_logits = torch.tensor(
-        [[[float(torch.log(torch.tensor(3.0))), 0.0], [0.0, 0.0]]], requires_grad=True
-    )
+    student_logits = torch.tensor([[[float(torch.log(torch.tensor(3.0))), 0.0], [0.0, 0.0]]], requires_grad=True)
     carrier = torch.zeros(1, 2, 1)
 
     loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier).sum().backward()
@@ -104,9 +102,7 @@ def test_unreachable_slot_marked_minus_inf_is_dropped_not_nan() -> None:
     topk_indices_BLK = torch.tensor([[[0, 1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
     lse_BLH = log_two.expand(1, 1, 1).clone()
-    student_logits = torch.tensor(
-        [[[torch.log(torch.tensor(3.0)), 0.0, -torch.inf]]], requires_grad=True
-    )
+    student_logits = torch.tensor([[[torch.log(torch.tensor(3.0)), 0.0, -torch.inf]]], requires_grad=True)
     carrier = torch.zeros(1, 1, 1)
 
     loss(q_BLHD, cmp_k_BND, topk_indices_BLK, lse_BLH, student_logits, carrier=carrier).sum().backward()
@@ -142,6 +138,7 @@ def test_distill_loss_is_attached_only_where_a_selection_exists() -> None:
             assert aux_loss.coeff == 0.01
             assert aux_loss.reduce_mesh == "batch"
             assert aux_loss.softmax_scale == attention.inner_attention.softmax_scale
+
 
 def test_per_layer_losses_sum_to_the_pooled_teacher() -> None:
     """One pooled-teacher backward equals the sum of two consumer backwards.
@@ -186,9 +183,7 @@ def test_rows_without_a_reachable_entry_are_excluded_from_distillation() -> None
     topk_indices_BLK = torch.tensor([[[0, 1], [-1, -1]]])
     log_two = torch.log(torch.tensor(2.0))
     lse_BLH = log_two.expand(1, 2, 1).clone()
-    student_logits = torch.tensor(
-        [[[float(log_two), 0.0], [float(log_two), 0.0]]], requires_grad=True
-    )
+    student_logits = torch.tensor([[[float(log_two), 0.0], [float(log_two), 0.0]]], requires_grad=True)
     carrier = torch.zeros(1, 2, 1)
 
     loss(

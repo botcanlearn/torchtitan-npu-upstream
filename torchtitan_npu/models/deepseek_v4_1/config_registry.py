@@ -27,8 +27,7 @@ from torchtitan_npu.extensions.trainer import TrainerEx
 from torchtitan_npu.models.common.muon import make_expert_layout, make_owned_layout
 
 from . import model_registry
-from .model import V41Model, compression_alignment
-from .vision.dataloader import DeepSeekV41DataLoader
+from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, compression_alignment
 
 
 def _per_doc_alignment(model_spec: ModelSpec) -> int:
@@ -56,12 +55,12 @@ class DeepSeekV41Trainer(GradientClippingTrainer, TrainerEx):
         engram_enabled: bool = True
 
         def __post_init__(self) -> None:
-            assert self.model_spec is not None and isinstance(self.model_spec.model, V41Model.Config)
+            assert self.model_spec is not None and isinstance(self.model_spec.model, DeepSeekV41Model.Config)
             if not self.engram_enabled:
                 model_spec = copy.deepcopy(self.model_spec)
                 self.model_spec = model_spec
                 model = model_spec.model
-                assert isinstance(model, V41Model.Config)
+                assert isinstance(model, DeepSeekV41Model.Config)
                 self.optimizer = copy.deepcopy(self.optimizer)
                 for layer in model.layers:
                     layer.engram = None
@@ -87,7 +86,7 @@ def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     together with the vision tower and every 1-D parameter — this profile
     does not change the parameter policy the verified stacks ran with.
     """
-    model_config = cast("V41Model.Config", model_spec.model)
+    model_config = cast("DeepSeekV41Model.Config", model_spec.model)
     # FSDP folds the (dp_shard, cp) storage mesh into the single
     # ``dp_shard_cp`` axis when context parallelism is enabled, and the
     # partial_dtensor backend stores dense parameters on the plain ``fsdp``
@@ -181,7 +180,7 @@ def _v41_optimizer_config(model_spec: ModelSpec) -> OptimizerConfig:
     """
     adamw = default_adamw(lr=1e-5, eps=1e-6)
     has_engram = any(
-        getattr(layer, "engram", None) is not None for layer in cast("V41Model.Config", model_spec.model).layers
+        getattr(layer, "engram", None) is not None for layer in cast("DeepSeekV41Model.Config", model_spec.model).layers
     )
     optimizer_type = HostSparseOptimizersContainer.Config if has_engram else OptimizerConfig
     groups = adamw.param_groups
@@ -202,10 +201,35 @@ def _v41_optimizer_config(model_spec: ModelSpec) -> OptimizerConfig:
     )
 
 
-def _v41_trainer_config(flavor: str) -> TrainerEx.Config:
+def _vision_dataloader_config(model_spec: ModelSpec):
+    """The image-conditioned caption loader, for a multimodal model only.
+
+    Imported here rather than at module scope: the multimodal dataset stack pulls in the
+    image-preprocessing dependencies, and a text-only run must not need them.
+    """
+    from .vision.dataloader import DeepSeekV41DataLoader
+
+    return DeepSeekV41DataLoader.Config(per_doc_alignment=_per_doc_alignment(model_spec))
+
+
+def _text_dataloader_config(model_spec: ModelSpec):
+    """The packed text loader with the same per-document pooling alignment."""
+    from torchtitan_npu.patches.torchtitan.hf_datasets.text_datasets import AlignedHuggingfaceDataloader
+
+    return AlignedHuggingfaceDataloader.Config(per_doc_alignment=_per_doc_alignment(model_spec))
+
+
+def _v41_trainer_config(flavor: str, *, vision: bool) -> TrainerEx.Config:
     model_spec = model_registry(flavor)
     if model_spec.model.n_layers != len(model_spec.model.layers):  # pyrefly: ignore [missing-attribute]
         raise ValueError("registered V4.1 model does not describe every configured layer")
+    # The class is the single source of truth for which half the model has, and the
+    # loader, the optimizer groups and the state-dict adapter all follow from it.
+    expected = DeepSeekV41MultimodalModel.Config if vision else DeepSeekV41Model.Config
+    if not isinstance(model_spec.model, expected):
+        raise ValueError(f"flavor {flavor!r} does not build a {expected.__qualname__}")
+    if vision and not isinstance(model_spec.model, DeepSeekV41MultimodalModel.Config):
+        raise ValueError(f"the multimodal recipe requires a vision flavor, got {flavor!r}")
 
     return DeepSeekV41Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -215,17 +239,23 @@ def _v41_trainer_config(flavor: str) -> TrainerEx.Config:
         ),
         model_spec=model_spec,
         tokenizer=HuggingFaceTokenizer.Config(),
-        dataloader=DeepSeekV41DataLoader.Config(
-            per_doc_alignment=_per_doc_alignment(model_spec),
-        ),
+        dataloader=(_vision_dataloader_config(model_spec) if vision else _text_dataloader_config(model_spec)),
         optimizer=_v41_optimizer_config(model_spec),
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def deepseek_v4_1_flash_40layers_16experts_multimodal() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_flash_40layers_16experts_vision")
+    return _v41_trainer_config("deepseek_v4_1_flash_40layers_16experts_vision", vision=True)
+
+
+def deepseek_v4_1_flash_40layers_16experts_text() -> TrainerEx.Config:
+    return _v41_trainer_config("deepseek_v4_1_flash_40layers_16experts_text", vision=False)
 
 
 def deepseek_v4_1_debugmodel_multimodal() -> TrainerEx.Config:
-    return _v41_trainer_config("deepseek_v4_1_debugmodel")
+    return _v41_trainer_config("deepseek_v4_1_debugmodel", vision=True)
+
+
+def deepseek_v4_1_debugmodel_text() -> TrainerEx.Config:
+    return _v41_trainer_config("deepseek_v4_1_debugmodel_text", vision=False)

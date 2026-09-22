@@ -31,9 +31,7 @@ def launcher_config(tmp_path):
     root = Path(__file__).resolve().parents[4]
     scripts = tmp_path / "scripts"
     scripts.mkdir()
-    (scripts / "run_train.sh").write_text(
-        'printf "%s\\0" --module "$MODULE" --config "$CONFIG" "$@"\n'
-    )
+    (scripts / "run_train.sh").write_text('printf "%s\\0" --module "$MODULE" --config "$CONFIG" "$@"\n')
 
     def parse(hardware="a3", *, golden=False):
         env = os.environ | {

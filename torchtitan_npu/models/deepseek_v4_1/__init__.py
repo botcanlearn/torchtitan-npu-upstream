@@ -30,9 +30,8 @@ from .attention import Attention, CompressedSparseInnerAttention2
 from .compressor import Compressor
 from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, IndexerDistillLoss, ScoreAndSelect
 from .mhc import HcPost, HcPre
-from .model import DeepSeekV41TransformerBlock, V41Model
+from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, DeepSeekV41TransformerBlock
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
-from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings
 
 # std=1.0 mirrors the reference debug initialization; the marker values
 # are the reference marker values, so changing the std changes the marker
@@ -106,7 +105,12 @@ _ENGRAM_DEBUG_GEOMETRY = EngramArgs(
 
 @dataclass(frozen=True, slots=True)
 class _V41Widths:
-    """Per-flavor width set."""
+    """Per-flavor width set.
+
+    The vision widths default to zero because a text-only flavor has none: the width set
+    and the flavor's modality must agree, and ``_make_v41_config`` checks that rather
+    than letting a copy-pasted width set size a tower nobody builds.
+    """
 
     dim: int
     n_heads: int
@@ -120,10 +124,13 @@ class _V41Widths:
     index_topk: int
     moe_inter_dim: int
     candidate_topk_blocks: int
-    vision_dim: int
-    vision_heads: int
-    vision_inter_dim: int
     max_seq_len: int
+    # Vision widths: present on a multimodal flavor, absent on a text-only one, which
+    # is how the width set itself records the modality.  They default to zero, so they
+    # have to come last.
+    vision_dim: int = 0
+    vision_heads: int = 0
+    vision_inter_dim: int = 0
 
 
 _FLASH_WIDTHS = _V41Widths(
@@ -145,6 +152,22 @@ _FLASH_WIDTHS = _V41Widths(
     max_seq_len=4096,
 )
 
+_FLASH_TEXT_WIDTHS = _V41Widths(
+    dim=5120,
+    n_heads=64,
+    head_dim=512,
+    rope_head_dim=64,
+    q_lora_rank=1280,
+    o_lora_rank=1024,
+    n_groups=8,
+    index_n_heads=32,
+    index_head_dim=128,
+    index_topk=512,
+    moe_inter_dim=2304,
+    candidate_topk_blocks=2048,
+    max_seq_len=4096,
+)
+
 _DEBUG_WIDTHS = _V41Widths(
     dim=512,
     n_heads=8,
@@ -161,6 +184,22 @@ _DEBUG_WIDTHS = _V41Widths(
     vision_dim=128,
     vision_heads=8,
     vision_inter_dim=256,
+    max_seq_len=512,
+)
+
+_DEBUG_TEXT_WIDTHS = _V41Widths(
+    dim=512,
+    n_heads=8,
+    head_dim=64,
+    rope_head_dim=16,
+    q_lora_rank=128,
+    o_lora_rank=128,
+    n_groups=4,
+    index_n_heads=8,
+    index_head_dim=32,
+    index_topk=32,
+    moe_inter_dim=256,
+    candidate_topk_blocks=4,
     max_seq_len=512,
 )
 
@@ -508,6 +547,7 @@ def _make_v41_moe_config(
     load_balance_coeff: float,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    vision_enabled: bool,
 ) -> MoE.Config:
     # Every block carries the same MoE stack, so one config serves them all; the common
     # factories build it exactly as upstream's V4.1 does (the plugin patch gives them the
@@ -521,9 +561,11 @@ def _make_v41_moe_config(
         route_norm=route_norm,
         route_scale=route_scale,
     )
-    # The plugin's two router extensions: the image-masked vision bias and the
-    # reference's descending selection order.
-    router = dataclasses.replace(router, vision_enabled=True, sorted_topk=True)
+    # The plugin's two router extensions, as two independent switches: the
+    # image-masked vision bias follows the stack's modality -- a text-only stack has no
+    # image token to bias, so it builds no ``bias_vl`` at all -- while the reference's
+    # descending selection order holds for every V4.1 layer.
+    router = dataclasses.replace(router, vision_enabled=vision_enabled, sorted_topk=True)
     return make_moe_config(
         num_experts=num_experts,
         router=router,
@@ -561,10 +603,11 @@ def _make_v41_config(
     candidate_source_layer: int,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
+    vision: bool,
     num_experts: int = 16,
     indexer_loss_coeff: float | None = 0.01,
     widths: _V41Widths = _FLASH_WIDTHS,
-) -> V41Model.Config:
+) -> DeepSeekV41Model.Config | DeepSeekV41MultimodalModel.Config:
     # Per-layer source invariants. A reusing layer derives its container grid and its
     # index mask from its own ``compress_ratio``, so the ratio of a layer must equal the
     # ratio of the source it consumes; a topology that breaks this would silently read
@@ -610,6 +653,15 @@ def _make_v41_config(
     window_size = 128
     norm_eps = 1e-20
     hc_mult = 4
+    # The width set and the modality must agree: a text stack has no vision widths to
+    # size, and a multimodal one needs all three.
+    has_vision_widths = bool(widths.vision_dim or widths.vision_heads or widths.vision_inter_dim)
+    if has_vision_widths != vision:
+        raise ValueError(
+            f"the {'multimodal' if vision else 'text-only'} V4.1 flavor needs "
+            f"{'vision' if vision else 'no vision'} widths, got "
+            f"dim={widths.vision_dim}, heads={widths.vision_heads}, inter={widths.vision_inter_dim}"
+        )
 
     # The text tower's three rope sites share one public ComplexRoPE.Config;
     # reference and fused stacks pick the implementation via the public
@@ -678,6 +730,7 @@ def _make_v41_config(
             load_balance_coeff=1e-3,
             moe_comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
+            vision_enabled=vision,
         )
         layers.append(
             DeepSeekV41TransformerBlock.Config(
@@ -713,7 +766,7 @@ def _make_v41_config(
             )
         )
 
-    return V41Model.Config(
+    common = dict(
         dim=widths.dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -736,6 +789,17 @@ def _make_v41_config(
         candidate_source_layer=candidate_source_layer,
         candidate_topk_blocks=widths.candidate_topk_blocks,
         candidate_block_size=_CANDIDATE_BLOCK_SIZE,
+    )
+    if not vision:
+        return DeepSeekV41Model.Config(**common)
+
+    # The tower and the markers are what makes the multimodal stack a distinct class,
+    # so they are imported here rather than at module scope: a text-only run never pays
+    # for the vision module's dependencies.
+    from .vision import DeepSeekV41VisionEncoder, ImageMarkerEmbeddings
+
+    return DeepSeekV41MultimodalModel.Config(
+        **common,
         vision_encoder=DeepSeekV41VisionEncoder.Config(
             dim=widths.vision_dim,
             num_layers=32,
@@ -752,12 +816,15 @@ def _make_v41_config(
     )
 
 
-def deepseek_v4_1_flash_40layers_16experts_vision_config(
+def _flash_40layers_16experts_config(
     *,
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
+    vision: bool,
+    widths: _V41Widths,
+    engram,
+    moe_comm_backend: str,
+    non_blocking_capacity_factor: float | None,
 ):
-    """Full 40-layer V4.1 backbone with the single-node 16-expert crop."""
+    """The one shared shape: 40 layers, the released CED compression topology."""
     config = _make_v41_config(
         n_layers=40,
         compress_ratios=V41_FULL_COMPRESS_RATIOS,
@@ -766,22 +833,70 @@ def deepseek_v4_1_flash_40layers_16experts_vision_config(
         candidate_source_layer=V41_CANDIDATE_SOURCE_LAYER,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
+        vision=vision,
+        widths=widths,
     )
 
-    # Debug knob: shrink host-side engram tables for single-node runs.
-    # SparseAdam materializes dense exp_avg/exp_avg_sq (zeros_like) on the
-    # first step, so production 16M-row tables need ~2.4TB host RAM across
-    # 8 ranks. TORCHTITAN_ENGRAM_TABLE_ROWS scales only the per-order row
-    # count; width/heads/token-map semantics are unchanged. Unset keeps
-    # the published V4.1-Flash geometry.
+    return _attach_engram(config, engram)
+
+
+def _flash_engram_geometry():
+    """The published V4.1-Flash Engram geometry, with the host-memory debug knob applied.
+
+    Debug knob: shrink host-side engram tables for single-node runs.  SparseAdam
+    materializes dense exp_avg/exp_avg_sq (zeros_like) on the first step, so production
+    16M-row tables need ~2.4TB host RAM across 8 ranks.  TORCHTITAN_ENGRAM_TABLE_ROWS
+    scales only the per-order row count; width/heads/token-map semantics are unchanged.
+    Unset keeps the published V4.1-Flash geometry.
+
+    Only the published geometry scales: the debug geometry is already small, and it is
+    the one with ``require_token_id_map=False``.  Applying the row knob there would
+    replace it with a compressed-vocabulary geometry no test fixture can build.  Both
+    40-layer flavors read this, so a text/multimodal comparison runs on the same tables.
+    """
     table_rows = os.environ.get("TORCHTITAN_ENGRAM_TABLE_ROWS")
-    engram_geometry = _ENGRAM_V41_FLASH_GEOMETRY
-    if table_rows is not None:
-        engram_geometry = dataclasses.replace(
-            _ENGRAM_V41_FLASH_GEOMETRY,
-            vocab_size_per_ngram=(int(table_rows),) * len(_ENGRAM_V41_FLASH_GEOMETRY.vocab_size_per_ngram),
-        )
-    return _attach_engram(config, engram_geometry)
+    if table_rows is None:
+        return _ENGRAM_V41_FLASH_GEOMETRY
+    return dataclasses.replace(
+        _ENGRAM_V41_FLASH_GEOMETRY,
+        vocab_size_per_ngram=(int(table_rows),) * len(_ENGRAM_V41_FLASH_GEOMETRY.vocab_size_per_ngram),
+    )
+
+
+def deepseek_v4_1_flash_40layers_16experts_vision_config(
+    *,
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+):
+    """Full 40-layer V4.1 backbone with the vision tower and the 16-expert crop."""
+    return _flash_40layers_16experts_config(
+        vision=True,
+        widths=_FLASH_WIDTHS,
+        engram=_flash_engram_geometry(),
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+    )
+
+
+def deepseek_v4_1_flash_40layers_16experts_text_config(
+    *,
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+):
+    """Full 40-layer V4.1 text backbone: the multimodal shape without the vision half.
+
+    Same depth, widths, compression topology, Engram tables and MoE stack as the vision
+    flavor, minus the tower, the image markers and the router's vision bias -- so a text
+    run keeps the released backbone's shapes while carrying no parameter that only an
+    image token could select.
+    """
+    return _flash_40layers_16experts_config(
+        vision=False,
+        widths=_FLASH_TEXT_WIDTHS,
+        engram=_flash_engram_geometry(),
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+    )
 
 
 def deepseek_v4_1_debugmodel_config(
@@ -789,19 +904,29 @@ def deepseek_v4_1_debugmodel_config(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
 ):
-    """Reduced-width shape retaining the real 40-layer compression topology."""
-    config = _make_v41_config(
-        n_layers=40,
-        compress_ratios=V41_FULL_COMPRESS_RATIOS,
-        kv_source_layers=V41_KV_SOURCE_LAYERS,
-        index_source_layers=V41_FULL_INDEX_SOURCE_LAYERS,
-        candidate_source_layer=V41_CANDIDATE_SOURCE_LAYER,
+    """Reduced-width multimodal shape retaining the real 40-layer topology."""
+    return _flash_40layers_16experts_config(
+        vision=True,
+        widths=_DEBUG_WIDTHS,
+        engram=_ENGRAM_DEBUG_GEOMETRY,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
-        widths=_DEBUG_WIDTHS,
     )
 
-    return _attach_engram(config, _ENGRAM_DEBUG_GEOMETRY)
+
+def deepseek_v4_1_debugmodel_text_config(
+    *,
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+):
+    """Reduced-width text shape retaining the real 40-layer topology."""
+    return _flash_40layers_16experts_config(
+        vision=False,
+        widths=_DEBUG_TEXT_WIDTHS,
+        engram=_ENGRAM_DEBUG_GEOMETRY,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+    )
 
 
 def _attach_engram(config, engram):
@@ -822,7 +947,9 @@ def _attach_engram(config, engram):
 
 deepseek_v4_1_configs = {
     "deepseek_v4_1_flash_40layers_16experts_vision": deepseek_v4_1_flash_40layers_16experts_vision_config,
+    "deepseek_v4_1_flash_40layers_16experts_text": deepseek_v4_1_flash_40layers_16experts_text_config,
     "deepseek_v4_1_debugmodel": deepseek_v4_1_debugmodel_config,
+    "deepseek_v4_1_debugmodel_text": deepseek_v4_1_debugmodel_text_config,
 }
 
 
@@ -872,10 +999,13 @@ __all__ = [
     "V41_FULL_INDEX_SOURCE_LAYERS",
     "V41_KV_SOURCE_LAYERS",
     "Attention",
+    "DeepSeekV41Model",
+    "DeepSeekV41MultimodalModel",
     "DeepSeekV41StateDictAdapter",
-    "V41Model",
     "deepseek_v4_1_configs",
     "deepseek_v4_1_debugmodel_config",
+    "deepseek_v4_1_debugmodel_text_config",
+    "deepseek_v4_1_flash_40layers_16experts_text_config",
     "deepseek_v4_1_flash_40layers_16experts_vision_config",
     "model_registry",
 ]

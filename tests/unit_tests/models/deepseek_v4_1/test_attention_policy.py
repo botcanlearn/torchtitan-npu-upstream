@@ -11,6 +11,7 @@ from torchtitan_npu.models.deepseek_v4_1 import (
     V41_FULL_COMPRESS_RATIOS,
     V41_FULL_INDEX_SOURCE_LAYERS,
     V41_KV_SOURCE_LAYERS,
+    _DEBUG_TEXT_WIDTHS,
     _make_v41_config,
     deepseek_v4_1_debugmodel_config,
 )
@@ -171,6 +172,11 @@ def test_invalid_reuse_topology_is_rejected(overrides, match) -> None:
         candidate_source_layer=V41_CANDIDATE_SOURCE_LAYER,
         moe_comm_backend="standard",
         non_blocking_capacity_factor=None,
+        # The per-layer topology invariants under test hold for both stacks, so this
+        # exercises the text one: it takes the small width set, which has no vision
+        # widths to size.
+        vision=False,
+        widths=_DEBUG_TEXT_WIDTHS,
     )
     topology.update(overrides)
     with pytest.raises(ValueError, match=match):

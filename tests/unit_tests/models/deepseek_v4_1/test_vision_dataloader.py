@@ -3,17 +3,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""DSV4.1 protocol, upstream DP sharding, packing and checkpoint contracts."""
+"""The image-conditioned caption loader: protocol, alignment, packing and resume.
+
+The text-pipeline loader contracts live in ``test_text_dataloader``; what is here is what
+only the vision path has -- the image protocol, the per-document alignment of an image
+document, and the packing that carries the visual items along.
+"""
 
 from copy import deepcopy
-from itertools import pairwise
 from pathlib import Path
 
 import pytest
 import torch
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-from torchtitan_npu.models.deepseek_v4_1.model import V41Model
 from torchtitan_npu.models.deepseek_v4_1.vision.data import IMAGE_END, IMAGE_START, ImagePatchProcessor
 from torchtitan_npu.models.deepseek_v4_1.vision.dataloader import DeepSeekV41DataLoader
 
@@ -37,73 +40,6 @@ def _loader(tokenizer, *, rank=0, world=1, packing=0, infinite=False, alignment=
 
 def _captions(loader):
     return [tuple(labels[labels != -100].tolist()) for _, labels in loader]
-
-
-def test_upstream_webdataset_dp_shards(tokenizer):
-    expected = _captions(_loader(tokenizer))
-    shards = [_captions(_loader(tokenizer, rank=rank, world=2)) for rank in range(2)]
-    assert len(expected) == len(set(expected)) == 32
-    assert set(shards[0]).isdisjoint(shards[1])
-    assert sorted(shards[0] + shards[1]) == sorted(expected)
-
-
-def test_documents_align_to_the_pooling_ratio(tokenizer):
-    """Every document ends on a multiple of the alignment, so a compressor group
-    never straddles a document edge."""
-    saw_odd_document = False
-    for inputs, _ in _loader(tokenizer):
-        tokens = inputs["input"][0]
-        positions = inputs["positions"][0]
-        starts = (positions == 0).nonzero().flatten().tolist()
-        # Every document -- the real one and the row-tail padding document --
-        # has an even token count, including its alignment pad.
-        for begin, end in pairwise([*starts, tokens.numel()]):
-            assert (end - begin) % 2 == 0, (begin, end)
-        # The pack carries at least one real document, so the even lengths above are
-        # padded documents rather than an empty stream.
-        assert (tokens == tokenizer.eos_id).any()
-    # The committed tar really contains odd-length documents to align: without the
-    # pad at least one document would have an odd length.
-    for inputs, labels in _loader(tokenizer, alignment=1):
-        tokens = inputs["input"][0]
-        positions = inputs["positions"][0]
-        starts = (positions == 0).nonzero().flatten().tolist()
-        if any((end - begin) % 2 for begin, end in pairwise([*starts, tokens.numel()])):
-            saw_odd_document = True
-    assert saw_odd_document
-
-
-def test_alignment_pads_documents_without_training_them(tokenizer):
-    """A document's supervised content is the same aligned or not: the pad rounds the
-    document up and no document is dropped or reordered."""
-    saw_odd = False
-    odd_documents = []
-    for alignment in (1, 2):
-        documents = []
-        for inputs, labels in _loader(tokenizer, alignment=alignment):
-            tokens = inputs["input"][0]
-            starts = (inputs["positions"][0] == 0).nonzero().flatten().tolist()
-            for begin, end in pairwise([*starts, tokens.numel()]):
-                if alignment == 2:
-                    assert (end - begin) % 2 == 0, (begin, end)
-                row_labels = labels[0, begin:end]
-                mask = row_labels != -100
-                # A supervised target is the next token of the same row, never a pad.
-                assert torch.equal(row_labels[:-1][mask[:-1]], tokens[begin + 1 : end][mask[:-1]])
-                supervised = tuple(row_labels[mask].tolist())
-                documents.append(supervised)
-                if alignment == 1 and (end - begin) % 2:
-                    saw_odd = True
-                    odd_documents.append(supervised)
-        if alignment == 1:
-            unaligned = documents
-        else:
-            aligned = documents
-    # The tar really contains odd-length documents, and each is still emitted.
-    assert saw_odd
-    for document in odd_documents:
-        assert document in aligned
-    assert len(unaligned) == len(aligned)
 
 
 def test_packed_images_supervision_and_positions(tokenizer):
@@ -213,32 +149,3 @@ def test_recipe_passes_the_model_alignment_to_the_loader():
 
     trainer = cr.deepseek_v4_1_debugmodel_multimodal()
     assert trainer.dataloader.per_doc_alignment == cr._per_doc_alignment(trainer.model_spec) == 2
-
-
-def test_attention_metadata_from_packed_positions(tokenizer):
-    """The model-owned metadata hook turns the packed positions into the
-    document ids, the ragged boundaries and the indexer's selection masks."""
-    loader = _loader(tokenizer, packing=4)
-    inputs, labels = next(iter(loader))
-    extra = {key: value.clone() for key, value in inputs.items()}
-    # A vision batch carries no validity mark any more: the hook must not
-    # expect one, and nothing may reach the forward that the forward lacks.
-    assert "valid_tokens" not in extra
-
-    class _HookOwner:
-        # call the real hook through a minimal owner: the hook dispatches to
-        # the model's own metadata builder, so attach the actual construction
-        # methods and the ratio table its selection-mask precompute reads
-        compress_ratios = (2,)
-        build_attention_masks = V41Model.build_attention_masks
-        get_attention_masks = V41Model.get_attention_masks
-
-    _, _, extra = _HookOwner().build_attention_masks(inputs, labels, extra)
-
-    metadata = extra["attention_masks"]
-    starts = (inputs["positions"][0] == 0).nonzero().flatten().to(torch.int32)
-    expected_cu = torch.cat((starts, torch.tensor([inputs["positions"].numel()], dtype=torch.int32)))
-    torch.testing.assert_close(metadata.cu_seq_q, expected_cu, rtol=0, atol=0)
-    doc_ids = torch.cumsum((inputs["positions"] == 0).to(torch.int32), dim=-1) - 1
-    torch.testing.assert_close(metadata.doc_ids_BL, doc_ids, rtol=0, atol=0)
-    assert metadata.selection_masks.keys() == {2}

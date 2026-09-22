@@ -225,17 +225,30 @@ def set_v41_layer_sharding(layer_cfg, *, enable_sp: bool, enable_ep: bool) -> No
         enable_sp=enable_sp,
         expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
     )
-    layer_cfg.moe.router.sharding_config = ShardingConfig(state_shardings={"bias_vl": _dense_param_rep})
-    input_ids_src_placement = dense_activation_placement(tp=spmd.R)
-    input_ids_dst_placement = (
-        dense_token_ids_sequence_parallel_placement() if enable_ep else dense_activation_placement(tp=spmd.R)
-    )
-    layer_cfg.moe.sharding_config.in_src_shardings[  # pyrefly: ignore [missing-attribute]
-        "input_ids"
-    ] = input_ids_src_placement
-    layer_cfg.moe.sharding_config.in_dst_shardings[  # pyrefly: ignore [missing-attribute]
-        "input_ids"
-    ] = input_ids_dst_placement
+    # Both router extensions are placement contracts as well as parameters: the hash
+    # table reads ``input_ids`` and the vision bias reads ``image_mask``, so each is
+    # declared only where the stack has it.  No V4.1 layer hashes, so its MoE receives no
+    # ``input_ids``; only the multimodal flavor receives an ``image_mask``.
+    if getattr(layer_cfg.moe.router, "hash", False):
+        input_ids_src_placement = dense_activation_placement(tp=spmd.R)
+        input_ids_dst_placement = (
+            dense_token_ids_sequence_parallel_placement() if enable_ep else dense_activation_placement(tp=spmd.R)
+        )
+        layer_cfg.moe.sharding_config.in_src_shardings[  # pyrefly: ignore [missing-attribute]
+            "input_ids"
+        ] = input_ids_src_placement
+        layer_cfg.moe.sharding_config.in_dst_shardings[  # pyrefly: ignore [missing-attribute]
+            "input_ids"
+        ] = input_ids_dst_placement
+    if getattr(layer_cfg.moe.router, "vision_enabled", False):
+        layer_cfg.moe.router.sharding_config = ShardingConfig(state_shardings={"bias_vl": _dense_param_rep})
+        image_mask_placement = dense_activation_placement(tp=spmd.R)
+        layer_cfg.moe.sharding_config.in_src_shardings[  # pyrefly: ignore [missing-attribute]
+            "image_mask"
+        ] = image_mask_placement
+        layer_cfg.moe.sharding_config.in_dst_shardings[  # pyrefly: ignore [missing-attribute]
+            "image_mask"
+        ] = image_mask_placement
 
 
 def set_deepseek_v4_1_sharding_config(
@@ -245,12 +258,16 @@ def set_deepseek_v4_1_sharding_config(
     enable_ep: bool,
 ) -> None:
     """Assign the complete V4.1 placement policy."""
+    from .model import DeepSeekV41MultimodalModel
+
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     for layer in config.layers:
         if layer.engram is not None:
             set_engram_sharding_config(layer.engram, enable_ep=enable_ep, enable_sp=enable_sp)
 
-    if config.image_marker_embeddings is not None:
+    # The markers exist only on the multimodal stack, so their placement follows the
+    # config's class rather than a ``None`` field.
+    if isinstance(config, DeepSeekV41MultimodalModel.Config):
         config.image_marker_embeddings.sharding_config = ShardingConfig(
             state_shardings=dict.fromkeys(
                 ("image_start", "image_newline", "image_end"),

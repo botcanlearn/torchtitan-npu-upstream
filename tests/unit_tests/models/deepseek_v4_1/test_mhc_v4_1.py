@@ -83,9 +83,7 @@ def test_matches_the_explicit_branch_sum():
 
     got = _hc_post()(y, residual, post, comb)
 
-    torch.testing.assert_close(
-        got, _oracle(y, residual, post, comb).float(), rtol=1e-5, atol=1e-6
-    )
+    torch.testing.assert_close(got, _oracle(y, residual, post, comb).float(), rtol=1e-5, atol=1e-6)
 
 
 def test_permuted_comb_permutes_the_branches():

@@ -3,29 +3,41 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The complete V4.1 state-dict adapter (text backbone + vision tower).
+"""The V4.1 state-dict adapter: the text mapping plus, when there is one, the vision half.
 
-The text mapping is the V4.1-effective subset of the DSV4 mapping: no MTP
-depths, no hash routing tables; the routed experts merge/split and the
-DTensor-aware transfers are inherited from the common DeepSeek-V3 adapter
-(upstream torchtitan).  The vision/marker namespaces are owned by the
-composed :class:`DeepSeekV41VisionStateDictAdapter`.
+The text mapping is the V4.1-effective subset of the DSV4 mapping: no MTP depths, no hash
+routing tables; the routed experts merge/split and the DTensor-aware transfers are
+inherited from the common DeepSeek-V3 adapter (upstream torchtitan).  The vision tower,
+the markers and the router's vision bias belong to
+:class:`DeepSeekV41VisionStateDictAdapter`, which this adapter composes only for
+:class:`DeepSeekV41MultimodalModel` -- a text-only config gets no vision rule at all.
 """
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from torch.distributed.tensor import DTensor
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 from .indexer import REUSE
-from .vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
+
+if TYPE_CHECKING:
+    from .vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
 
 
 class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):
-    """V4.1 adapter: the local text mapping plus the V4.1 vision additions."""
+    """V4.1 adapter: the local text mapping plus, when the model has one, the vision half.
+
+    Which half is present is read off the model config's class rather than off a None
+    field: the vision namespace belongs to :class:`DeepSeekV41MultimodalModel`, so a text
+    config gets no vision rule at all -- including the ``bias_vl`` entry, whose parameter
+    a text-only router never builds.
+    """
 
     def __init__(self, model_config, hf_assets_path):
+        self._vision_adapter: DeepSeekV41VisionStateDictAdapter | None = None
         self._has_engram = any(getattr(layer, "engram", None) is not None for layer in model_config.layers)
         super().__init__(model_config, hf_assets_path)
 
@@ -50,7 +62,6 @@ class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
             "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
             "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
-            "layers.{}.ffn.gate.bias_vl": "layers.{}.moe.router.bias_vl",
             "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
             "layers.{}.ffn.shared_experts.w3.weight": "layers.{}.moe.shared_experts.w3.weight",
             "layers.{}.ffn.shared_experts.w2.weight": "layers.{}.moe.shared_experts.w2.weight",
@@ -100,14 +111,28 @@ class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):
                         )
                 self.from_hf_map.update(indexer_map)
 
-        self._vision_adapter = DeepSeekV41VisionStateDictAdapter()
+        # Imported here, not at module scope: the vision package pulls in the tower and,
+        # through it, the multimodal dataset stack -- a text-only run must not need them.
+        from .model import DeepSeekV41MultimodalModel
+
+        if isinstance(model_config, DeepSeekV41MultimodalModel.Config):
+            from .vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
+
+            self._vision_adapter = DeepSeekV41VisionStateDictAdapter()
+
+    def _owns_vision_hf_key(self, key: str) -> bool:
+        return self._vision_adapter is not None and self._vision_adapter.owns_hf_key(key)
+
+    def _owns_vision_local_key(self, key: str) -> bool:
+        return self._vision_adapter is not None and self._vision_adapter.owns_local_key(key)
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         self._check_engram_hf_support()
-        vision_hf = {k: v for k, v in hf_state_dict.items() if self._vision_adapter.owns_hf_key(k)}
-        base_hf = {k: v for k, v in hf_state_dict.items() if not self._vision_adapter.owns_hf_key(k)}
+        vision_hf = {k: v for k, v in hf_state_dict.items() if self._owns_vision_hf_key(k)}
+        base_hf = {k: v for k, v in hf_state_dict.items() if not self._owns_vision_hf_key(k)}
         result = self._from_hf_text(base_hf)
-        result.update(self._vision_adapter.from_hf(vision_hf))
+        if self._vision_adapter is not None:
+            result.update(self._vision_adapter.from_hf(vision_hf))
         return result
 
     def _check_engram_hf_support(self):
@@ -116,10 +141,11 @@ class DeepSeekV41StateDictAdapter(DeepSeekV3StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         self._check_engram_hf_support()
-        vision_local = {k: v for k, v in state_dict.items() if self._vision_adapter.owns_local_key(k)}
-        base_local = {k: v for k, v in state_dict.items() if not self._vision_adapter.owns_local_key(k)}
+        vision_local = {k: v for k, v in state_dict.items() if self._owns_vision_local_key(k)}
+        base_local = {k: v for k, v in state_dict.items() if not self._owns_vision_local_key(k)}
         result = self._to_hf_text(base_local)
-        result.update(self._vision_adapter.to_hf(vision_local))
+        if self._vision_adapter is not None:
+            result.update(self._vision_adapter.to_hf(vision_local))
         return result
 
     # ---- the text-backbone halves (the V4.1-effective DSV4 mapping) ----

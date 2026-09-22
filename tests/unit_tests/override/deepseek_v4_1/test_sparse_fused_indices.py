@@ -10,7 +10,7 @@ from itertools import pairwise
 import pytest
 import torch
 
-from torchtitan_npu.models.deepseek_v4_1.model import V41Model
+from torchtitan_npu.models.deepseek_v4_1.model import DeepSeekV41Model
 from torchtitan_npu.override.deepseek_v4_1.sparse_attn import ascendc
 
 
@@ -24,7 +24,7 @@ def _metadata(positions_1d: torch.Tensor):
 
     class _ModelOwner:
         compress_ratios = (1, 2)
-        get_attention_masks = V41Model.get_attention_masks
+        get_attention_masks = DeepSeekV41Model.get_attention_masks
 
     return _ModelOwner().get_attention_masks(positions_1d.unsqueeze(0))
 
