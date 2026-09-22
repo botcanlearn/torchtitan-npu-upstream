@@ -25,6 +25,7 @@ from torchtitan.distributed.full_dtensor import resolve_fsdp_mesh, resolve_spars
 from torchtitan_npu.extensions.distributed.fsdp import apply_fsdp_to_decoder
 
 from .engram.host import HostEngramTable
+from .model import DeepSeekV41MultimodalModel
 
 
 def _shard_engram_tables(
@@ -140,10 +141,15 @@ def _apply_compile_v4_1(model, *, compile_config: CompileConfig) -> None:
 
 
 def apply_activation_checkpointing(model, ac_config, dump_folder):
-    """Apply the selected policy plus any model-specific extension blocks."""
+    """Apply the selected policy plus any model-specific extension blocks.
+
+    Only the multimodal stack has blocks outside the decoder layer list; the text stack
+    is fully covered by the policy's own walk, so it takes no second call.
+    """
     policy = ac_config.build(dump_folder=dump_folder)
     policy.apply(model)
-    model.apply_activation_checkpointing_extensions(policy)
+    if isinstance(model, DeepSeekV41MultimodalModel):
+        model.apply_activation_checkpointing_extensions(policy)
 
 
 def parallelize_deepseek_v4_1(
@@ -183,12 +189,15 @@ def parallelize_deepseek_v4_1(
             edp_mesh_names = ["dp_replicate", "efsdp"] if parallel_dims.dp_replicate_enabled else ["efsdp"]
             edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
-    model.apply_fsdp_extensions(
-        dp_mesh=dp_mesh,
-        training=training,
-        parallelism=parallelism,
-        parallel_dims=parallel_dims,
-    )
+    # The vision tower is wrapped as one unit before the decoder wrapper sees it; a text
+    # stack has no such submodule and goes straight to the decoder wrapper.
+    if isinstance(model, DeepSeekV41MultimodalModel):
+        model.apply_fsdp_extensions(
+            dp_mesh=dp_mesh,
+            training=training,
+            parallelism=parallelism,
+            parallel_dims=parallel_dims,
+        )
 
     ignored_params = _shard_engram_tables(
         model,

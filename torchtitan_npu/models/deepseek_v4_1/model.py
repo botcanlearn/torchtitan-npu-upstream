@@ -362,20 +362,6 @@ class DeepSeekV41Model(Decoder):
         self.hc_mult = cfg.hc_mult
         self.compress_ratios = tuple(cfg.compress_ratios)
 
-    def apply_activation_checkpointing_extensions(self, policy) -> None:
-        """Apply the selected AC policy to model-specific extension blocks.
-
-        The text stack has none: every block is a decoder layer, which the policy
-        already walks.  The multimodal stack wraps its vision tower here.
-        """
-
-    def apply_fsdp_extensions(self, *, dp_mesh, training, parallelism, parallel_dims) -> None:
-        """Parallelize model-specific submodules before the shared decoder wrapper.
-
-        The text stack has none; the multimodal stack FSDP-wraps its vision tower
-        here, before ``apply_fsdp_to_decoder`` sees the decoder.
-        """
-
     def get_attention_masks(  # pyrefly: ignore [bad-override]
         self, positions: torch.Tensor
     ) -> DeepSeekV41Metadata:
@@ -525,6 +511,10 @@ class DeepSeekV41MultimodalModel(DeepSeekV41Model):
     def apply_activation_checkpointing_extensions(self, policy) -> None:
         """Apply the shared AC policy to the V4.1 vision blocks.
 
+        Called by ``parallelize_deepseek_v4_1`` only for this class: the text stack has no
+        extension blocks -- every block is a decoder layer the policy already walks -- so
+        a no-op there would exist only to be dispatched to.
+
         ``_wrap_block`` is private because the pinned torchtitan exposes no public hook
         for wrapping a block that is not part of a ``Decoder`` layer list.
         """
@@ -535,7 +525,11 @@ class DeepSeekV41MultimodalModel(DeepSeekV41Model):
             )
 
     def apply_fsdp_extensions(self, *, dp_mesh, training, parallelism, parallel_dims) -> None:
-        """FSDP-wrap the V4.1 vision tower before the shared decoder wrapper."""
+        """FSDP-wrap the V4.1 vision tower before the shared decoder wrapper.
+
+        Called by ``parallelize_deepseek_v4_1`` only for this class: a text stack has no
+        submodule the shared decoder wrapper would miss.
+        """
         from torchtitan.config import TORCH_DTYPE_MAP
         from torchtitan.distributed.fsdp import apply_fsdp_to_vision_encoder
 
