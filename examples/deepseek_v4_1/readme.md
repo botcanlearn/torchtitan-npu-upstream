@@ -71,6 +71,16 @@ A5 默认每机 8 卡、EP128/FSDP128、TP1/CP1/PP1、MBS1/GBS1024、100 步、M
 
 初始权重不会因设置 `HF_ASSETS_PATH` 自动加载：需要时设置 `CKPT_INIT_LOAD_PATH` 指向 HF checkpoint；保存 checkpoint 另加 `--checkpoint.no-load-only`。默认不启用参数/梯度 CPU offload，保留 `swap_optimizer` 对 Engram 的适配。`USE_GOLDEN=1` 切换 reference override；A5 若还要关闭量化，追加 `--extension.quantization.no-enable-quantized-training`。
 
+### Checkpoint 加载范围
+
+以下为追加到训练命令末尾的标准 CLI 参数：
+
+- 原生 DCP 完整续训：`--checkpoint.enable --checkpoint.initial-load-path /path/to/dcp/step-N --checkpoint.no-initial-load-in-hf --checkpoint.no-initial-load-in-hf-quantized --checkpoint.no-initial-load-model-only`。恢复模型、优化器和训练状态；并行布局与原 checkpoint 保持兼容。
+- 普通 HF 权重初始化：`--checkpoint.enable --checkpoint.initial-load-path /path/to/hf --checkpoint.initial-load-in-hf --checkpoint.no-initial-load-in-hf-quantized --checkpoint.initial-load-model-only`。只加载模型权重，优化器重新初始化。
+- 输入包含官方格式的 Engram MXFP8 权重时，在 HF 初始化参数上追加 `--checkpoint.initial-load-in-hf-quantized`，按 row/block scale 反量化到训练参数。该选项描述输入 checkpoint 格式，与训练时是否启用 Engram MXFP8 算子相互独立。
+
+当前补齐的是 Engram 表及 gate 的 HF 映射和 MXFP8 读取；V4.1 主线尚不能直接读取官方整包的所有非 Engram 量化权重（例如 Attention），因此开启 quantized 选项不意味着官方整包可以直接开始训练。HF 导出遵循 `export_dtype`，不导出优化器状态，也不生成官方 MXFP8 发布格式。
+
 ### 真实 CC12M 数据入口（图像条件 caption 预测）
 
 数据入口与 GitHub TorchTitan 的 Qwen/Kimi 多模态训练一致，使用 CC12M WebDataset tar（同名 `.jpg` / `.txt` 样本对）。默认 `dataset=cc12m-test`，读取仓内 `tests/assets/cc12m_test/`，无需传入 dataloader 参数；其他本地 tar 目录通过 `--dataloader.dataset-path <cc12m_tar_dir>` 指定。不提供 manifest、离线准备或 digest 专用脚本。

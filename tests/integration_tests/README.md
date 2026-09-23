@@ -29,7 +29,7 @@ torchtitan 迁移而来。
 
 当前两个 Golden case（均为 V4）设置 `check_loss=True`，使用固定随机种子和 deterministic 模式，
 比较 TensorBoard 标量 `loss_metrics/global_avg_loss`，要求 step 集合和每个浮点值均精确相等。
-DeepSeek-V4.1 的真实训练验证使用 [A3/A5 示例入口](../../examples/deepseek_v4_1/readme.md)，不注册专用手动冒烟 suite。
+DeepSeek-V4.1 的常规训练验证使用 [A3/A5 示例入口](../../examples/deepseek_v4_1/readme.md)。Engram HF 验证使用下述独立 suite，不在默认 `models` 或 CI smoke 中执行。
 
 两个 DeepSeek-V3.2 case 同样设置 `check_loss=True`，使用 RoPE workaround、Ascend DSA
 metadata/attention override，并分别对 1-rank 和 EP2/FSDP2 的 100-step loss 做精确比较。
@@ -125,3 +125,19 @@ runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到�
 
 调度器本身不设独立单元测试：其正确性（设备不重叠、失败/超时释放、并发打包、
 golden loss 等价）由集成测试自身的 canary 运行直接验证。
+
+
+## Engram HF 专项验证（手动）
+
+在支持 Engram MXFP8 Host 通信的超节点上激活 CANN、torch extension 和训练环境，准备 V4.1 tokenizer assets 后执行：
+
+```bash
+HF_ASSETS_PATH=/path/to/v41-tokenizer \
+ASCEND_RT_VISIBLE_DEVICES=0,1,2,3 \
+python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
+  --test_suite deepseek_v4_1_engram_hf --ngpu 4 --no-parallel
+```
+
+输出目录使用新目录。该用例为 V4.1 debug text、四卡 EP4/FSDP4、eager、seq512、GBS4，启用 Engram MXFP8 override，关闭普通模型 FP8 和 optimizer CPU offload。使用仓内 C4 数据及自动生成的微型 HF fixture，不需要正式模型权重。
+
+先训练两步并保存同一模型的原生 DCP 和 FP32 HF 权重，再各自通过真实 CheckpointManager 初始化模型，使用相同的新优化器和数据种子训练三步。每个 rank 校验加载后的 Engram 参数及 MXFP8 缓存/scale 有效行字节，随后对比 TensorBoard loss/grad_norm。失败会使测试返回非零，成功输出 `HF_ROUNDTRIP PASS`。不读取固定 golden，不验证优化器状态续训，也不覆盖正式整包非 Engram 量化权重的导入。

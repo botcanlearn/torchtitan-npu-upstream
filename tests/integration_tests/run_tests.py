@@ -49,6 +49,13 @@ def build_models_test_list() -> list[OverrideDefinitions]:
     )
 
 
+def build_engram_hf_test_list():
+    # Import the hardware-dependent validation entry only for this opt-in suite.
+    from tests.integration_tests.engram_hf import build_engram_hf_test_list as build
+
+    return build()
+
+
 # torchtitan-npu override: register the DeepSeek-V4, V4.1 and V3.2 NPU suites.
 _TEST_SUITES_FUNCTION = {
     "models": build_models_test_list,
@@ -56,6 +63,7 @@ _TEST_SUITES_FUNCTION = {
     "deepseek_v4": build_deepseek_v4_test_list,
     "deepseek_v4_checkpoint": build_deepseek_v4_checkpoint_resume_test_list,
     "ema": build_ema_test_list,
+    "deepseek_v4_1_engram_hf": build_engram_hf_test_list,
     "qwen3_5": build_qwen3_5_test_list,
 }
 

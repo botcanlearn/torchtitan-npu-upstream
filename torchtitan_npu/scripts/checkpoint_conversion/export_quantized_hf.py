@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 import torch
-import torch.distributed.checkpoint as dcp
 from torch import nn
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -31,12 +30,8 @@ def _bootstrap_sys_path() -> None:
     pip); the repo tree under ``experiments/torchao-npu`` is only a fallback,
     so a dev checkout shadowing the path is never displaced by the repo copy.
     """
-    for path in (
-        _REPO_ROOT,
-        _TORCHTITAN_NPU_DIR / "patches" / "torchtitan" / "scripts" / "checkpoint_conversion",
-    ):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
     try:
         import torchao_npu.serialization  # noqa: F401
     except ImportError:
@@ -388,8 +383,9 @@ def _build_model_and_adapter(model_name: str, model_flavor: str, hf_assets_path:
 
 def _load_dcp_state_dict(model, input_dir: Path, master_dtype: str, read_threads: int):
     """Load the DCP checkpoint into the model's state-dict container."""
-    from convert_to_hf import ParallelFileSystemReader  # pyrefly: ignore [missing-import]
     from torchtitan.config import TORCH_DTYPE_MAP
+
+    from torchtitan_npu.scripts.checkpoint_conversion.convert_to_hf import ParallelFileSystemReader, load_dcp_model
 
     state_dict = model.state_dict()
     # The model is built in float32, but dcp.load copies the stored dtype into
@@ -398,9 +394,10 @@ def _load_dcp_state_dict(model, input_dir: Path, master_dtype: str, read_threads
     # inputs. Rebind the container to the checkpoint's master dtype first.
     container_dtype = TORCH_DTYPE_MAP[master_dtype]
     for fqn, value in state_dict.items():
-        if value.is_floating_point() and value.dtype != container_dtype:
+        if value.is_floating_point() and value.dtype != container_dtype and ".engram.table.weight" not in fqn:
             state_dict[fqn] = value.detach().to(container_dtype)
-    dcp.load(state_dict, storage_reader=ParallelFileSystemReader(str(input_dir), thread_count=read_threads))
+    reader = ParallelFileSystemReader(str(input_dir), thread_count=read_threads)
+    load_dcp_model(state_dict, reader)
     return state_dict
 
 

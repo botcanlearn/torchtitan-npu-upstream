@@ -94,16 +94,11 @@ def _load_checkpoint_conversion_module() -> types.ModuleType:
     _register_packages(
         [
             ("torchtitan_npu", package_root),
-            ("torchtitan_npu.patches", package_root / "patches"),
-            ("torchtitan_npu.patches.torchtitan", package_root / "patches" / "torchtitan"),
-            ("torchtitan_npu.patches.torchtitan.scripts", package_root / "patches" / "torchtitan" / "scripts"),
-            (
-                "torchtitan_npu.patches.torchtitan.scripts.checkpoint_conversion",
-                package_root / "patches" / "torchtitan" / "scripts" / "checkpoint_conversion",
-            ),
+            ("torchtitan_npu.scripts", package_root / "scripts"),
+            ("torchtitan_npu.scripts.checkpoint_conversion", package_root / "scripts" / "checkpoint_conversion"),
         ]
     )
-    return importlib.import_module("torchtitan_npu.patches.torchtitan.scripts.checkpoint_conversion.convert_to_hf")
+    return importlib.import_module("torchtitan_npu.scripts.checkpoint_conversion.convert_to_hf")
 
 
 @pytest.fixture

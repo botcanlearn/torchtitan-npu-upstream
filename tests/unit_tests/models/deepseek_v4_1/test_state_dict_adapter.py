@@ -5,13 +5,24 @@
 
 """V4.1 StateDict adapter round-trip test: verify ownership-based partition."""
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 import torch
+import torch.distributed.checkpoint as dcp
+from safetensors.torch import save_file
+from torch.distributed.checkpoint import HuggingFaceStorageReader, HuggingFaceStorageWriter
 
 from torchtitan_npu.models.deepseek_v4_1 import (
     model_registry,
 )
 from torchtitan_npu.models.deepseek_v4_1.state_dict_adapter import DeepSeekV41StateDictAdapter
 from torchtitan_npu.models.deepseek_v4_1.vision.state_dict_adapter import DeepSeekV41VisionStateDictAdapter
+from torchtitan_npu.scripts.checkpoint_conversion.convert_to_hf import load_dcp_model
 
 
 def _build_model_config():
@@ -151,6 +162,94 @@ class TestComposedAdapterPartition:
             assert torch.equal(local1[k], local2[k]), f"key {k} differs"
 
 
+@pytest.mark.skipif(
+    not hasattr(dcp, "CheckpointableTensor"), reason="PyTorch CheckpointableTensor support is required"
+)
+def test_engram_hf_shard_load_and_export(tmp_path):
+    """DCP reads global HF rows into an EP shard and omits native padding on save."""
+    config = model_registry("deepseek_v4_1_debugmodel_text").model
+    table = config.layers[1].engram.table
+    table.head_vocab_sizes = (2, 3, 5, 7, 11, 13)
+    table.num_embeddings = 48
+    table.embedding_dim = 32
+    adapter = DeepSeekV41StateDictAdapter(config, None)
+    weight = torch.arange(41 * 32, dtype=torch.float32).view(41, 32)
+    source = tmp_path / "source"
+    source.mkdir()
+    save_file({"layers.1.engram.embed.weight": weight}, str(source / "model-00001-of-00001.safetensors"))
+    (source / "model.safetensors.index.json").write_text(
+        json.dumps({"metadata": {}, "weight_map": {"layers.1.engram.embed.weight": "model-00001-of-00001.safetensors"}})
+    )
+    key = "layers.1.engram.table.weight.ep_shard_00001_of_00002"
+    native = {key: torch.full((24, 32), -1.0)}
+    hf = adapter.to_hf(native)
+    dcp.load(hf, storage_reader=adapter.get_hf_storage_reader(str(source)))
+    loaded = adapter.from_hf(hf)
+    assert set(loaded) == {key}
+    torch.testing.assert_close(loaded[key][:17], weight[24:], rtol=0, atol=0)
+    assert torch.count_nonzero(loaded[key][17:]) == 0
+
+    full_native = adapter.from_hf({"layers.1.engram.embed.weight": weight})
+    native_path = tmp_path / "native"
+    full_key = "layers.1.engram.table.weight"
+    dcp.save(
+        {
+            full_key + ".ep_shard_00000_of_00002": full_native[full_key][:24].clone(),
+            full_key + ".ep_shard_00001_of_00002": full_native[full_key][24:].clone(),
+        },
+        checkpoint_id=str(native_path),
+    )
+    full_native[full_key].fill_(-1)
+    reader = dcp.FileSystemReader(str(native_path))
+    load_dcp_model(full_native, reader)
+    exported = adapter.to_hf(full_native)
+    output = tmp_path / "export"
+    dcp.save(exported, storage_writer=HuggingFaceStorageWriter(str(output)))
+    restored = {"layers.1.engram.embed.weight": torch.empty_like(weight)}
+    dcp.load(restored, storage_reader=HuggingFaceStorageReader(str(output)))
+    torch.testing.assert_close(restored["layers.1.engram.embed.weight"], weight, rtol=0, atol=0)
+
+    incomplete = tmp_path / "incomplete"
+    dcp.save({key: torch.zeros(24, 32)}, checkpoint_id=str(incomplete))
+    with pytest.raises(ValueError, match="Incomplete or unsupported Engram checkpoint shards"):
+        load_dcp_model(full_native, dcp.FileSystemReader(str(incomplete)))
+
+
+def test_engram_quantized_hf_mapping():
+    """The adapter selects the CPU reader and maps official Engram keys."""
+    config = model_registry("deepseek_v4_1_debugmodel_text").model
+    table = config.layers[1].engram.table
+    table.head_vocab_sizes = (2, 3, 5, 7, 11, 13)
+    table.num_embeddings = 48
+    table.embedding_dim = 32
+    adapter = DeepSeekV41StateDictAdapter(config, None)
+    weights = {
+        "layers.1.engram.embed.weight": torch.ones(41, 32).to(torch.float8_e4m3fn),
+        "layers.1.engram.wkv.weight": torch.full((64, 64), 2.0).to(torch.float8_e4m3fn),
+    }
+    scales = {
+        "layers.1.engram.embed.scale": torch.full((41, 1), 4.0).to(torch.float8_e8m0fnu),
+        "layers.1.engram.wkv.scale": torch.tensor([[1.0, 2.0], [4.0, 8.0]]).to(torch.float8_e8m0fnu),
+    }
+    from torchtitan_npu.extensions.mx_storage_reader.engram import EngramHuggingFaceStorageReader
+
+    assert isinstance(adapter.get_hf_storage_reader("unused", from_quantized=True), EngramHuggingFaceStorageReader)
+    gate = torch.repeat_interleave(torch.repeat_interleave(torch.tensor([[2.0, 4.0], [8.0, 16.0]]), 32, 0), 32, 1)
+    direct = adapter.from_hf(
+        weights
+        | scales
+        | {
+            "layers.1.engram.q_weight": torch.arange(12, dtype=torch.float32).view(3, 4),
+            "layers.1.engram.k_weight": torch.full((3, 4), 0.5),
+        }
+    )
+    torch.testing.assert_close(direct["layers.1.engram.table.weight"][:41], torch.full((41, 32), 4.0), rtol=0, atol=0)
+    torch.testing.assert_close(direct["layers.1.engram.gate.wkv"], gate, rtol=0, atol=0)
+    round_trip = adapter.to_hf(direct)
+    torch.testing.assert_close(round_trip["layers.1.engram.q_weight"], torch.arange(12, dtype=torch.float32).view(3, 4))
+    torch.testing.assert_close(round_trip["layers.1.engram.k_weight"], torch.full((3, 4), 0.5))
+
+
 class TestAdapterPartitionIsTotal:
     """The two adapters must partition the key space, not overlap or leave gaps.
 
@@ -237,3 +336,27 @@ class TestTextFlavorAdapter:
         assert "layers.3.moe.router.bias_vl" not in local
         hf_out = adapter.to_hf(local)
         assert set(hf_out) == set(hf_in)
+
+
+@pytest.mark.skipif(not torch.distributed.is_gloo_available(), reason="Gloo is required")
+@pytest.mark.skipif(
+    not hasattr(dcp, "CheckpointableTensor"), reason="PyTorch CheckpointableTensor support is required"
+)
+def test_engram_hf_distributed_roundtrip(tmp_path):
+    worker = Path(__file__).with_name("engram_hf_worker.py")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc-per-node=2",
+            str(worker),
+            str(tmp_path),
+        ],
+        env={**os.environ, "TORCH_DEVICE_BACKEND_AUTOLOAD": "0", "OMP_NUM_THREADS": "1"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
