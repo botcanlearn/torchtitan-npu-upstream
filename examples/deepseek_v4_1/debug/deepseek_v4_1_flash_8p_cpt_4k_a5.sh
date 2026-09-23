@@ -21,13 +21,27 @@ export PYTHONUNBUFFERED=1
 export TORCHTITAN_ENGRAM_TABLE_ROWS=100000
 
 # A5-only fused ops; USE_GOLDEN=1 keeps the pure reference list.
+# USE_TILELANG=1 swaps the mHC pre/post entries to the TileLang overrides
+# (swiglu/sparse-attn keep the asc fused path; the PR730/731 tilelang swiglu
+# and topk adapters are single-rank-validated and reject the EP>1 DTensor
+# weights this 8p recipe produces).
 if [[ "${USE_GOLDEN:-0}" != "1" ]]; then
-    export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
-                                           torchtitan_npu.override.common.swiglu_group.asc \
-                                           torchtitan_npu.override.common.swiglu_group.asc_shared_experts \
-                                           torchtitan_npu.override.deepseek_v4_1.sparse_attn.asc \
-                                           torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc \
-                                           torchtitan_npu.override.deepseek_v4_1.mhc.asc_sinkhorn}"
+    if [[ "${USE_TILELANG:-0}" == "1" ]]; then
+        export MHC_POST_OVERRIDE=torchtitan_npu.override.deepseek_v4_1.tilelang.tilelang_hc_post
+        export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
+                              torchtitan_npu.override.deepseek_v4_1.tilelang.tilelang_hc_pre \
+                              torchtitan_npu.override.common.swiglu_group.asc \
+                              torchtitan_npu.override.common.swiglu_group.asc_shared_experts \
+                              torchtitan_npu.override.deepseek_v4_1.sparse_attn.asc \
+                              torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc}"
+    else
+        export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
+                                               torchtitan_npu.override.common.swiglu_group.asc \
+                                               torchtitan_npu.override.common.swiglu_group.asc_shared_experts \
+                                               torchtitan_npu.override.deepseek_v4_1.sparse_attn.asc \
+                                               torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc \
+                                               torchtitan_npu.override.deepseek_v4_1.mhc.asc_sinkhorn}"
+    fi
 fi
 
 QUANTIZATION_ARGS=(

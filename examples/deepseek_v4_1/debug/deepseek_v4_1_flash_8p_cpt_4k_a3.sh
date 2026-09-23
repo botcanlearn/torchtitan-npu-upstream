@@ -150,11 +150,12 @@ if [[ "${USE_GOLDEN}" == "1" ]]; then
     DEFAULT_TEXT_ROPE_OVERRIDE=""
 else
     DEFAULT_TEXT_ROPE_OVERRIDE="torchtitan_npu.override.common.rope.asc_complex"
+    MHC_POST_OVERRIDE="${MHC_POST_OVERRIDE:-torchtitan_npu.override.deepseek_v4_1.mhc.asc_hc_post}"
     NPU_OPS_OVERRIDES=(
         torchtitan_npu.override.common.rms_norm.asc
         torchtitan_npu.override.common.rope.asc_half_rotation
         torchtitan_npu.override.common.token_dispatcher.asc
-        torchtitan_npu.override.deepseek_v4_1.mhc.asc_hc_post
+        ${MHC_POST_OVERRIDE}
     )
 fi
 
