@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 from torchtitan.config.manager import ConfigManager
 
+from torchtitan_npu.config import OptimizerConfig
 from torchtitan_npu.models.deepseek_v4_1 import (
     EngramArgs,
     model_registry,
@@ -278,6 +279,7 @@ def test_explicit_disable_preserves_selected_optimizer(optimizer):
     )
     trainer.model_spec.model.update_from_config(config=trainer)
     assert all(layer.engram is None for layer in trainer.model_spec.model.layers)
+    assert type(trainer.optimizer) is OptimizerConfig
     assert trainer.optimizer.name == optimizer
     trainer.optimizer.materialize()
     assert [group.optimizer_name for group in trainer.optimizer.param_groups] == (

@@ -117,7 +117,10 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
                 **{axis: Shard(0) for axis in dense_dp_axes},
                 MeshAxisName.EFSDP.value: Shard(0),
                 MeshAxisName.EP.value: Shard(0),
-            }
+            },
+            shard_order_by_tensor_dim={  # pyrefly: ignore [unexpected-keyword]
+                0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
+            },
         )
         for projection in routed_expert_projections:
             shardings[f"{prefix}.moe.routed_experts.inner_experts.{projection}"] = expert_sharding
@@ -166,14 +169,28 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         fqn: compute_sharding for layer_shardings in per_layer for fqn, compute_sharding in layer_shardings.items()
     }
     compute_sharding_by_fqn["hc_head.hc_fn"] = owned
-    bucket_configs = tuple(
-        BucketConfig(name=f"layers.{layer_id}", patterns=tuple(layer_shardings))
-        for layer_id, layer_shardings in enumerate(main_layer_shardings)
-    )
-    bucket_configs += tuple(
-        BucketConfig(name=f"mtp_layers.{layer_id}", patterns=tuple(layer_shardings))
-        for layer_id, layer_shardings in enumerate(mtp_layer_shardings)
-    )
+    routed_expert_marker = ".moe.routed_experts.inner_experts."
+
+    def bucket_configs_for_layers(
+        prefix: str,
+        layer_shardings: tuple[dict[str, ComputeLayout], ...],
+    ) -> tuple[BucketConfig, ...]:
+        layer_bucket_configs = []
+        for layer_id, shardings in enumerate(layer_shardings):
+            layer_name = f"{prefix}.{layer_id}"
+            routed_expert_patterns = tuple(fqn for fqn in shardings if routed_expert_marker in fqn)
+            dense_patterns = tuple(fqn for fqn in shardings if routed_expert_marker not in fqn)
+            layer_bucket_configs.append(BucketConfig(name=layer_name, patterns=dense_patterns))
+            layer_bucket_configs.append(
+                BucketConfig(
+                    name=f"{layer_name}.routed-experts",
+                    patterns=routed_expert_patterns,
+                )
+            )
+        return tuple(layer_bucket_configs)
+
+    bucket_configs = bucket_configs_for_layers("layers", main_layer_shardings)
+    bucket_configs += bucket_configs_for_layers("mtp_layers", mtp_layer_shardings)
     # hc_head is global rather than layer-scoped, so it needs its own bucket.
     bucket_configs += (BucketConfig(name="hc_head", patterns=("hc_head.hc_fn",)),)
     muon_pattern = (

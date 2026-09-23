@@ -1,3 +1,7 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
 
-from . import dist_muon  # noqa: F401
+from . import (
+    _optimizer_reshard_schedule,  # noqa: F401
+    dist_muon,  # noqa: F401
+    optimizer_reshard,  # noqa: F401
+)

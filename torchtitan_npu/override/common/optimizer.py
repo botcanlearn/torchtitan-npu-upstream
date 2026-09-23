@@ -32,9 +32,6 @@ from torchtitan.tools.logging import logger
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.cpu_offload import runtime as clip_state
 from torchtitan_npu.extensions.cpu_offload.cpu_offload_adamw import CpuOffloadAdamW
-from torchtitan_npu.extensions.cpu_offload.cpu_offload_muon import (
-    build_cpu_offload_distributed_muon,
-)
 from torchtitan_npu.extensions.cpu_offload.staging import CpuStaging
 from torchtitan_npu.extensions.novaswap import swap_api
 
@@ -623,6 +620,10 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
         if name == "SparseAdam":
             return torch.optim.SparseAdam
         if name in {"DistributedMuon", "DistMuon"}:
+            from torchtitan_npu.extensions.cpu_offload.cpu_offload_muon import (
+                build_cpu_offload_distributed_muon,
+            )
+
             return partial(
                 build_cpu_offload_distributed_muon,
                 staging=self._staging,

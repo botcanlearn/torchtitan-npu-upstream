@@ -51,6 +51,15 @@ search-path = ["/tmp/torchtitan"]
 replace-imports-with-any = ["torch_npu", "torch.npu"]
 
 [[tool.pyrefly.sub-config]]
+# These FlexShard backports rebind functions into upstream module globals.
+# Their private upstream symbols are resolved only at runtime.
+matches = "torchtitan_npu/patches/torchtitan/distributed/flex_shard/**"
+[tool.pyrefly.sub-config.errors]
+unknown-name = false
+missing-attribute = false
+bad-assignment = false
+
+[[tool.pyrefly.sub-config]]
 # Patch files deliberately monkey-patch upstream modules through full
 # ``torchtitan...`` / ``torch...`` paths without importing each submodule.
 matches = "torchtitan_npu/patches/**"

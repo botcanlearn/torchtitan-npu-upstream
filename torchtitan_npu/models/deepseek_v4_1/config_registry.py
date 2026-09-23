@@ -7,9 +7,11 @@ import copy
 from dataclasses import dataclass
 from typing import cast
 
+from torch.distributed.tensor import Shard
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import ParamGroupConfig, default_adamw
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import derive
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -24,7 +26,7 @@ from torchtitan_npu.config import MuonOptimizerProfile, OptimizerConfig, Trainin
 from torchtitan_npu.extensions.components.gradient_clipping import GradientClippingTrainer
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.trainer import TrainerEx
-from torchtitan_npu.models.common.muon import make_expert_layout, make_owned_layout
+from torchtitan_npu.models.common.muon import make_owned_layout
 
 from . import model_registry
 from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, compression_alignment
@@ -61,7 +63,8 @@ class DeepSeekV41Trainer(GradientClippingTrainer, TrainerEx):
                 self.model_spec = model_spec
                 model = model_spec.model
                 assert isinstance(model, DeepSeekV41Model.Config)
-                self.optimizer = copy.deepcopy(self.optimizer)
+                # Remove the HostSparse capability together with Engram.
+                self.optimizer = derive(copy.deepcopy(self.optimizer), OptimizerConfig)
                 for layer in model.layers:
                     layer.engram = None
                 self.optimizer.param_groups = [
@@ -104,7 +107,16 @@ def _v41_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     routed_expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
     compressor_projections = ("wkv", "wgate")
     hc_pre_modules = ("hc_attn_pre", "hc_ffn_pre")
-    expert_sharding = make_expert_layout(dense_dp_axes)
+    expert_sharding = ComputeLayout(
+        shardings_by_mesh_axis={
+            **{axis: Shard(0) for axis in dense_dp_axes},
+            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EP.value: Shard(0),
+        },
+        shard_order_by_tensor_dim={  # pyrefly: ignore [unexpected-keyword]
+            0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
+        },
+    )
 
     compute_sharding_by_fqn: dict[str, ComputeLayout] = {}
     bucket_configs: list[BucketConfig] = []

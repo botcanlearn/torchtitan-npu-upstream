@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import fields
 from pathlib import Path
 
+import torchtitan.distributed.flex_shard._optimizer_reshard_schedule as schedule
+import torchtitan.distributed.flex_shard.dist_muon as dist_muon
 from torch.distributed.tensor import Shard
 from torchtitan.distributed.flex_shard import BlockShard
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -111,6 +114,14 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
         MeshAxisName.EFSDP.value,
         MeshAxisName.EP.value,
     }
+    assert dict(expert_layout.shard_order_by_tensor_dim) == {
+        0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
+    }
+    bucket_configs = profile.optimizer_factory_kwargs["DistMuon"]["bucket_configs"]
+    routed_expert_bucket = next(
+        bucket for bucket in bucket_configs if bucket.name == "layers.2.routed-experts"
+    )
+    assert all(".moe.routed_experts.inner_experts." in fqn for fqn in routed_expert_bucket.patterns)
     for unified_muon_parameter in (
         "indexer",
         "compressor",
@@ -120,6 +131,33 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
         'mtp_projections = ("e_proj", "h_proj")',
     ):
         assert unified_muon_parameter in active_source
+
+
+def test_dist_muon_patch_backports_pr4122_shard_order_support():
+    patch_root = _ROOT / "torchtitan_npu/patches/torchtitan/distributed/flex_shard"
+    optimizer_source = (patch_root / "optimizer_reshard.py").read_text()
+    schedule_source = (patch_root / "_optimizer_reshard_schedule.py").read_text()
+    dist_muon_source = (patch_root / "dist_muon.py").read_text()
+
+    for source in (optimizer_source, schedule_source, dist_muon_source):
+        assert "https://github.com/pytorch/torchtitan/pull/4122" in source
+        assert "6ee6b10b934730df00cbcd0cab5c93d04ae2e38a" in source
+    assert "class ComputeLayout" in optimizer_source
+    assert "optimizer_reshard.ComputeLayout = ComputeLayout" in optimizer_source
+    assert "flex_shard.ComputeLayout = ComputeLayout" in optimizer_source
+    assert "def _build_dim0_shard_redistribution_plan" in schedule_source
+    assert "def _lower_shard_order_to_strided_shards" in dist_muon_source
+    assert "def _is_supported_orthogonal_dim0_shard_redistribution" in dist_muon_source
+
+
+def test_dist_muon_patch_rebinds_redistribution_group():
+    assert dist_muon._RedistributionGroup is schedule._RedistributionGroup
+    assert tuple(field.name for field in fields(dist_muon._RedistributionGroup)) == (
+        "process_group",
+        "participants",
+        "mesh_axis_participants",
+        "local_participant",
+    )
 
 
 def test_dsv4_muon_indexer_query_uses_per_head_block_sharding():
