@@ -70,6 +70,44 @@ class TrainerEx(Trainer):
                     "TP _StridedShard and PP stage-local parameter groups are not admitted yet"
                 )
 
+    def _carve_grad_slots(self, pool) -> None:
+        """Pre-carve one pinned D2H gradient slot per offloaded FSDP param.
+
+        The slots are carved from the same chunk pool as the parameters
+        and stashed on each ``FSDPParam`` (``_pooled_grad_dest``), so they
+        live with the model. Parameters that never use a slot are skipped:
+        frozen parameters (no gradient) and parameters whose backward runs
+        the synchronous fallback (post-accumulate hooks installed). The
+        D2H gradient is the reduce-scatter shard, so the slot shape is the
+        unpadded ``sharded_size``; on any shape or dtype mismatch the
+        gradient offload path falls back to the original
+        ``.to(non_blocking=True)`` allocation.
+        """
+        from torch.distributed.fsdp._fully_shard._fsdp_state import (
+            _get_module_fsdp_state,
+        )
+
+        seen: set[int] = set()
+        for model in self.model_parts:
+            for module in model.modules():
+                state = _get_module_fsdp_state(module)
+                if state is None or id(state) in seen:
+                    continue
+                seen.add(id(state))
+                for group in state._fsdp_param_groups:
+                    for fsdp_param in group.fsdp_params:
+                        sharded = fsdp_param.sharded_param
+                        if (
+                            not (fsdp_param.offload_to_cpu and fsdp_param.pin_memory)
+                            or sharded is None
+                            or not sharded.requires_grad
+                            or getattr(sharded, "_post_accumulate_grad_hooks", None)
+                        ):
+                            continue
+                        fsdp_param._pooled_grad_dest = pool.allocate(  # pyrefly: ignore [missing-attribute]
+                            tuple(fsdp_param.sharded_size), sharded.dtype
+                        )
+
     def __init__(self, config: Config):
         quantization_config = config.extension.quantization
         if quantization_config.enable_quantized_training:
@@ -122,7 +160,25 @@ class TrainerEx(Trainer):
                 config = copy(config)
                 # pyrefly: ignore [bad-argument-type, bad-assignment]
                 config.optimizer = derive(config.optimizer, target)
-        super().__init__(config)
+
+            # Carve the per-parameter pins (to_empty()'s _apply ->
+            # reset_sharded_param pins the offloaded shards there, before
+            # the optimizer is built) and the per-parameter D2H gradient
+            # slots from one flat pool of power-of-two chunks, defeating
+            # the host pinned allocator's per-request size-class rounding.
+            # Ownership follows the carved tensors: chunks stay alive via
+            # the parameters and gradient slots, so they are released with
+            # the model and a rebuilt Trainer does not accumulate pools.
+            from torchtitan_npu.extensions.cpu_offload.pinned_pool import (
+                PinnedFlatPool,
+            )
+
+            pool = PinnedFlatPool("fsdp-offload")
+            with pool.pinned_pin_window():
+                super().__init__(config)
+            self._carve_grad_slots(pool)
+        else:
+            super().__init__(config)
         self._sdc = config.sdc.build(
             trainer_config=config,
             model_parts=self.model_parts,

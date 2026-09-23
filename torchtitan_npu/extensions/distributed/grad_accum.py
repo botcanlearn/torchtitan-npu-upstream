@@ -613,7 +613,21 @@ def _cpu_offload_foreach_reduce(
                     # First microbatch for this parameter: keep upstream's
                     # D2H staging and install it as the canonical gradient.
                     non_blocking = fsdp_param.pin_memory and not has_post_acc_grad_hook
-                    new_sharded_grad = new_sharded_grad.to(torch.device("cpu"), non_blocking=non_blocking)
+                    grad_dest = getattr(fsdp_param, "_pooled_grad_dest", None)
+                    if (
+                        non_blocking
+                        and grad_dest is not None
+                        and grad_dest.shape == new_sharded_grad.shape
+                        and grad_dest.dtype == new_sharded_grad.dtype
+                    ):
+                        # Pre-carved pinned slot from the flat pool: avoids the
+                        # per-gradient allocation inside ``.to(non_blocking=True)``,
+                        # which the host pinned allocator rounds up to a
+                        # power-of-two size class (~5 MB average per gradient).
+                        grad_dest.copy_(new_sharded_grad, non_blocking=True)
+                        new_sharded_grad = grad_dest
+                    else:
+                        new_sharded_grad = new_sharded_grad.to(torch.device("cpu"), non_blocking=non_blocking)
                     if non_blocking:
                         # Record an event on which to block the CPU thread to
                         # ensure that the D2H copy finishes before the optimizer
