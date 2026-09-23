@@ -3,9 +3,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from torchtitan.config import derive
 from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
@@ -94,6 +96,24 @@ class TrainerEx(Trainer):
             from torchtitan_npu.patches.torch_npu import cpu_dtensor_init
 
             cpu_dtensor_init.install()
+            if hasattr(config.optimizer, "_cpu_offload"):
+                # Default the optimizer container to NPU-resident state so
+                # ``--training.enable-cpu-offload`` works without listing an
+                # optimizer override; a listed ``swap_optimizer`` (applied
+                # inside Trainer.__init__) re-derives to the CPU-canonical-
+                # state container, keeping optimizer-state offload opt-in.
+                # Deriving here rather than in Config.__post_init__ keeps
+                # config rebuilds (dataclasses.replace) on the plain schema,
+                # and materialize() has already baked the Muon profile into
+                # upstream param-group fields; the carrier-field guard keeps
+                # foreign schemas (e.g. TorchFT) on their own containers.
+                from torchtitan_npu.override.common.optimizer import (
+                    CpuOffloadNpuStateOptimizersContainer,
+                )
+
+                config = copy(config)
+                # pyrefly: ignore [bad-argument-type, bad-assignment]
+                config.optimizer = derive(config.optimizer, CpuOffloadNpuStateOptimizersContainer.Config)
         super().__init__(config)
         self._sdc = config.sdc.build(
             trainer_config=config,
@@ -105,9 +125,10 @@ class TrainerEx(Trainer):
 
             if not isinstance(self.optimizers, CpuOffloadOptimizersContainer):
                 raise ValueError(
-                    "--training.enable-cpu-offload requires the CPU-offload optimizer "
-                    "container: list torchtitan_npu.override.common.optimizer.swap_optimizer "
-                    "(auto-selects it) in --override.imports"
+                    "--training.enable-cpu-offload requires a CPU-offload optimizer "
+                    "container; optimizer schemas without the NPU carrier field must "
+                    "list torchtitan_npu.override.common.optimizer.swap_optimizer in "
+                    "--override.imports"
                 )
 
     def forward_backward_step(self, *args: Any, **kwargs: Any) -> Any:

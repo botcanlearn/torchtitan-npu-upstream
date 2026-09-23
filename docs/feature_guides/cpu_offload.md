@@ -12,7 +12,8 @@ CPU Offload 是一套"CPU 常驻 + NPU 计算"的显存优化方案：
 
 - **参数（权重）**：CPU pinned 存储，forward 前异步预取到 NPU
 - **梯度**：backward 后 reduce-scatter 结果直接落 CPU（pinned），第二个 microbatch 起在 NPU 上做分块累加
-- **优化器状态**：CPU 常驻，每次 step 在 NPU 上执行更新计算
+- **优化器状态**：两种驻留面——默认 **NPU 常驻、step 原地更新**（无逐 step 往返）；
+  列出 `swap_optimizer` override 时退回 CPU 常驻 + 每 step 在 NPU 上执行更新计算
 
 **核心思想**：PyTorch FSDP2 的 `CPUOffloadPolicy` 负责参数/梯度的 CPU offload 基础设施；本仓在其上补齐 NPU 侧的性能关键路径（异步预取、NPU 梯度累加、NPU 侧 clip、CPU 常驻优化器），使全 offload 训练达到可用的吞吐。
 
@@ -24,14 +25,21 @@ CPU Offload 是一套"CPU 常驻 + NPU 计算"的显存优化方案：
 # 命令行
 --training.enable-cpu-offload
 ```
-且需要同步在脚本中添加torchtitan_npu.override.common.optimizer.swap_optimizer 的 overrides
+
+优化器状态的驻留面由是否列出 `torchtitan_npu.override.common.optimizer.swap_optimizer`
+的 override 决定（数据面始终 offload）：
+
+| 配置 | 参数/梯度 | 优化器状态 |
+|------|------|------|
+| 仅 `--training.enable-cpu-offload`（无需列 override） | CPU 常驻 | **NPU 常驻**，step 原地更新，无逐 step H2D/D2H 往返 |
+| 再列出 `swap_optimizer` override | CPU 常驻 | CPU 常驻（历史行为），每 step H2D → NPU 计算 → D2H |
 
 该开关同时驱动两条路径：
 
 | 路径 | 机制 |
 |------|------|
 | FSDP 数据面 | `parallelize_fn` 读取 flag → `CPUOffloadPolicy()` → FSDPParam 的 `offload_to_cpu=True` |
-| 优化器容器 | `swap_optimizer` override 分支 → `CpuOffloadOptimizersContainer`（安装 FSDP/grad-clip 补丁） |
+| 优化器容器 | `TrainerEx` 默认派生 `CpuOffloadNpuStateOptimizersContainer`；列出 `swap_optimizer` 时 override 再派生 `CpuOffloadOptimizersContainer`（两者都安装 FSDP/grad-clip 补丁） |
 
 未开启时，相关补丁模块**不被 import**，训练行为与上游完全一致。
 
@@ -44,11 +52,13 @@ CPU Offload 是一套"CPU 常驻 + NPU 计算"的显存优化方案：
 │   └── backward: foreach_reduce → 梯度 reduce-scatter → D2H 落 CPU pinned
 │                                    → 第二个 microbatch 起在 NPU 分块累加（本仓补丁）
 │
-├── swap_optimizer 分支 → CpuOffloadOptimizersContainer
+├── TrainerEx 默认派生 → CpuOffloadNpuStateOptimizersContainer（列出 swap_optimizer 时
+│   override 再派生 → CpuOffloadOptimizersContainer）
 │   ├── 安装 grad_accum.install() + grad_clip.install()（显式、幂等）
 │   ├── clip: NPU 侧范数计算 + 系数发布 → 优化器直接消费已缓存的 NPU 梯度
 │   └── optimizer: CpuOffloadAdamW / CpuOffloadDistributedMuon
-│       └── 每 step: CPU 参数/状态 H2D → NPU ping-pong buffer → 计算 → D2H 回 CPU
+│       ├── 状态 CPU 常驻: 每 step CPU 参数/状态 H2D → NPU ping-pong buffer → 计算 → D2H 回 CPU
+│       └── 状态 NPU 常驻: 仅 CPU 参数 H2D，状态在 NPU 原地更新，D2H 仅回写参数
 │
 └── TrainerEx → cpu_dtensor_init.install()
     └── init_weights 时 CPU DTensor 参数在 NPU 上初始化后拷回

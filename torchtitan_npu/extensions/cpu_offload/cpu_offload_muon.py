@@ -487,10 +487,12 @@ class CpuOffloadDistributedMuon(DistMuon):
         *,
         staging: CpuStaging,
         clip_channel: GradientClipChannel | None = None,
+        offload_states: bool = True,
         **kwargs: Any,
     ) -> None:
         self._staging = staging
         self._clip_channel = clip_channel
+        self._offload_states = offload_states
         self._compute_device = staging.device  # pyrefly: ignore [read-only]
         self._commit_stream = torch_npu.npu.Stream(device=self._compute_device)
         self._scratch_by_slot: dict[tuple[int, str, torch.dtype], torch.Tensor] = {}
@@ -511,6 +513,17 @@ class CpuOffloadDistributedMuon(DistMuon):
         if storage_device.type != "cpu":
             raise ValueError("CPU-offloaded Muon requires CPU parameter storage")
         return self._compute_device
+
+    def _momentum(self, compute_layout: _ParameterComputeLayout, grad: DTensor) -> DTensor:
+        # NPU-resident momentum skips the per-step H2D/D2H round trip in
+        # ``_prepare_local``; CPU-canonical momentum keeps upstream placement.
+        state = self.state[compute_layout.param]
+        if "momentum_buffer" not in state:
+            momentum = torch.zeros_like(grad, memory_format=torch.preserve_format)
+            if not self._offload_states:
+                momentum = momentum.to(self._compute_device)
+            state["momentum_buffer"] = momentum
+        return state["momentum_buffer"]
 
     def _initialize_plan(
         self,
@@ -595,27 +608,37 @@ class CpuOffloadDistributedMuon(DistMuon):
             channel=self._clip_channel,
             stream=stream,
         )
-        momentum_work = self._scratch_like(
-            momentum,
-            owner=out,
-            kind="momentum",
-        )
-        self._wait_for_scratch(momentum_work, stream)
-        self._staging.submit_h2d(momentum, momentum_work, stream=stream)
-        _prepare_muon_input(
-            out,
-            momentum_work,
-            momentum=group["momentum"],
-            nesterov=group["nesterov"],
-            out=out,
-        )
-        release = self._staging.submit_d2h(
-            momentum_work,
-            momentum,
-            producer_stream=stream,
-            stream=self._commit_stream,
-        )
-        self._release_scratch(momentum_work, release)
+        if self._offload_states:
+            momentum_work = self._scratch_like(
+                momentum,
+                owner=out,
+                kind="momentum",
+            )
+            self._wait_for_scratch(momentum_work, stream)
+            self._staging.submit_h2d(momentum, momentum_work, stream=stream)
+            _prepare_muon_input(
+                out,
+                momentum_work,
+                momentum=group["momentum"],
+                nesterov=group["nesterov"],
+                out=out,
+            )
+            release = self._staging.submit_d2h(
+                momentum_work,
+                momentum,
+                producer_stream=stream,
+                stream=self._commit_stream,
+            )
+            self._release_scratch(momentum_work, release)
+        else:
+            # NPU-resident momentum: blend in place on the compute device.
+            _prepare_muon_input(
+                out,
+                momentum,
+                momentum=group["momentum"],
+                nesterov=group["nesterov"],
+                out=out,
+            )
         torch.autograd.graph.increment_version(momentum_state)
 
     def _apply_update(
@@ -662,6 +685,7 @@ def build_cpu_offload_distributed_muon(
     staging: CpuStaging,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
+    offload_states: bool = True,
     **kwargs: Any,
 ) -> CpuOffloadDistributedMuon:
     """Build the CPU-storage variant through upstream Muon configuration."""
@@ -670,6 +694,7 @@ def build_cpu_offload_distributed_muon(
         staging=staging,
         compute_sharding_by_fqn=compute_sharding_by_fqn,
         bucket_configs=bucket_configs,
+        offload_states=offload_states,
         **kwargs,
     )
     upstream_runtime = optimizer._redistribution_runtime

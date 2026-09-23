@@ -64,6 +64,7 @@ class CpuOffloadAdamW(torch.optim.AdamW):
         fused: bool | None = None,
         staging: CpuStaging,
         clip_channel: GradientClipChannel | None = None,
+        offload_states: bool = True,
     ) -> None:
         unsupported = {
             "foreach": bool(foreach),
@@ -77,6 +78,7 @@ class CpuOffloadAdamW(torch.optim.AdamW):
 
         self._staging = staging
         self._clip_channel = clip_channel
+        self._offload_states = offload_states
         self._compute_device = staging.device  # pyrefly: ignore [read-only]
         self._work_buffers: dict[tuple[int, int, torch.dtype], Tensor] = {}
         super().__init__(
@@ -112,10 +114,22 @@ class CpuOffloadAdamW(torch.optim.AdamW):
                 if state:
                     if set(state) != {"step", "exp_avg", "exp_avg_sq"}:
                         raise RuntimeError("unexpected AdamW state keys")
+                    if not self._offload_states:
+                        for key in ("exp_avg", "exp_avg_sq"):
+                            if state[key].device.type != self._compute_device.type:
+                                state[key] = state[key].to(self._compute_device)
                     continue
                 state["step"] = torch.tensor(0.0)
-                state["exp_avg"] = torch.zeros_like(parameter, memory_format=torch.preserve_format)
-                state["exp_avg_sq"] = torch.zeros_like(parameter, memory_format=torch.preserve_format)
+                state["exp_avg"] = self._momentum_like(parameter)
+                state["exp_avg_sq"] = self._momentum_like(parameter)
+
+    def _momentum_like(self, parameter: Tensor) -> Tensor:
+        """Allocate a moment mirroring the parameter; NPU-resident when the
+        optimizer state does not join the CPU-offload plane."""
+        moment = torch.zeros_like(parameter, memory_format=torch.preserve_format)
+        if not self._offload_states:
+            moment = moment.to(self._compute_device)
+        return moment
 
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         loss = None
@@ -143,8 +157,18 @@ class CpuOffloadAdamW(torch.optim.AdamW):
                     local_exp_avg,
                     local_exp_avg_sq,
                 )
-                if any(tensor.device.type != "cpu" for tensor in canonical):
-                    raise ValueError("CPU-offloaded AdamW requires CPU tensors")
+                if local_parameter.device.type != "cpu" or local_gradient.device.type != "cpu":
+                    raise ValueError("CPU-offloaded AdamW requires CPU parameter and gradient storage")
+                expected_state_device = "cpu" if self._offload_states else self._compute_device.type
+                if (
+                    local_exp_avg.device.type != expected_state_device
+                    or local_exp_avg_sq.device.type != expected_state_device
+                ):
+                    raise ValueError(
+                        "CPU-offloaded AdamW optimizer state must be "
+                        f"{expected_state_device}-resident, got exp_avg on "
+                        f"{local_exp_avg.device} and exp_avg_sq on {local_exp_avg_sq.device}"
+                    )
                 if any(tensor.is_complex() for tensor in canonical):
                     raise ValueError("CPU-offloaded AdamW does not support complex tensors")
 
@@ -191,18 +215,19 @@ class CpuOffloadAdamW(torch.optim.AdamW):
                 producer_stream=compute_stream,
                 stream=transfer_stream,
             )
-            self._staging.submit_d2h(
-                work.exp_avg,
-                entry.canonical[2],
-                producer_stream=compute_stream,
-                stream=transfer_stream,
-            )
-            self._staging.submit_d2h(
-                work.exp_avg_sq,
-                entry.canonical[3],
-                producer_stream=compute_stream,
-                stream=transfer_stream,
-            )
+            if self._offload_states:
+                self._staging.submit_d2h(
+                    work.exp_avg,
+                    entry.canonical[2],
+                    producer_stream=compute_stream,
+                    stream=transfer_stream,
+                )
+                self._staging.submit_d2h(
+                    work.exp_avg_sq,
+                    entry.canonical[3],
+                    producer_stream=compute_stream,
+                    stream=transfer_stream,
+                )
             torch.autograd.graph.increment_version(entry.parameter)
             pending_work = next_work
         self._staging.wait()
@@ -233,12 +258,15 @@ class CpuOffloadAdamW(torch.optim.AdamW):
             for parameter in group["params"]:
                 state = self.state.get(parameter, {})
                 parameter_local = local_tensor(parameter)
-                tensors = (
+                tensors = [
                     (0, parameter_local),
                     (1, parameter_local),  # gradients share the parameter spec
-                    (2, local_tensor(state["exp_avg"])),
-                    (3, local_tensor(state["exp_avg_sq"])),
-                )
+                ]
+                if self._offload_states:
+                    tensors += [
+                        (2, local_tensor(state["exp_avg"])),
+                        (3, local_tensor(state["exp_avg_sq"])),
+                    ]
                 for kind, local in tensors:
                     for slot in range(2):
                         self._ensure_work_buffer(slot, kind, local.numel(), local.dtype)
@@ -261,7 +289,9 @@ class CpuOffloadAdamW(torch.optim.AdamW):
             channel=self._clip_channel,
             stream=self._staging.stream,
         )
-        sources = [(0, parameter), (2, exp_avg), (3, exp_avg_sq)]
+        sources = [(0, parameter)]
+        if self._offload_states:
+            sources += [(2, exp_avg), (3, exp_avg_sq)]
         buffers = {kind: self._work_buffer(slot, kind, source) for kind, source in sources}
         handles = tuple(
             self._staging.submit_h2d(
@@ -271,10 +301,12 @@ class CpuOffloadAdamW(torch.optim.AdamW):
             )
             for kind, source in sources
         )
+        # NPU-resident state updates in place on the compute device and never
+        # round-trips through work buffers.
         return _AdamWWork(
             buffers[0],
             working_gradient,
-            buffers[2],
-            buffers[3],
+            buffers.get(2, exp_avg),
+            buffers.get(3, exp_avg_sq),
             h2d=(*gradient_handles, *handles),
         )

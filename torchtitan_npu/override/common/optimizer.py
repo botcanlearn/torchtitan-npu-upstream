@@ -27,6 +27,7 @@ from torchtitan.components.checkpoint_utils import (
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import derive, override
 from torchtitan.distributed.flex_shard.dist_muon import DistMuon
+from torchtitan.tools.logging import logger
 
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.extensions.cpu_offload import runtime as clip_state
@@ -524,6 +525,10 @@ def _build_cpu_offload_adamw(params, **kwargs: Any) -> CpuOffloadAdamW:
 class CpuOffloadOptimizersContainer(OptimizersContainer):
     """Keep canonical optimizer tensors on CPU and compute updates on NPU."""
 
+    # Whether optimizer state joins the CPU-offload plane. ``False`` keeps the
+    # moments NPU-resident, updating in place with no per-step staging.
+    _offload_states = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
         pass
@@ -562,6 +567,10 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
                 materialize()
         if self.optimizers:
             self._clip_channel.register_consumer()
+        logger.info(
+            "CPU offload: optimizer state %s",
+            "CPU-canonical (staged per step)" if self._offload_states else "NPU-resident",
+        )
 
     def __del__(self) -> None:
         if not getattr(self, "_closed", True):
@@ -618,12 +627,14 @@ class CpuOffloadOptimizersContainer(OptimizersContainer):
                 build_cpu_offload_distributed_muon,
                 staging=self._staging,
                 clip_channel=self._clip_channel,
+                offload_states=self._offload_states,
             )
         if name == "AdamW":
             return partial(
                 _build_cpu_offload_adamw,
                 staging=self._staging,
                 clip_channel=self._clip_channel,
+                offload_states=self._offload_states,
             )
         raise ValueError(f"CPU-offload optimizer does not support {name}")
 
@@ -644,6 +655,27 @@ class CpuOffloadHostSparseOptimizersContainer(  # pyrefly: ignore [inconsistent-
         # deferred coefficient, not the CPU copy that the optimizer will bypass.
         if not self._clip_channel.rescale_pending(correction):
             super()._scale_dense_gradients(parameters, correction)
+
+
+class CpuOffloadNpuStateOptimizersContainer(CpuOffloadOptimizersContainer):
+    """Offload the data plane (parameters+gradients) while optimizer state
+    stays NPU-resident: moments update in place on the compute device and
+    never round-trip through staging buffers.
+
+    Selected by ``--training.enable-cpu-offload`` on its own; listing the
+    ``swap_optimizer`` (or ``cpu_offload``) override re-derives the node to
+    the CPU-canonical-state container instead.
+    """
+
+    _offload_states = False
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(CpuOffloadOptimizersContainer.Config):
+        # Carrier so a later swap_optimizer/cpu_offload override still sees
+        # the flag after ``derive`` replaced this node (source-only fields
+        # drop). Kept off the shared base: a slotted field there conflicts
+        # with the HostSparse Config's multiple-inheritance layout.
+        _cpu_offload: bool = False
 
 
 @override(

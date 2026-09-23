@@ -28,8 +28,14 @@ class AscRMSNorm(RMSNorm):
             self.register_buffer("weight", torch.ones(config.normalized_shape), persistent=False)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        # The unit scale is a non-persistent buffer, so FSDP never manages
+        # it: under CPU offload it would stay on the host while the fused
+        # operator always consumes it with device-resident activations.
         del buffer_device
         if not self.elementwise_affine:
+            device = torch_npu.npu.current_device()
+            if self.weight.device != device:
+                self._buffers["weight"] = self.weight.to(device)
             self.weight.fill_(1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
