@@ -388,6 +388,20 @@ def deepseek_v4_pro_61layers_32experts(
     )
 
 
+def deepseek_v4_pro_61layers_12experts(
+    *,
+    num_mtp_layers: int = 0,
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> Trainer.Config:
+    return _make_trainer_config(
+        "deepseek_v4_pro_61layers_12experts",
+        local_batch_size=1,
+        seq_len=4096,
+        num_mtp_layers=num_mtp_layers,
+        converters=converters,
+    )
+
+
 # --- GraphTrainer config factories ---
 
 

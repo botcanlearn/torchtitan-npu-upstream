@@ -848,6 +848,10 @@ deepseek_v4_configs = {
         _deepseek_v4_pro,
         num_experts=32,
     ),
+    "deepseek_v4_pro_61layers_12experts": partial(
+        _deepseek_v4_pro,
+        num_experts=12,
+    ),
 }
 
 
