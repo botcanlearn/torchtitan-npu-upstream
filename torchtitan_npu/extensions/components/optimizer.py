@@ -71,16 +71,21 @@ def clip_grad_norm_with_host_sparse_tables(
     if norm_type != 2.0:
         raise NotImplementedError(f"Host Engram gradient clipping supports the 2-norm only, got norm_type={norm_type}.")
 
-    sparse_sq = torch.zeros((), dtype=torch.float32)
+    group_squares = {}
     for table in tables:
-        sparse_sq = sparse_sq + _sparse_grad_squared_norm(table)
-    # Rows are partitioned across EP, and the reduction above already gave every
-    # replica of a shard the same values, so summing over one table's EP group
-    # counts each row exactly once and yields the same number everywhere.
-    sparse_sq = sparse_sq.to(dense_norm.device)
-    ep_mesh = tables[0].ep_mesh
-    if ep_mesh is not None:
-        dist.all_reduce(sparse_sq, op=dist.ReduceOp.SUM, group=ep_mesh.get_group())
+        lookup_mesh = table.lookup_mesh
+        group = lookup_mesh.get_group() if lookup_mesh is not None else None
+        if group not in group_squares:
+            group_squares[group] = torch.zeros((), dtype=torch.float32)
+        group_squares[group] = group_squares[group] + _sparse_grad_squared_norm(table)
+    # Preserve the existing accumulation order for tables sharing one layout;
+    # separately reduce tables that opt into a different row-ownership group.
+    sparse_sq = torch.zeros((), dtype=torch.float32, device=dense_norm.device)
+    for group, local_sq in group_squares.items():
+        local_sq = local_sq.to(dense_norm.device)
+        if group is not None:
+            dist.all_reduce(local_sq, op=dist.ReduceOp.SUM, group=group)
+        sparse_sq = sparse_sq + local_sq
 
     dense_norm_f32 = dense_norm.detach().float()
     total_norm = torch.sqrt(dense_norm_f32.pow(2) + sparse_sq)

@@ -126,9 +126,9 @@ class HostEngramLookup(torch.autograd.Function):
         ctx.table = table
         ctx.anchor_device = keepalive.device
         ctx.anchor_dtype = keepalive.dtype
-        ctx.distributed = table.ep_mesh is not None and table.ep_mesh.size() > 1
+        ctx.distributed = table.lookup_mesh is not None and table.lookup_mesh.size() > 1
         if ctx.distributed:
-            return _lookup_rows(ctx, weight, row_ids, table.ep_mesh.get_group())
+            return _lookup_rows(ctx, weight, row_ids, table.lookup_mesh.get_group())
         local_ids = row_ids.reshape(-1).to(device="cpu")
         ctx.save_for_backward(local_ids)
         return weight.index_select(0, local_ids).to(device=row_ids.device).view(*row_ids.shape, weight.shape[1])

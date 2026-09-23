@@ -169,3 +169,37 @@ def test_mxfp8_override_refreshes_derived_storage(monkeypatch):
     expected_storage, expected_scale = mxfp8._quantize_mxfp8_rows(table.weight)
     torch.testing.assert_close(storage.float(), expected_storage.float(), rtol=0, atol=0)
     torch.testing.assert_close(scale.float(), expected_scale.float(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("backend", ["torch", "fp32", "mxfp8"])
+def test_joint_sharding_override_sets_storage_and_lookup_group(monkeypatch, backend):
+    from torchtitan_npu.models.deepseek_v4_1.engram import host
+
+    ep_group, joint_group = object(), object()
+    ep = SimpleNamespace(size=lambda: 2, get_local_rank=lambda: 1, get_group=lambda: ep_group)
+    joint = SimpleNamespace(size=lambda: 4, get_local_rank=lambda: 3, get_group=lambda: joint_group)
+    monkeypatch.setattr(host, "_joint_table_mesh", lambda dims: joint)
+    root = _Root.Config(table=HostEngramTable.Config(
+        vocab_size=16, layer_id=0, ngram_orders=(2,), num_heads=1,
+        head_vocab_sizes=(11,), embedding_dim=128, num_embeddings=12,
+        require_token_id_map=False,
+    ))
+    if backend == "torch":
+        name, kwargs = "shard_over_efsdp", {}
+    else:
+        name = "host_offload" if backend == "fp32" else "host_offload_mxfp8"
+        kwargs = {"num_max_tokens_per_rank": 4, "shard_over_efsdp": True}
+    apply_overrides(OverrideConfig(imports=[(
+        f"torchtitan_npu.override.deepseek_v4_1.engram.{name}", kwargs,
+    )]), root)
+    table = root.table.build()
+    table.parallelize(SimpleNamespace(get_optional_mesh=lambda name: ep))
+    assert table.weight.shape == (3, 128)
+    assert table.ep_mesh is ep and table.lookup_mesh is joint
+    assert list(table.state_dict()) == ["weight.efsdp_ep_shard_00003_of_00004"]
+    if backend != "torch":
+        monkeypatch.setattr(ascendc, "_dedicated_engram_group", lambda group: group)
+        monkeypatch.setattr(table, "_elastic_buffer_type", lambda: _FakeBuffer)
+        table.init_elastic_buffer(param_dtype=torch.float32)
+        assert table._elastic_buffer.group is joint_group
+        assert table._elastic_buffer_spec[:2] == (3, 128)

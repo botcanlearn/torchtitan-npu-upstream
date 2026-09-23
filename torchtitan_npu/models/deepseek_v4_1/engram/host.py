@@ -12,6 +12,7 @@ from typing import cast
 
 import torch
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 
 try:  # torch builds differ in the opaque-object custom-class API surface
     from torch._library.opaque_object import (  # pyrefly: ignore [missing-module-attribute]
@@ -27,19 +28,38 @@ from torchtitan.tools.logging import logger
 from .core import EngramTable
 from .lookup import HostEngramLookup, _lookup_grad_rows, _lookup_rows
 
+_JOINT_TABLE_MESHES: dict[tuple[dist.ProcessGroup, dist.ProcessGroup], DeviceMesh] = {}
+
+
+def _joint_table_mesh(parallel_dims) -> DeviceMesh:
+    mesh = parallel_dims.get_mesh(["efsdp", "ep"])
+    key = (mesh.get_group("efsdp"), mesh.get_group("ep"))
+    if key not in _JOINT_TABLE_MESHES:
+        ranks = mesh.mesh.flatten().tolist()
+        group = dist.new_group(ranks=ranks, use_local_synchronization=True)
+        assert isinstance(group, dist.ProcessGroup)
+        _JOINT_TABLE_MESHES[key] = DeviceMesh.from_group(
+            group, mesh.device_type, mesh=ranks, mesh_dim_names=("engram_shard",)
+        )
+    return _JOINT_TABLE_MESHES[key]
+
 
 class HostEngramTable(EngramTable):
-    """CPU table sharded over EP, with a Torch lookup and CPU SparseAdam."""
+    """CPU table sharded over EP or EFSDP x EP, with Torch lookup and SparseAdam."""
 
     uses_host_offload = True
 
     @dataclass(kw_only=True, slots=True)
     class Config(EngramTable.Config):
         pin_memory: bool = False
+        shard_over_efsdp: bool = False
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.pin_memory = config.pin_memory
+        self.shard_over_efsdp = config.shard_over_efsdp
+        self._table_mesh: DeviceMesh | None = None
+        self._efsdp_size = 1
         self._ep_rank = 0
         self._ep_size = 1
         self._pending_sparse_grad: torch.Tensor | None = None
@@ -70,7 +90,13 @@ class HostEngramTable(EngramTable):
         self.weight._engram_host_offload = True  # type: ignore[attr-defined]
         self.weight._engram_checkpoint_suffix = self._checkpoint_suffix()  # type: ignore[attr-defined]
 
+    @property
+    def lookup_mesh(self):
+        return self._table_mesh if self._table_mesh is not None else self.ep_mesh
+
     def _checkpoint_suffix(self) -> str:
+        if self._table_mesh is not None:
+            return f".efsdp_ep_shard_{self._table_mesh.get_local_rank():05d}_of_{self._table_mesh.size():05d}"
         if self._ep_size <= 1:
             return ""
         return f".ep_shard_{self._ep_rank:05d}_of_{self._ep_size:05d}"
@@ -78,9 +104,19 @@ class HostEngramTable(EngramTable):
     def parallelize(self, parallel_dims) -> None:
         ep_mesh = parallel_dims.get_optional_mesh("ep")
         ep_size = ep_mesh.size() if ep_mesh is not None else 1
-        if self.num_embeddings % ep_size != 0:
+        self._table_mesh = None
+        self._efsdp_size = 1
+        if self.shard_over_efsdp:
+            if ep_size <= 1:
+                raise ValueError("Engram EFSDP sharding requires EP > 1.")
+            efsdp_mesh = parallel_dims.get_optional_mesh("efsdp")
+            self._efsdp_size = efsdp_mesh.size() if efsdp_mesh is not None else 1
+            if self._efsdp_size > 1:
+                self._table_mesh = _joint_table_mesh(parallel_dims)
+        shard_size = ep_size * self._efsdp_size
+        if self.num_embeddings % shard_size != 0:
             raise ValueError(
-                f"Engram table has {self.num_embeddings} physical rows, which is not divisible by EP degree {ep_size}."
+                f"Engram table has {self.num_embeddings} physical rows, not divisible by its shard degree {shard_size}."
             )
 
         # Keep weight out of generic SpmdLayout distribution. Hash metadata is
@@ -90,7 +126,7 @@ class HostEngramTable(EngramTable):
         try:
             super().parallelize(parallel_dims)
         finally:
-            local_rows = self.num_embeddings // ep_size
+            local_rows = self.num_embeddings // shard_size
             local_weight = torch.nn.Parameter(
                 torch.empty(
                     local_rows,
@@ -106,18 +142,19 @@ class HostEngramTable(EngramTable):
         self._ep_size = ep_size
         self._mark_host_weight()
         logger.info(
-            "Engram layer %d: %s, CPU shard %s, EP%d, SparseAdam",
+            "Engram layer %d: %s, CPU shard %s, EP%d x EFSDP%d storage shards, SparseAdam",
             self.layer_id,
             type(self).__name__,
             tuple(self.weight.shape),
             ep_size,
+            self._efsdp_size,
         )
 
     def wire_sparse_grad_replicas(self, *, edp_mesh, edp_mesh_dims=None) -> None:
         """Record the ranks that hold a copy of this EP shard.
 
-        Rows are partitioned along EP only, so the E-FSDP and DP-replicate axes
-        carry replicas of the same shard fed by different tokens. FSDP performs
+        By default EFSDP and DP-replicate carry replicas of each EP shard.
+        With joint table sharding, only DP-replicate carries replicas. FSDP performs
         the equivalent reduction for the parameters it manages; this table is
         deliberately unmanaged, so it has to do it itself.
 
@@ -132,10 +169,17 @@ class HostEngramTable(EngramTable):
         if edp_mesh is None:
             return
         if edp_mesh_dims is not None:
-            axes = tuple(axis for axis in (edp_mesh_dims.replicate, edp_mesh_dims.shard) if axis)
+            replica_axes = (edp_mesh_dims.replicate,)
+            if self._efsdp_size == 1:
+                replica_axes += (edp_mesh_dims.shard,)
+            axes = tuple(axis for axis in replica_axes if axis)
             if not axes:
                 return
             replica_mesh = edp_mesh[axes]
+        elif self._efsdp_size > 1:
+            if not edp_mesh.mesh_dim_names or "dp_replicate" not in edp_mesh.mesh_dim_names:
+                return
+            replica_mesh = edp_mesh["dp_replicate"]
         else:
             replica_mesh = edp_mesh
         if replica_mesh.size() <= 1:
@@ -249,7 +293,8 @@ class HostEngramTable(EngramTable):
         # Rank-dependent streams avoid repeating the same local shard on every
         # EP owner. Exact cross-EP-degree initialization parity is not promised;
         # checkpoints preserve the initialized values thereafter.
-        seed = (torch.initial_seed() + 1000003 * self.layer_id + 9176 * self._ep_rank) % (2**63 - 1)
+        shard_rank = self._table_mesh.get_local_rank() if self._table_mesh is not None else self._ep_rank
+        seed = (torch.initial_seed() + 1000003 * self.layer_id + 9176 * shard_rank) % (2**63 - 1)
         with torch.random.fork_rng(devices=[]):
             torch.random.default_generator.manual_seed(seed)
             self._init_param("weight", self.weight)
@@ -425,7 +470,7 @@ if _HAS_OPAQUE_OBJECT_API:
         tensors the backward op needs at runtime."""
         if distributed:
             ctx = _OpCtx()
-            group = table.value.ep_mesh.get_group()  # pyrefly: ignore [missing-attribute]
+            group = table.value.lookup_mesh.get_group()  # pyrefly: ignore [missing-attribute]
             rows = _lookup_rows(ctx, weight, row_ids, group)
             inverse, received_ids = ctx.saved_tensors
             return (
@@ -507,7 +552,7 @@ if _HAS_OPAQUE_OBJECT_API:
             ctx.saved_tensors = (inverse, received_ids)
             ctx.send_splits = send_counts.tolist()
             ctx.recv_splits = recv_counts.tolist()
-            ctx.group = table.value.ep_mesh.get_group()  # pyrefly: ignore [missing-attribute]
+            ctx.group = table.value.lookup_mesh.get_group()  # pyrefly: ignore [missing-attribute]
             grad_local_rows, local_ids = _lookup_grad_rows(ctx, grad_rows)
         else:
             local_ids = row_ids.reshape(-1).to(device="cpu", copy=True)

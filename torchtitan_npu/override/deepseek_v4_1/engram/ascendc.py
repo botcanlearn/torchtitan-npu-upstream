@@ -144,9 +144,9 @@ class HostOffloadEngramTable(HostEngramTable):
         """
         if self._elastic_buffer is not None:
             return
-        if self.ep_mesh is None or self.ep_mesh.size() == 1:
+        if self.lookup_mesh is None or self.lookup_mesh.size() == 1:
             raise ValueError("AscendC Host Engram requires expert_parallel_degree > 1.")
-        ep_size = self.ep_mesh.size()
+        ep_size = self.lookup_mesh.size()
         if self.num_embeddings % ep_size != 0:
             raise ValueError(
                 f"Engram table has {self.num_embeddings} physical rows, which is not divisible by EP degree {ep_size}."
@@ -159,7 +159,7 @@ class HostOffloadEngramTable(HostEngramTable):
 
         elastic_buffer_type = self._elastic_buffer_type()
         num_cpu_bytes = elastic_buffer_type.get_engram_storage_size_hint(local_rows, self.embedding_dim, dtype)
-        group = _dedicated_engram_group(self.ep_mesh.get_group())
+        group = _dedicated_engram_group(self.lookup_mesh.get_group())
         self._elastic_buffer = elastic_buffer_type(
             group,
             num_cpu_bytes=num_cpu_bytes,

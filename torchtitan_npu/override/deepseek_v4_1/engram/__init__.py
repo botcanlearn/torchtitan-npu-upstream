@@ -5,6 +5,7 @@
 
 """DeepSeek-V4.1 Engram Host table and sparse optimizer overrides."""
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from torchtitan.config import derive, override
@@ -19,6 +20,15 @@ if TYPE_CHECKING:
 @override(
     target=HostEngramTable.Config,
     exact=True,
+    description="Shard the Torch Host Engram table jointly over EFSDP and EP",
+)
+def shard_over_efsdp(cfg: HostEngramTable.Config) -> HostEngramTable.Config:
+    return replace(cfg, shard_over_efsdp=True)
+
+
+@override(
+    target=HostEngramTable.Config,
+    exact=True,
     description=(
         "Keep the EP-local Engram table and SparseAdam state on Host and use CANN EngramFetch/EngramFetchGrad"
     ),
@@ -27,6 +37,7 @@ def host_offload(
     cfg: HostEngramTable.Config,
     num_max_tokens_per_rank: int,
     pin_memory: bool = True,
+    shard_over_efsdp: bool | None = None,
 ) -> "HostOffloadEngramTable.Config":
     """Replace Torch Host lookup with CANN while retaining sparse training.
 
@@ -42,6 +53,7 @@ def host_offload(
         HostOffloadEngramTable.Config,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
         pin_memory=pin_memory,
+        shard_over_efsdp=cfg.shard_over_efsdp if shard_over_efsdp is None else shard_over_efsdp,
     )
 
 
@@ -56,6 +68,7 @@ def host_offload_mxfp8(
     cfg: HostEngramTable.Config,
     num_max_tokens_per_rank: int,
     pin_memory: bool = True,
+    shard_over_efsdp: bool | None = None,
     quantization_chunk_rows: int = 32768,
 ) -> "MXFP8HostOffloadEngramTable.Config":
     """Fetch MXFP8 rows while retaining FP32 SparseAdam master weights."""
@@ -66,8 +79,9 @@ def host_offload_mxfp8(
         MXFP8HostOffloadEngramTable.Config,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
         pin_memory=pin_memory,
+        shard_over_efsdp=cfg.shard_over_efsdp if shard_over_efsdp is None else shard_over_efsdp,
         quantization_chunk_rows=quantization_chunk_rows,
     )
 
 
-__all__ = ["host_offload", "host_offload_mxfp8"]
+__all__ = ["host_offload", "host_offload_mxfp8", "shard_over_efsdp"]
