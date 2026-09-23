@@ -13,7 +13,7 @@ from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 
-from torchtitan_npu.experiments.torchft.ft_manager import FTManagerEx
+from torchtitan_npu.extensions.experiment.torchft.ft_manager import FTManagerEx
 from torchtitan_npu.extensions.trainer import TrainerEx
 
 

@@ -9,7 +9,7 @@ def test_ft_trainer_config_and_npu_lifecycle():
     program = """
 from unittest.mock import Mock, patch
 
-from torchtitan_npu.extensions.torchft import trainer as module
+from torchtitan_npu.extensions.experiment.torchft import trainer as module
 from torchtitan_npu.extensions import trainer as npu_trainer
 
 config = module.FaultTolerantTrainerEx.Config()

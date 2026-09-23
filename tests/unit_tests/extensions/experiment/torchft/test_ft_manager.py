@@ -9,7 +9,7 @@ def test_synchronous_npu_manager_contract():
     program = """
 from unittest.mock import Mock, patch
 
-from torchtitan_npu.experiments.torchft import ft_manager as module
+from torchtitan_npu.extensions.experiment.torchft import ft_manager as module
 
 with patch.object(module, 'Manager') as manager, \\
      patch.object(module, 'ProcessGroupHCCLEx') as process_group, \\
@@ -47,7 +47,7 @@ from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import torch
-from torchtitan_npu.experiments.torchft import process_group as module
+from torchtitan_npu.extensions.experiment.torchft import process_group as module
 
 with patch('torch_npu._C._distributed_c10d.ProcessGroupHCCL') as hccl, \\
      patch.object(module, 'ProcessGroup') as process_group:

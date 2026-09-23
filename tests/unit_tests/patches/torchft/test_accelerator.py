@@ -57,7 +57,7 @@ sys.meta_path.insert(0, BlockTorchFT())
 import torchtitan_npu
 assert not any(name == 'torchft' or name.startswith('torchft.') for name in sys.modules)
 try:
-    import torchtitan_npu.experiments.torchft
+    import torchtitan_npu.extensions.experiment.torchft
 except ModuleNotFoundError as error:
     assert error.name == 'torchft'
     assert "pip install -e '.[torchft]'" in str(error)

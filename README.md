@@ -238,6 +238,8 @@ torchtitan-npu/
 │   ├── patches/                   # 补齐 PyTorch NPU backend 缺口与临时上游能力
 │   ├── extensions/                # 随 package 导入自动生效的运行时扩展
 │   │   ├── components/            # 训练组件扩展（checkpoint/metrics 等）
+│   │   ├── experiment/            # 实验性质的特性
+│   │   │   └── torchft/           # TorchFT 容错训练适配
 │   │   ├── novaswap/              # NovaSwap 显存交换扩展
 │   │   └── tools/                 # 工具扩展
 │   ├── config/                    # 配置注册与管理（configs/manager 等）
