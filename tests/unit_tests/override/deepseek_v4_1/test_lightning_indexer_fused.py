@@ -70,6 +70,16 @@ def _fake_slig_metadata(*args, **kwargs):
     return torch.zeros(64, dtype=torch.int32)
 
 
+def _teacher_sources(index_source_layers: tuple[int, ...]) -> tuple[int, ...]:
+    """The layers whose selection the teacher edge trains -- one SLIKG call each.
+
+    Every index source owns a selection, and a selection only reaches SLIKG through the
+    layer that owns it, so the sources are exactly the calls.  The count therefore comes
+    from the layer table rather than from the run.
+    """
+    return tuple(index_source_layers)
+
+
 def _fake_lightning_indexer(
     q,
     k,
@@ -302,18 +312,27 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
     trainer's ``global_valid_tokens`` division never touches it; the port divides by the
     row's token count itself -- the query's TND leading axis, i.e. the packed ``seqlen``.
 
-    The selection is shared, so SMLAG's teacher accumulates across the layers that consume
-    it before SLIKG runs.  How many contribute follows from the frame layout and is not
-    asserted from the outside; instead the contribution is made larger than the token
-    count, so a teacher that never got divided implies more contributors than there were
-    SLIKG calls -- a bound that cannot hold by coincidence.
+    One index source owns one selection and drives one SLIKG call, and the teacher that
+    layer writes is its own ``p`` divided by the token count.  Which sources those are comes
+    from the layer table rather than from the run, and the run is checked against it; the
+    expected value is then named from that count and the token count, not read back out of
+    the same run.  The constant is made larger than the token count, so a teacher that never
+    got divided lands far outside what the tables allow.
+
+    The ``-1`` padding slots are the exception, and must be read around here: SMLAG leaves
+    them non-zero (the kernel computes a marginal for a slot the selection never reached),
+    so the port zeroes them on the way out -- SLIKG's ``ReduceSumVf`` sums every slot, and
+    only both sides agreeing on the zero keeps a padded slot out of ``dI = Z * Y - p``.
+    A padded slot therefore says nothing about the division, and the slots that do are the
+    unpadded ones.
     """
-    seen = {"calls": 0}
+    seen = {"calls": 0, "teacher": [], "padding": [], "tokens": []}
     constant = 1024.0
 
     def fake_slig(q, k, w, sparse_indices, attn_softmax_l1_norm, **kw):
-        seen["teacher"] = attn_softmax_l1_norm.detach().clone()
-        seen["tokens"] = q.shape[0]
+        seen["teacher"].append(attn_softmax_l1_norm.detach().clone())
+        seen["padding"].append(sparse_indices < 0)
+        seen["tokens"].append(q.shape[0])
         seen["calls"] += 1
         return (
             torch.zeros_like(q),
@@ -323,6 +342,8 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
         )
 
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_lightning_indexer_kl_loss_grad", fake_slig)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_metadata", _fake_li_metadata)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad_metadata", _fake_slig_metadata)
     monkeypatch.setattr(
         torch.ops.cann_ops_transformer,
         "sparse_flash_mla",
@@ -349,22 +370,45 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
     with torch.autocast("cpu", dtype=torch.bfloat16):
         _run_forward_backward(model)
 
-    assert "teacher" in seen, "SLIKG must be reached for the indexer to train"
-    tokens = seen["tokens"]
-    assert tokens == _TOKENS.shape[1], (tokens, _TOKENS.shape[1])
-    assert constant > tokens, "the bound below only bites while the divider is smaller"
+    assert seen["calls"], "SLIKG must be reached for the indexer to train"
+    registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
+    # One SLIKG call per index source: the override trains each source's selection, and the
+    # debug flavor shares the flash topology's tables, so the count comes from there and not
+    # from a number read back out of this run.
+    sources = _teacher_sources(registry.V41_FULL_INDEX_SOURCE_LAYERS)
+    assert seen["calls"] == len(sources), (seen["calls"], sources)
+    assert len(set(seen["tokens"])) == 1, set(seen["tokens"])
 
-    teacher = seen["teacher"]
-    value = teacher.flatten()[0].item()
-    contributors = value * tokens / constant
-    assert abs(contributors - round(contributors)) < 1e-3, (
-        f"the teacher is not an integer multiple of constant/seqlen: got {value}"
-    )
-    assert 1 <= round(contributors) <= seen["calls"], (
-        f"the teacher implies {round(contributors)} contributors but SLIKG ran "
-        f"{seen['calls']} times, so the seqlen division ({tokens}) is missing"
-    )
-    torch.testing.assert_close(teacher, torch.full_like(teacher, constant * round(contributors) / tokens))
+    for teacher, padding in zip(seen["teacher"], seen["padding"], strict=True):
+        tokens = seen["tokens"][0]
+        assert tokens == _TOKENS.shape[1], (tokens, _TOKENS.shape[1])
+        assert constant > tokens, "the expected value below only bites while the divider is smaller"
+        # The ``-1`` slots are SMLAG's junk zeroed out on the way here; the unpadded ones
+        # are what the division acts on.
+        torch.testing.assert_close(
+            teacher.masked_select(padding),
+            torch.zeros(int(padding.sum())),
+            rtol=0,
+            atol=0,
+        )
+        value = teacher.masked_select(~padding).max().item()
+        # SLIKG's teacher is ``constant`` scaled by the layer's own weight, which cancels:
+        # what is left is an integer multiple of ``constant / seqlen``, here 1024/128 = 8,
+        # so the multiplier is 4 or 6.  An undivided teacher would be 512 times larger,
+        # well outside anything the tables allow.  Note what this does *not* catch: the
+        # frame has a single length, so a divisor that was uniformly wrong by an integer
+        # factor would still be an integer multiple and still fit the bound.  Only a second
+        # packed length could tell ``seqlen`` from a wrong factor of it.
+        contributors = value * tokens / constant
+        assert abs(contributors - round(contributors)) < 1e-6, (
+            f"the teacher is not an integer multiple of constant/seqlen ({constant}/{tokens}): got {value}"
+        )
+        assert 1 <= round(contributors) <= seen["calls"], (
+            f"the teacher implies {round(contributors)} contributors but SLIKG ran "
+            f"{seen['calls']} times, so the seqlen division ({tokens}) is missing"
+        )
+        expected = torch.full_like(teacher, constant * round(contributors) / tokens).masked_fill(padding, 0.0)
+        torch.testing.assert_close(teacher, expected)
 
 
 def test_the_teacher_carrier_is_on_the_operands_device(monkeypatch):
@@ -458,6 +502,8 @@ def test_both_kernels_receive_the_layout_their_contract_requires(monkeypatch):
 
     monkeypatch.setattr(sa._SparseMLA, "apply", staticmethod(spy_apply))
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_lightning_indexer_kl_loss_grad", fake_slig)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_metadata", _fake_li_metadata)
+    monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad_metadata", _fake_slig_metadata)
     monkeypatch.setattr(
         torch.ops.cann_ops_transformer,
         "sparse_flash_mla",
@@ -696,3 +742,17 @@ def test_a_half_fused_teacher_pair_is_rejected_through_override_imports(monkeypa
         torch.random.fork_rng(devices=[]),
     ):
         build_cpu_model(config)
+
+
+def test_the_teacher_sources_are_the_index_source_layers():
+    """The count the seqlen test leans on, pinned against the shipped table.
+
+    It is the whole reason that test can name an expected teacher value instead of reading
+    one back out of the run, so it is checked here rather than only inside a forward.
+    """
+    registry = importlib.import_module("torchtitan_npu.models.deepseek_v4_1")
+    sources = _teacher_sources(registry.V41_FULL_INDEX_SOURCE_LAYERS)
+    assert sources == (2, 8, 14, 20, 24, 28, 32, 36)
+    # The debug flavor the seqlen test builds shares this topology, so the frame it measures
+    # has this many teacher-carrying layers.
+    assert len(sources) == 8

@@ -42,17 +42,24 @@ def test_smla_carries_the_raw_teacher_to_slikg(monkeypatch, checkpointed):
 
     mass = [0.1, 0.3, 9.0]
 
+    # What an unused slot gets from the real op: junk.  This is measured, not assumed --
+    # on a 950PR the op fills every ``-1`` slot of ``cmp_softmax_l1_norm`` with the same
+    # non-zero marginal it reports for the valid slots, which is why the port has to clean
+    # them (see the SMLAG override).  A fake that wrote zero here would make the port's
+    # masking untestable, and did: nothing below noticed when the mask was removed.
+    junk = 7.0
+
     def backward(q, *args, **kwargs):
         # What a real SMLAG reports.  Shape and dtype are the op's own: it allocates this
         # output as ``cmp_sparse_indices.new_empty(cmp_sparse_indices.shape)`` in FP32 and
         # its tiling asserts every dimension matches that input.  So it comes back in the
-        # selection's layout, with no mass on a slot the selection does not use (``-1``)
-        # -- including a row whose whole selection is padding.
+        # selection's layout, and a slot the selection does not use (``-1``) -- including
+        # every slot of a row whose whole selection is padding -- carries no usable mass.
         indices = kwargs["cmp_sparse_indices"]
         p = torch.zeros(indices.shape, dtype=torch.float32)
         valid = indices >= 0
-        p[..., 1] = torch.where(valid[..., 1], mass[1], 0.0)
-        p[..., 2] = torch.where(valid[..., 2], mass[2], 0.0)
+        p[..., 1] = torch.where(valid[..., 1], mass[1], junk)
+        p[..., 2] = torch.where(valid[..., 2], mass[2], junk)
         return (
             torch.zeros_like(q),
             torch.zeros_like(kwargs["ori_kv"]),
@@ -104,9 +111,9 @@ def test_smla_carries_the_raw_teacher_to_slikg(monkeypatch, checkpointed):
     # reshaping at all -- the value that lands here is the kernel's tensor.
     assert scores.dtype == torch.float32
     assert scores.grad.dtype == scores.dtype
-    # No masking, no rescaling: the ``-inf`` an unused slot holds in the forward is never
-    # read, and its gradient stays zero because the kernel reported no mass for it -- not
-    # because the port cleaned it.
+    # Every ``-1`` slot comes back zero however much junk the kernel put there: the port
+    # masks on the selection, because SLIKG's ``ReduceSumVf`` sums every slot and a padded
+    # one carrying mass would enter ``dI = Z * Y - p``.
     assert grad[0, 0] == 0
     assert not valid[3].any()
     assert torch.equal(grad[3], torch.zeros(3))

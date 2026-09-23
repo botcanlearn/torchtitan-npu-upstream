@@ -163,6 +163,7 @@ class _SparseMLA(torch.autograd.Function):
             softmax_scale=ctx.softmax_scale,
             **options,
         )
+
         # One gradient per forward input, in order: (q, swa_k, cmp_k, topk_indices,
         # sinks, attention_masks, softmax_scale, ratio, window_size, topk_scores,
         # wants_teacher).  PyTorch silently ignores extra trailing entries, so a count
@@ -181,21 +182,8 @@ class _SparseMLA(torch.autograd.Function):
             # Plain teacher, no loss scaling: SMLAG emits the raw marginal ``p`` and SLIKG
             # applies ``dI = Z * Y - p`` itself, so ``p`` is exactly the edge SLIKG must
             # receive.
-            #
-            # No masking of unused slots: this output is allocated as
-            # ``cmp_sparse_indices.new_empty(cmp_sparse_indices.shape)``, and the op
-            # zero-fills that buffer before writing it, so a padded slot already carries
-            # zero mass.  (Not because SLIKG skips ``-1``: its ``ReduceSumVf`` sums every
-            # slot, including padding.  The zero is what makes that harmless.)
-            #
-            # No reshaping either: the op's tiling asserts this output matches
-            # ``cmp_sparse_indices`` dimension for dimension, and the forward passed the
-            # selection already in that ``[T, N2, K]`` layout, so it arrives as the carrier.
-            #
-            # The carrier itself is what ``ctx.wants_teacher`` decides -- the forward hands
-            # the kernel ``topk_scores`` under exactly that condition, so eval and a layer
-            # that did not ask for a teacher leave this slot ``None``.
-            cmp_softmax_l1_norm if ctx.wants_teacher else None,
+            # Zeroing is an workaround for SMLAG kernel, SLIKG demands invalid positions be zeroed.
+            cmp_softmax_l1_norm.masked_fill(topk_indices < 0, 0.0) if ctx.wants_teacher else None,
             None,
         )
 
