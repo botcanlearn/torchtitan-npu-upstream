@@ -58,8 +58,8 @@ def test_npu_resident_state_matches_cpu_canonical_updates() -> None:
     grads = [torch.randn(4, 6) for _ in range(3)]
     cpu_parameter, cpu_exp_avg, _, _ = _step_sequence(True, grads)
     npu_parameter, npu_exp_avg, _, _ = _step_sequence(False, grads)
-    torch.testing.assert_close(npu_parameter, cpu_parameter)
-    torch.testing.assert_close(npu_exp_avg, cpu_exp_avg)
+    torch.testing.assert_close(npu_parameter, cpu_parameter, rtol=0, atol=0)
+    torch.testing.assert_close(npu_exp_avg, cpu_exp_avg, rtol=0, atol=0)
 
 
 @requires_npu
@@ -89,14 +89,14 @@ def test_enable_cpu_offload_defaults_to_npu_resident_state(monkeypatch) -> None:
     )
     from torchtitan_npu.patches.torch_npu import cpu_dtensor_init
 
-    class ReachedUpstream(Exception):
+    class ReachedUpstreamError(Exception):
         pass
 
     captured: dict[str, object] = {}
 
     def capture_runtime(self, runtime) -> None:
         captured["optimizer"] = runtime.optimizer
-        raise ReachedUpstream
+        raise ReachedUpstreamError
 
     monkeypatch.setattr(trainer_module, "set_allow_hf32", lambda _: None)
     monkeypatch.setattr(cpu_dtensor_init, "install", lambda: None)
@@ -110,7 +110,7 @@ def test_enable_cpu_offload_defaults_to_npu_resident_state(monkeypatch) -> None:
         assert type(cfg.optimizer) is OptimizerConfig
         assert isinstance(cfg.optimizer.materialize(), type(None))
 
-    with pytest.raises(ReachedUpstream):
+    with pytest.raises(ReachedUpstreamError):
         TrainerEx(config)
     runtime_optimizer = captured["optimizer"]
     assert isinstance(runtime_optimizer, CpuOffloadNpuStateOptimizersContainer.Config)
@@ -124,3 +124,136 @@ def test_enable_cpu_offload_defaults_to_npu_resident_state(monkeypatch) -> None:
     # Without the offload switch the optimizer schema stays untouched.
     plain = TrainerEx.Config()
     assert type(plain.optimizer) is OptimizerConfig
+
+
+@requires_npu
+def test_adamw_restore_continues_on_compute_device() -> None:
+    device = torch.device("npu", torch_npu.npu.current_device())
+
+    def build() -> tuple[CpuOffloadAdamW, torch.nn.Parameter]:
+        torch.manual_seed(7)
+        parameter = torch.nn.Parameter(torch.randn(4, 6))
+        staging = CpuStaging(device, owner="test-restore")
+        optimizer = CpuOffloadAdamW(
+            [parameter], lr=1e-2, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.1,
+            staging=staging, offload_states=False,
+        )
+        return optimizer, parameter
+
+    torch.manual_seed(11)
+    grads = [torch.randn(4, 6) for _ in range(3)]
+
+    continuous_optimizer, continuous_param = build()
+    for gradient in grads:
+        continuous_param.grad = gradient.clone()
+        continuous_optimizer.step()
+    continuous_optimizer._staging.wait()
+
+    saved_at_two, restored_param, restored_optimizer = None, None, None
+    restored_optimizer, restored_param = build()
+    for gradient in grads[:2]:
+        restored_param.grad = gradient.clone()
+        restored_optimizer.step()
+    restored_optimizer._staging.wait()
+    saved = restored_optimizer.state_dict()
+
+    fresh_optimizer, fresh_param = build()
+    fresh_optimizer.load_state_dict(saved)
+    # PyTorch's load cast moved the moments to the CPU parameter storage.
+    fresh_state = fresh_optimizer.state[fresh_param]
+    assert fresh_state["exp_avg"].device.type == "cpu"
+    # The checkpoint also carries the stepped parameters.
+    with torch.no_grad():
+        fresh_param.copy_(restored_param)
+    fresh_param.grad = grads[2].clone()
+    fresh_optimizer.step()
+    fresh_optimizer._staging.wait()
+
+    torch.testing.assert_close(fresh_param.detach(), continuous_param.detach(), rtol=0, atol=0)
+    state = fresh_optimizer.state[fresh_param]
+    assert state["exp_avg"].device.type == "npu"
+    assert state["exp_avg_sq"].device.type == "npu"
+
+
+@requires_npu
+def test_muon_checkpoint_roundtrip_steps_on_compute_device() -> None:
+    """Save -> fresh optimizer -> real load_state_dict -> step again.
+
+    Exercises the production restore chain: PyTorch's load cast sends the
+    momentum to the CPU parameter storage, upstream's load post-hook
+    recomputes plans and resets ``_first_step_validated``, and the next
+    ``step()`` re-validates the momentum storage layout before the bucket
+    pipeline runs.
+    """
+    import os
+    import socket
+
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.tensor import Replicate, distribute_tensor
+    from torchtitan.distributed.flex_shard.optimizer_reshard import BucketConfig, ComputeLayout, Owned
+
+    from torchtitan_npu.extensions.cpu_offload.cpu_offload_muon import build_cpu_offload_distributed_muon
+
+    if not dist.is_initialized():
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", str(port))
+        dist.init_process_group(backend="gloo", rank=0, world_size=1)
+    mesh = init_device_mesh("cpu", mesh_shape=(1,), mesh_dim_names=("dp_shard",))
+    device = torch.device("npu", torch_npu.npu.current_device())
+
+    def make_parameter():
+        torch.manual_seed(5)
+        return torch.nn.Parameter(distribute_tensor(torch.randn(8, 4), mesh, [Replicate()]))
+
+    def make_gradient():
+        torch.manual_seed(9)
+        return distribute_tensor(torch.randn(8, 4), mesh, [Replicate()])
+
+    staging = CpuStaging(device, owner="test-muon-roundtrip")
+
+    def build(parameter):
+        return build_cpu_offload_distributed_muon(
+            [{"params": [parameter], "param_names": ["weight"]}],
+            staging=staging,
+            compute_sharding_by_fqn={
+                "weight": ComputeLayout(shardings_by_mesh_axis={"dp_shard": Owned()})
+            },
+            bucket_configs=[BucketConfig(patterns=("weight",), name="test")],
+            offload_states=False,
+            lr=1e-2,
+            momentum=0.9,
+        )
+
+    parameter = make_parameter()
+    optimizer = build(parameter)
+    parameter.grad = make_gradient()
+    optimizer.step()
+    optimizer._staging.wait()
+    momentum = optimizer.state[parameter]["momentum_buffer"]
+    assert momentum.to_local().device.type == "npu"
+
+    saved = optimizer.state_dict()
+
+    restored_parameter = make_parameter()
+    restored_optimizer = build(restored_parameter)
+    with torch.no_grad():
+        restored_parameter.copy_(parameter)
+    restored_optimizer.load_state_dict(saved)
+    # The loader cast the momentum to the CPU parameter storage and our
+    # override moved it back; the post-hook reset first-step validation.
+    momentum = restored_optimizer.state[restored_parameter]["momentum_buffer"]
+    assert momentum.to_local().device.type == "npu"
+    assert restored_optimizer._first_step_validated is False
+
+    restored_parameter.grad = make_gradient()
+    restored_optimizer.step()
+    restored_optimizer._staging.wait()
+    restored_parameter.grad = make_gradient()
+    restored_optimizer.step()
+    restored_optimizer._staging.wait()
+    momentum = restored_optimizer.state[restored_parameter]["momentum_buffer"]
+    assert momentum.to_local().device.type == "npu"

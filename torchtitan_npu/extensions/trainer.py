@@ -107,13 +107,21 @@ class TrainerEx(Trainer):
                 # and materialize() has already baked the Muon profile into
                 # upstream param-group fields; the carrier-field guard keeps
                 # foreign schemas (e.g. TorchFT) on their own containers.
+                from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
                 from torchtitan_npu.override.common.optimizer import (
+                    CpuOffloadHostSparseNpuStateOptimizersContainer,
                     CpuOffloadNpuStateOptimizersContainer,
                 )
 
+                target = CpuOffloadNpuStateOptimizersContainer.Config
+                if isinstance(config.optimizer, HostSparseOptimizersContainer.Config):
+                    # HostSparse schemas carry the carrier through
+                    # OptimizerConfig; deriving them to the plain container
+                    # would silently drop the sparse-table lifecycle.
+                    target = CpuOffloadHostSparseNpuStateOptimizersContainer.Config
                 config = copy(config)
                 # pyrefly: ignore [bad-argument-type, bad-assignment]
-                config.optimizer = derive(config.optimizer, CpuOffloadNpuStateOptimizersContainer.Config)
+                config.optimizer = derive(config.optimizer, target)
         super().__init__(config)
         self._sdc = config.sdc.build(
             trainer_config=config,
@@ -126,9 +134,9 @@ class TrainerEx(Trainer):
             if not isinstance(self.optimizers, CpuOffloadOptimizersContainer):
                 raise ValueError(
                     "--training.enable-cpu-offload requires a CPU-offload optimizer "
-                    "container; optimizer schemas without the NPU carrier field must "
-                    "list torchtitan_npu.override.common.optimizer.swap_optimizer in "
-                    "--override.imports"
+                    "container, and this optimizer schema does not carry the NPU "
+                    "offload carrier field, so no CPU-offload container can be "
+                    "derived for it automatically"
                 )
 
     def forward_backward_step(self, *args: Any, **kwargs: Any) -> Any:

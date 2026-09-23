@@ -679,6 +679,42 @@ class CpuOffloadNpuStateOptimizersContainer(CpuOffloadOptimizersContainer):
         _cpu_offload: bool = False
 
 
+class CpuOffloadHostSparseNpuStateOptimizersContainer(
+    CpuOffloadNpuStateOptimizersContainer, CpuOffloadHostSparseOptimizersContainer
+):
+    """HostSparse lifecycle with NPU-resident optimizer state.
+
+    The HostSparse counterpart of ``CpuOffloadNpuStateOptimizersContainer``
+    for schemas that own host sparse tables (Engram): the dense moments stay
+    on the compute device while the sparse-table hooks (clip, refresh,
+    checkpoint materialization) keep running. Listing ``swap_optimizer``
+    re-derives to ``CpuOffloadHostSparseOptimizersContainer`` as before.
+
+    ``CpuOffloadHostSparseOptimizersContainer`` is a base so method
+    resolution picks up its offload-aware ``_scale_dense_gradients`` (the
+    plain HostSparse fallback would rescale a CPU gradient copy this
+    optimizer never reads).
+
+    Note that this container's Config deliberately inherits only from
+    ``HostSparseOptimizersContainer.Config`` and is therefore NOT a
+    ``CpuOffloadNpuStateOptimizersContainer.Config`` subtype, unlike the
+    container itself. Config-level checks for the state plane must use the
+    container's ``_offload_states`` attribute instead of isinstance on the
+    Config.
+    """
+
+    _offload_states = False
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(HostSparseOptimizersContainer.Config):  # pyrefly: ignore [bad-override]
+        # Single base: HostSparse's Config already carries the
+        # ``_cpu_offload`` carrier through OptimizerConfig, and adding the
+        # NPU-state Config as a second base would duplicate that slot name
+        # across independent branches and break the dataclass layout. The
+        # state plane comes from this class's ``_offload_states``.
+        pass
+
+
 @override(
     target=OptimizersContainer.Config,
     description="Keep optimizer canonical state on CPU and execute updates on NPU",

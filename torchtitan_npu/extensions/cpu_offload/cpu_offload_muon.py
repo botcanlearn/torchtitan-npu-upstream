@@ -31,6 +31,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _apply_muon_update,
     _normalize_param_groups,
     _prepare_muon_input,
+    _storage_layout_signature,
 )
 
 from torchtitan_npu.extensions.cpu_offload.runtime import GradientClipChannel, stage_gradient
@@ -525,6 +526,31 @@ class CpuOffloadDistributedMuon(DistMuon):
             state["momentum_buffer"] = momentum
         return state["momentum_buffer"]
 
+    def _validate_momentum(self, compute_layout: _ParameterComputeLayout) -> None:
+        """Validate restored momentum with the storage device excepted.
+
+        Upstream derives the expected layout signature from the parameter,
+        whose local storage is the CPU under CPU offload; the NPU-resident
+        plane legitimately differs in ``local.device`` only. Every other
+        signature component (shape, stride, placements, dtype, contiguity)
+        must still match, and the momentum must stay a DTensor.
+        """
+        if self._offload_states:
+            super()._validate_momentum(compute_layout)
+            return
+        momentum = self.state.get(compute_layout.param, {}).get("momentum_buffer")
+        if momentum is None:
+            return
+        if not isinstance(momentum, DTensor):
+            raise RuntimeError(f"momentum storage layout changed for {compute_layout.fqn!r}")
+        # ``_storage_layout_signature`` tuples end with
+        # (..., local.dtype, local.device, local.is_contiguous()); the device
+        # sits at index 6.
+        expected = list(compute_layout.storage_layout_signature)
+        expected[6] = self._compute_device
+        if _storage_layout_signature(momentum) != tuple(expected):
+            raise RuntimeError(f"momentum storage layout changed for {compute_layout.fqn!r}")
+
     def _initialize_plan(
         self,
         compute_layouts: Sequence[_ParameterComputeLayout],
@@ -587,6 +613,25 @@ class CpuOffloadDistributedMuon(DistMuon):
         self._scratch_releases.clear()
         self._retired_scratch.clear()
         return result
+
+    def load_state_dict(self, state_dict):
+        """Relocate restored momentum to the compute device when NPU-resident.
+
+        PyTorch's ``Optimizer.load_state_dict`` casts state tensors to the
+        parameter device, which is CPU storage under CPU offload; without
+        this correction the first post-restore ``_prepare_local`` would mix
+        a CPU momentum with the NPU gradient buffer.
+        """
+        super().load_state_dict(state_dict)
+        if self._offload_states:
+            return
+        for state in self.state.values():
+            momentum = state.get("momentum_buffer")
+            if momentum is None:
+                continue
+            local = momentum.to_local() if isinstance(momentum, DTensor) else momentum
+            if local.device != self._compute_device:
+                state["momentum_buffer"] = momentum.to(self._compute_device)
 
     def _prepare_local(
         self,

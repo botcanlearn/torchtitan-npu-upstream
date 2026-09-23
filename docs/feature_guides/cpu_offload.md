@@ -1,4 +1,4 @@
-# CPU Offload - 权重、梯度与优化器状态全 CPU 常驻
+# CPU Offload - 权重与梯度 CPU 常驻，优化器状态可选 CPU/NPU 驻留面
 
 ## 背景与挑战
 
@@ -70,12 +70,12 @@ CPU Offload 是一套"CPU 常驻 + NPU 计算"的显存优化方案：
 |------|------|
 | `extensions/cpu_offload/staging.py` | `CpuStaging`：有界 pinned 传输环（owner/wait/close 协议） |
 | `extensions/cpu_offload/runtime.py` | `GradientClipChannel`：clip→optimizer 显式交接 + `stage_gradient` |
-| `extensions/cpu_offload/cpu_offload_adamw.py` | `CpuOffloadAdamW`：公开算子实现，CPU 常驻状态 + NPU 计算 |
-| `extensions/cpu_offload/cpu_offload_muon.py` | `CpuOffloadDistributedMuon`：FlexShard 双路径（local + redistribution）|
+| `extensions/cpu_offload/cpu_offload_adamw.py` | `CpuOffloadAdamW`：公开算子实现，状态驻留面可选（CPU 常驻 / NPU 常驻原地更新）+ NPU 计算 |
+| `extensions/cpu_offload/cpu_offload_muon.py` | `CpuOffloadDistributedMuon`：FlexShard 双路径（local + redistribution），momentum 驻留面同上 |
 | `extensions/distributed/grad_accum.py` | 梯度累加 + 单 rank 参数预取（FSDP 集成） |
 | `extensions/distributed/grad_clip.py` | clip 补丁：NPU 侧范数计算（cached / bounded 双模式） |
 | `patches/torch_npu/cpu_dtensor_init.py` | `Module._init_param` 包装：CPU DTensor 参数 NPU 初始化 |
-| `override/common/optimizer.py` | `CpuOffloadOptimizersContainer`：唯一 owner，显式安装/关闭 |
+| `override/common/optimizer.py` | `CpuOffload*OptimizersContainer`：唯一 owner，显式安装/关闭；NPU-state 默认与 CPU-state（含 HostSparse）变体按 `swap_optimizer` 选择 |
 
 ## 支持组合
 

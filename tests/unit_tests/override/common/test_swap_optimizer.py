@@ -1232,3 +1232,59 @@ def test_swap_preserves_host_sparse_update(monkeypatch, override_name):
     optimizer.zero_grad()
     assert model.table.pending_sparse_grad() is None
     assert model.table.weight.grad is None
+
+
+def test_hostsparse_schema_keeps_sparse_lifecycle_under_npu_state(monkeypatch) -> None:
+    """Engram schemas keep the sparse lifecycle under the NPU-state default.
+
+    swap_optimizer must also keep routing a HostSparse schema to the
+    HostSparse CPU-offload container after the NPU-state derive, and the
+    combined container must resolve the offload-aware dense-gradient clip
+    correction (``_scale_dense_gradients``).
+    """
+    from torchtitan_npu.config.configs import TrainingConfig
+    from torchtitan_npu.extensions import trainer as trainer_module
+    from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
+    from torchtitan_npu.extensions.trainer import TrainerEx
+    from torchtitan_npu.override.common.optimizer import (
+        CpuOffloadHostSparseNpuStateOptimizersContainer,
+        CpuOffloadHostSparseOptimizersContainer,
+        swap_optimizer,
+    )
+    from torchtitan_npu.patches.torch_npu import cpu_dtensor_init
+
+    class ReachedUpstreamError(Exception):
+        pass
+
+    captured: dict[str, object] = {}
+
+    def capture_runtime(self, runtime) -> None:
+        captured["optimizer"] = runtime.optimizer
+        raise ReachedUpstreamError
+
+    monkeypatch.setattr(trainer_module, "set_allow_hf32", lambda _: None)
+    monkeypatch.setattr(cpu_dtensor_init, "install", lambda: None)
+    monkeypatch.setattr(trainer_module.Trainer, "__init__", capture_runtime)
+
+    optimizer_config = HostSparseOptimizersContainer.Config(_cpu_offload=True)
+    config = TrainerEx.Config(
+        training=TrainingConfig(enable_cpu_offload=True),
+        optimizer=optimizer_config,
+    )
+    with pytest.raises(ReachedUpstreamError):
+        TrainerEx(config)
+
+    derived = captured["optimizer"]
+    assert isinstance(derived, CpuOffloadHostSparseNpuStateOptimizersContainer.Config)
+    assert isinstance(derived, HostSparseOptimizersContainer.Config)
+    assert derived._cpu_offload is True
+    # The dense-gradient clip correction must resolve to the offload-aware
+    # implementation, not the plain HostSparse fallback.
+    assert (
+        CpuOffloadHostSparseNpuStateOptimizersContainer._scale_dense_gradients
+        is CpuOffloadHostSparseOptimizersContainer._scale_dense_gradients
+    )
+
+    cpu_state = swap_optimizer(derived)
+    assert isinstance(cpu_state, CpuOffloadHostSparseOptimizersContainer.Config)
+    assert not isinstance(cpu_state, CpuOffloadHostSparseNpuStateOptimizersContainer.Config)
