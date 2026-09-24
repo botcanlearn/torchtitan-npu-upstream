@@ -12,7 +12,7 @@ from torch.utils._python_dispatch import return_and_correct_aliasing
 from torchao_npu import normalize_dim
 from torchao_npu.quantization import _FP4_DTYPES, _SUPPORTED_MX_ELEM_DTYPES
 from torchao_npu.quantization.quant_configs import MXQuantizeConfig
-from torchao_npu.quantization.quant_primitives.mx import mx_quantize
+from torchao_npu.quantization.quant_primitives.mx import mx_dequantize, mx_quantize
 from torchao_npu.quantized_tensors import (
     logical_qdata_shape,
     permutation_from_transpose,
@@ -166,12 +166,25 @@ class MXTensor(BaseQuantizedTensor):
         pack_axis = resolve_pack_axis(qdata) if qdata.dtype is torch.float4_e2m1fn_x2 else None
         return cls(qdata, scale, tensor.dtype, axis, quant_config, act_quant_config, pack_axis)
 
-    def dequantize(self) -> torch.Tensor:
-        """Dequantize back to ``orig_dtype``.
+    def dequantize(self, output_dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Dequantize back to ``orig_dtype``, or to ``output_dtype`` when given.
 
-        Placeholder: a fused NPU dequantization op will back this later.
+        Args:
+            output_dtype: The dtype of the returned tensor, ``orig_dtype`` when ``None``. Must be
+                a dtype the dequantization op supports: ``torch.float32``, ``torch.bfloat16`` or
+                ``torch.float16``.
+
+        Returns:
+            A plain tensor of dtype ``output_dtype``
         """
-        raise NotImplementedError(f"``dequantize`` is not implemented yet for {type(self).__name__}.")
+        return mx_dequantize(
+            self.qdata,
+            self.scale,
+            self.quant_axis,
+            block_size=self.quant_config.block_size,
+            src_dtype=self.quant_config.elem_dtype,
+            output_dtype=self.orig_dtype if output_dtype is None else output_dtype,
+        )
 
 
 implements = MXTensor.implements

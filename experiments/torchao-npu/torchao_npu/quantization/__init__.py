@@ -24,3 +24,6 @@ _NPU_DTYPE_DICT = MappingProxyType(
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 _FP4_DTYPES = (torch.float4_e2m1fn_x2,)
 _SUPPORTED_MX_ELEM_DTYPES = (*_FP8_DTYPES, *_FP4_DTYPES)
+
+# High precision dtypes
+_SUPPORTED_HP_DTYPES = (torch.float32, torch.bfloat16, torch.float16)

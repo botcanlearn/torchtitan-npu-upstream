@@ -190,12 +190,39 @@ class DualAxisMXTensor(BaseQuantizedTensor):
         pack_axis = resolve_pack_axis(qdata1) if qdata1.dtype is torch.float4_e2m1fn_x2 else None
         return cls(qdata1, scale1, qdata2, scale2, tensor.dtype, quant_config, act_quant_config, pack_axis)
 
-    def dequantize(self) -> torch.Tensor:
-        """Dequantize back to ``orig_dtype``.
+    def dequantize(self, output_dtype: torch.dtype | None = None) -> torch.Tensor:
+        """Dequantize back to ``orig_dtype``, using whichever quant axis is innermost-contiguous.
 
-        Placeholder: a fused NPU dequantization op will back this later.
+        The tensor stores one quantization per trailing dim, and only a pair whose quant axis is
+        innermost-contiguous (``stride == 1``) can back the dequantization op. The pair covering
+        ``dim=-1`` (``qdata1``/``scale1``) is used when ``qdata1.stride(-1) == 1``, otherwise the
+        pair covering ``dim=-2`` (``qdata2``/``scale2``) when ``qdata2.stride(-2) == 1``.
+
+        The chosen pair is converted with :meth:`to_mx_tensor` and dequantized as an
+        :class:`~torchao_npu.quantized_tensors.mx_tensor.MXTensor`.
+
+        Args:
+            output_dtype: The dtype of the returned tensor, ``orig_dtype`` when ``None``;
+
+        Returns:
+            A plain tensor of dtype ``output_dtype``
+
+        Raises:
+            RuntimeError: If neither quant axis is innermost-contiguous.
         """
-        raise NotImplementedError(f"``dequantize`` is not implemented yet for {type(self).__name__}.")
+        if self.qdata1.stride(-1) == 1:
+            quant_axis = self.qdata1.ndim - 1
+        elif self.qdata2.stride(-2) == 1:
+            quant_axis = self.qdata2.ndim - 2
+        else:
+            raise RuntimeError(
+                f"Neither quant axis of this {type(self).__name__} is innermost-contiguous: "
+                f"stride(-1)={self.qdata1.stride(-1)} for ``qdata1`` and "
+                f"stride(-2)={self.qdata2.stride(-2)} for ``qdata2``; one of them must be 1 "
+                "for the dequantization op to consume the data."
+            )
+
+        return self.to_mx_tensor(quant_axis).dequantize(output_dtype)
 
     def to_mx_tensor(self, quant_axis: int) -> MXTensor:
         """Convert to the single-axis :class:`~torchao_npu.quantized_tensors.mx_tensor.MXTensor`

@@ -17,6 +17,11 @@ import torch
 import torch_npu
 
 from torchao_npu import normalize_dim
+from torchao_npu.quantization import (
+    _FP4_DTYPES,
+    _FP8_DTYPES,
+    _SUPPORTED_HP_DTYPES,
+)
 from torchao_npu.quantization.quant_configs import MXQuantizeConfig
 
 
@@ -126,6 +131,36 @@ def mx_quantize(
         return y, scale
 
 
+def to_scale_of_block32(scale: torch.Tensor, block_size: int, quant_dim_size: int) -> torch.Tensor:
+    """Re-key an MX scale from ``block_size`` blocks to 32-sized blocks.
+
+    ``torch_npu.npu_anti_mx_quant`` only accepts a scale keyed at ``block_size == 32``,
+    while ``npu_dynamic_mx_quant`` can emit one keyed at any multiple of 32. Each coarse
+    block scale is duplicated ``block_size // 32`` times to fill the finer blocks it
+    covers. The quant dim is always assumed to be the last dim.
+
+    Args:
+        scale: MX scale of shape ``(..., packed_blocks, 2)``, keyed at ``block_size``.
+        block_size: Block size of ``scale``; assumed to be a multiple of 32 by the caller.
+        quant_dim_size: Size of the quantized dimension, used to size the 32-keyed
+            packing (including its padding).
+
+    Returns:
+        ``scale`` unchanged when it is already 32-keyed, otherwise the 32-keyed layout
+        of shape ``(..., ceil(ceil(quant_dim_size / 32) / 2), 2)``.
+    """
+    if block_size <= 32:
+        return scale
+
+    flat = scale.reshape(*scale.shape[:-2], -1)  # merge pair dim
+    flat = flat.repeat_interleave(block_size // 32, dim=-1)  # duplicate scales
+
+    # because block_size >= 32, there is always enough padding rows for us to reuse
+    sdim_padded = ceil(ceil(quant_dim_size / 32) / 2) * 2
+    flat = flat[..., :sdim_padded]  # trim the padded tail
+    return flat.reshape(*flat.shape[:-1], sdim_padded // 2, 2)  # re-form pack dim
+
+
 @torch.library.custom_op("torchao_npu::mx_last_dim_fake_quantize", mutates_args=(), device_types="npu")
 def mx_last_dim_fake_quantize(
     x: torch.Tensor,
@@ -166,18 +201,7 @@ def mx_last_dim_fake_quantize(
         dst_type_max=quant_elem_dtype_max,
     )
 
-    # torch_npu.npu_anti_mx_quant only accepts scale of block_size==32.
-    # Turn dynamic's per-``block`` scale into the 32-keyed layout
-    # npu_anti_mx_quant expects. block_size is assumed to be multiples of 32,
-    # which should be guaranteed by the caller.
-    if block_size > 32:
-        flat = scale.reshape(*scale.shape[:-2], -1)  # merge pair dim
-        flat = flat.repeat_interleave(block_size // 32, dim=-1)  # duplicate scales
-
-        # because block_size >= 32, there is always enough padding rows for us to reuse
-        sdim_padded = ceil(ceil(x.shape[-1] / 32) / 2) * 2
-        flat = flat[..., :sdim_padded]  # trim the padded tail
-        scale = flat.reshape(*flat.shape[:-1], sdim_padded // 2, 2)  # re-form pack dim
+    scale = to_scale_of_block32(scale, block_size, x.shape[-1])
 
     dequant = torch_npu.npu_anti_mx_quant(qdata, scale, axis=-1, dst_type=x.dtype, src_type=quant_elem_dtype)
     assert dequant.is_contiguous(), "``dequant`` is expected to be contiguous."
@@ -252,6 +276,118 @@ def mx_fake_quantize(
     y_fake = y_fake_p.permute(perm_back_indices)
 
     return y_fake
+
+
+def mx_dequantize(
+    qdata: torch.Tensor,
+    scale: torch.Tensor,
+    axis: int,
+    block_size: int,
+    src_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize MX data, avoiding a real transpose when possible.
+
+    The inverse of :func:`mx_quantize`: given the ``(qdata, scale)`` pair that op
+    returns and the ``axis`` it quantized along, restore the unquantized values as
+    ``output_dtype``.
+
+    Args:
+        qdata: Quantized data. Its quant axis must be innermost-contiguous.
+        scale: uint8 E8M0 block scale of ``qdata``. Keyed at ``block_size``.
+        axis: Dimension ``qdata`` was quantized along.
+        block_size: MX block size ``scale`` is keyed at; a positive multiple of 32.
+        src_dtype: Element dtype of ``qdata``.
+        output_dtype: dtype of the dequantized values.
+
+    Returns:
+        The dequantized tensor, in ``output_dtype`` and ``qdata``'s layout, with the
+        quant axis restored to its unquantized size.
+
+    Raises:
+        ValueError: If ``src_dtype`` is not an MX element dtype
+            (``torch.float8_e4m3fn``, ``torch.float8_e5m2`` or
+            ``torch.float4_e2m1fn_x2``).
+
+        AssertionError: If any of the following holds:
+
+            - ``qdata.dtype`` is neither ``torch.uint8`` nor ``src_dtype``: only those
+              two say how the stored bytes are to be read, ``uint8`` being the raw
+              storage the quantizer emits and ``src_dtype`` a typed view of it;
+            - ``output_dtype`` is not a high-precision dtype (``torch.float32``,
+              ``torch.bfloat16`` or ``torch.float16``);
+            - the quant axis is not unit stride. ``npu_anti_mx_quant`` requires
+              quantized data laid out as the quantizer emits it, which has the quant
+              axis innermost-contiguous; a strided quant axis (e.g. a transposed
+              tensor) can be neither consumed nor permuted into such a layout.
+    """
+    if qdata.dtype is not torch.uint8:
+        assert qdata.dtype is src_dtype, (
+            "``qdata.dtype`` must match ``src_dtype`` if ``qdata.dtype`` is not ``torch.uint8``."
+        )
+
+    assert output_dtype in _SUPPORTED_HP_DTYPES, (
+        f"``output_dtype`` only supports {_SUPPORTED_HP_DTYPES}, ``output_dtype``={output_dtype} passed."
+    )
+    axis = normalize_dim(axis, qdata.ndim)
+    assert qdata.stride(axis) == 1, (
+        f"``npu_anti_mx_quant`` consumes only quantized data whose quant axis is unit stride, "
+        f"got stride({axis})={qdata.stride(axis)}"
+    )
+
+    # Same rule as ``mx_quantize``: order the non-axis dims by descending stride and
+    # append the quant axis, so the quant axis lands at -1 while the permutation stays
+    # a view of the dense layout whenever ``qdata`` is a pure permutation view.
+    # torch_npu.npu_anti_mx_quant only accepts last-dim quantized data.
+    perm_indices = sorted(
+        (d for d in range(qdata.ndim) if d != axis),
+        key=lambda d: qdata.stride(d),
+        reverse=True,
+    )
+    perm_indices.append(axis)
+    qdata_p = qdata.permute(perm_indices)
+
+    if src_dtype in _FP4_DTYPES:
+        # An FP4 quant dim is packed, so its unquantized size is twice the stored one.
+        quant_dim_size = qdata_p.shape[-1] * 2
+
+        # torch_npu.npu_anti_mx_quant requires qdata_p.dtype is uint8 when src_type is FP4.
+        qdata_p = qdata_p.view(torch.uint8)
+
+    elif src_dtype in _FP8_DTYPES:
+        quant_dim_size = qdata_p.shape[-1]
+
+        # torch_npu.npu_anti_mx_quant requires qdata_p.dtype is the same as src_type in
+        # the case of FP8.
+        qdata_p = qdata_p.view(src_dtype)
+
+    else:
+        raise ValueError(
+            f"``src_dtype`` only supports {_FP4_DTYPES} and {_FP8_DTYPES}, ``src_dtype``={src_dtype} passed."
+        )
+
+    # ``scale`` has one dim more than ``qdata``: its first ``qdata.ndim`` dims follow
+    # the data (the block dim riding along the quant axis), the pack-2 dim stays last.
+    scale_p = scale.permute([*perm_indices, qdata.ndim])
+
+    # ``to_scale_of_block32`` needs that size to derive the 32-keyed scale, the only
+    # layout ``npu_anti_mx_quant`` accepts.
+    scale_p = to_scale_of_block32(scale_p, block_size, quant_dim_size)
+
+    dequant_p = torch_npu.npu_anti_mx_quant(
+        qdata_p,
+        scale_p,
+        axis=-1,
+        dst_type=output_dtype,
+        src_type=src_dtype,
+    )
+
+    # Inverse permutation: dequant_p dim j corresponds to qdata dim perm_indices[j].
+    perm_back_indices = [0] * qdata.ndim
+    for j, p in enumerate(perm_indices):
+        perm_back_indices[p] = j
+
+    return dequant_p.permute(perm_back_indices)
 
 
 def mx_quantize_dual_axis(

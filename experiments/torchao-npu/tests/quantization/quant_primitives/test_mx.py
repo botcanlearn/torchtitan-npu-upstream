@@ -5,9 +5,19 @@
 
 import pytest
 import torch
+import torch.library
 import torch_npu
+from torchao_npu.ops.mx_ops import mxfp8_dequantize
 from torchao_npu.quantization.quant_configs import MXQuantizeConfig
-from torchao_npu.quantization.quant_primitives.mx import _get_fp4_e2m1_pair_lut, mxfp4_dequantize
+from torchao_npu.quantization.quant_primitives.mx import (
+    _get_fp4_e2m1_pair_lut,
+    mx_dequantize,
+    mx_fake_quantize,
+    mx_last_dim_fake_quantize,
+    mx_quantize,
+    mx_quantize_dual_axis,
+    mxfp4_dequantize,
+)
 
 
 def test_fp4_pair_lut_decodes_both_nibble_orders():
@@ -65,7 +75,6 @@ def test_mx_quantize_matches_raw_op_for_all_layouts(layout, elem_dtype):
     transpose was avoided (that would require profiling). Each tested input
     layout must produce identical y/scale to the raw op.
     """
-    from torchao_npu.quantization.quant_primitives.mx import mx_quantize
 
     # Allocate within the test so RNG/device state is managed by the fixture.
     axis = -1
@@ -119,7 +128,6 @@ def test_mx_quantize_quant_matmul_matches_raw_op(elem_dtype, case_a, case_b, whi
     """npu_quant_matmul output should be identical whether an operand is quantized by
     mx_quantize or by the raw op.
     """
-    from torchao_npu.quantization.quant_primitives.mx import mx_quantize
 
     def matmul_operand(case, batch, rows, cols):
         """Build a 3D ``(batch, rows, cols)`` bf16 batched matmul operand in one
@@ -226,7 +234,6 @@ def test_mx_quantize_dual_axis_matches_raw_op_for_all_layouts(tensor, elem_dtype
     transpose was avoided (that would require profiling). The point is each of the
     five branch inputs must produce identical y1/s1/y2/s2 to the raw op.
     """
-    from torchao_npu.quantization.quant_primitives.mx import mx_quantize_dual_axis
 
     def as_uint8(t):
         # FP8 tensors can't be compared element-wise with torch.equal on NPU;
@@ -264,7 +271,6 @@ def test_mx_quantize_dual_axis_quant_matmul_matches_raw_op(elem_dtype, case_a, c
     """npu_quant_matmul output should be identical whether an operand is dual-axis
     quantized by mx_quantize_dual_axis or by the raw op.
     """
-    from torchao_npu.quantization.quant_primitives.mx import mx_quantize_dual_axis
 
     def matmul_operand(case, batch, rows, cols):
         """Build a 3D ``(batch, rows, cols)`` bf16 operand in one of four layouts."""
@@ -371,8 +377,6 @@ def test_mx_fake_quantize_matches_quantize_then_dequantize_for_all_layouts(tenso
     need not match the original's (``non_pure`` comes back dense), so the second call
     may take the other branch, and it must still reproduce the values exactly.
     """
-    from torchao_npu.ops.mx_ops import mxfp4_dequantize, mxfp8_dequantize
-    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
 
     config = MXQuantizeConfig(elem_dtype=elem_dtype)
 
@@ -415,7 +419,6 @@ def test_mx_fake_quantize_is_idempotent(elem_dtype, block_size):
     itself. ``scale_alg=0`` is the only algorithm that supports both FP4 and FP8
     together with a ``block_size`` other than 32.
     """
-    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
 
     config = MXQuantizeConfig(elem_dtype=elem_dtype, block_size=block_size, scale_alg=0)
     x = torch.randn(4, 384, device="npu", dtype=torch.bfloat16)
@@ -431,7 +434,6 @@ def test_mx_fake_quantize_is_idempotent(elem_dtype, block_size):
 
 def test_mx_fake_quantize_is_straight_through_differentiable():
     """The fake-quantized span keeps identity gradients instead of detaching."""
-    from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
 
     config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
     weight = torch.randn(4, 64, device="npu", dtype=torch.bfloat16)
@@ -451,8 +453,6 @@ def test_mx_fake_quantize_is_straight_through_differentiable():
 
 def test_mx_last_dim_fake_quantize_custom_op_passes_opcheck():
     """Schema, mutation contract, autograd formula and fake metadata of the op."""
-    import torch.library
-    from torchao_npu.quantization.quant_primitives.mx import mx_last_dim_fake_quantize
 
     config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
     x = torch.randn(4, 64, device="npu", dtype=torch.bfloat16)
@@ -468,3 +468,108 @@ def test_mx_last_dim_fake_quantize_custom_op_passes_opcheck():
             config.dst_type_max,
         ),
     )
+
+
+# =========================================================================
+# Tests for mx_dequantize (permutation-aware wrapper over npu_anti_mx_quant)
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    "tensor, axis",
+    [
+        # 1. Dense with a trailing quant axis: the permutation is the identity.
+        (torch.randn(256, 128, device="npu", dtype=torch.bfloat16), -1),
+        # 2. Pure permutation view whose quant axis is innermost-contiguous (like
+        #    wo_a): permuting it to -1 restores dense storage, avoiding the copy.
+        (torch.randn(4, 128, 256, device="npu", dtype=torch.bfloat16).transpose(1, 2), 1),
+        # 3. The same, with the unit-stride quant axis leading instead of second.
+        (torch.randn(4, 256, 128, device="npu", dtype=torch.bfloat16).permute(2, 0, 1), 0),
+        # 4. Non-pure strided view: no permutation makes it dense, so the op inserts
+        #    its own copy. The quant axis is the trailing one, the permutation the
+        #    identity.
+        (torch.as_strided(torch.randn(2, 129, device="npu", dtype=torch.bfloat16), (2, 128), (129, 1)), 1),
+    ],
+    ids=["dense", "perm_view", "perm_view_leading", "non_pure"],
+)
+@pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float8_e5m2, torch.float4_e2m1fn_x2])
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_mx_dequantize_matches_fake_quantize(tensor, axis, elem_dtype, block_size):
+    """mx_dequantize undoes mx_quantize, reproducing mx_fake_quantize exactly.
+
+    mx_fake_quantize quantizes the permuted tensor and dequantizes it in one op, so for a
+    layout both functions permute the same way they hand the very same qdata/scale to the
+    same dequantization and have to agree bit for bit. Every layout below has a unit-stride
+    quant axis, which is what mx_dequantize requires.
+    """
+
+    # scale_alg=0 is the only algorithm that covers FP4 and FP8 together with a
+    # block_size other than 32, i.e. the re-keying to 32-sized blocks.
+    config = MXQuantizeConfig(elem_dtype=elem_dtype, block_size=block_size, scale_alg=0)
+
+    qdata, scale = mx_quantize(tensor, axis, config)
+    dequantized = mx_dequantize(qdata, scale, axis, block_size, elem_dtype, tensor.dtype)
+    fake_quantized = mx_fake_quantize(tensor, axis, config)
+
+    assert dequantized.shape == tensor.shape, f"shape mismatch: {dequantized.shape} vs {tensor.shape}"
+    assert dequantized.dtype == tensor.dtype, f"dtype mismatch: {dequantized.dtype} vs {tensor.dtype}"
+    assert torch.equal(dequantized, fake_quantized), "dequantized values differ from mx_fake_quantize"
+
+
+def test_mx_dequantize_rejects_a_strided_quant_axis():
+    """A quant axis that is not innermost-contiguous cannot be dequantized.
+
+    A dense tensor quantized along a non-trailing axis takes mx_quantize's pass-through
+    route, so the pair it returns keeps a strided quant axis: the layout npu_anti_mx_quant
+    cannot consume, and one no permutation can repair.
+    """
+
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    tensor = torch.randn(4, 256, 128, device="npu", dtype=torch.bfloat16)
+
+    qdata, scale = mx_quantize(tensor, 1, config)
+    assert qdata.stride(1) != 1, "the pass-through route should keep the quant axis strided"
+
+    with pytest.raises(AssertionError, match="unit stride"):
+        mx_dequantize(qdata, scale, 1, config.block_size, config.elem_dtype, tensor.dtype)
+
+
+def test_mx_dequantize_rejects_unsupported_dtypes():
+    """The dtype checks run before any data is touched, so the tensors below are never consumed.
+
+    Only uint8 ``qdata`` gets past them: ``src_dtype`` must name a format, and a typed ``qdata``
+    must agree with it. ``output_dtype`` is checked last.
+    """
+
+    raw = torch.zeros(8, 32, device="npu", dtype=torch.uint8)
+    typed = torch.zeros(8, 32, device="npu", dtype=torch.float8_e4m3fn)
+    scale = torch.zeros(8, 1, 2, device="npu", dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="src_dtype"):
+        mx_dequantize(raw, scale, -1, 32, torch.uint8, torch.bfloat16)
+
+    with pytest.raises(AssertionError, match="must match"):
+        mx_dequantize(typed, scale, -1, 32, torch.uint8, torch.bfloat16)
+
+    with pytest.raises(AssertionError, match="output_dtype"):
+        mx_dequantize(typed, scale, -1, 32, torch.float8_e4m3fn, torch.float64)
+
+
+def test_mx_dequantize_honors_output_dtype():
+    """Dequantizing to float32 and to bfloat16 must agree, bit for bit.
+
+    A dequantized MX value is an FP8/FP4 mantissa times a power-of-two E8M0 scale, so it
+    carries fewer significand bits than bfloat16 has: both output dtypes are exact, making
+    their difference a pure dtype question.
+    """
+
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    tensor = torch.randn(64, 128, device="npu", dtype=torch.bfloat16)
+    qdata, scale = mx_quantize(tensor, -1, config)
+
+    as_bfloat16 = mx_dequantize(qdata, scale, -1, config.block_size, config.elem_dtype, torch.bfloat16)
+    as_float32 = mx_dequantize(qdata, scale, -1, config.block_size, config.elem_dtype, torch.float32)
+
+    assert as_bfloat16.dtype == torch.bfloat16
+    assert as_float32.dtype == torch.float32
+    assert torch.equal(as_float32, as_bfloat16.to(torch.float32))

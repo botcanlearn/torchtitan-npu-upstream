@@ -10,6 +10,7 @@ import torch
 import torch_npu  # noqa: F401
 from torchao_npu.ops.mx_ops import to_mx_then_bmm, to_mx_then_grouped_mm, to_mx_then_mm
 from torchao_npu.quantization.quant_configs import MXQuantizeConfig
+from torchao_npu.quantization.quant_primitives.mx import mx_fake_quantize
 from torchao_npu.quantized_tensors.mx_tensor import MXTensor
 
 # =========================================================================
@@ -263,16 +264,6 @@ def test_in_place_ops_are_rejected(op):
             x.fill_(1.0)
 
     assert torch.equal(x.qdata, qdata_before)
-
-
-def test_dequantize_is_a_placeholder():
-    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
-    qdata = torch.randn(4, 64).to(torch.float8_e4m3fn)
-    scale = torch.full((4, 1, 2), 2.0, dtype=torch.float8_e8m0fnu)
-    x = MXTensor(qdata, scale, torch.bfloat16, -1, config)
-
-    with pytest.raises(NotImplementedError, match="not implemented yet"):
-        x.dequantize()
 
 
 # =========================================================================
@@ -758,3 +749,60 @@ def test_matmul_handler_matches_to_mx_then_mm(elem_dtype, shape):
 
     assert y.shape == (*shape[:-1], n), f"output shape {tuple(y.shape)} != {(*shape[:-1], n)}"
     assert torch.equal(y, y_ref), "the matmul handler differs from the training path's"
+
+
+# =========================================================================
+# Dequantize
+# =========================================================================
+
+
+@pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float4_e2m1fn_x2])
+def test_dequantize_matches_mx_fake_quantize(elem_dtype):
+    """``dequantize`` undoes ``from_hp``'s quantization, reproducing ``mx_fake_quantize``.
+
+    ``mx_fake_quantize`` quantizes and dequantizes the permuted tensor in one op, so for a
+    tensor both permute the same way they see the same ``qdata``/``scale`` and must agree bit
+    for bit.
+    """
+    config = MXQuantizeConfig(elem_dtype=elem_dtype)
+    tensor = torch.randn(64, 128, device="npu", dtype=torch.bfloat16)
+    x = MXTensor.from_hp(tensor, config, axis=-1)
+
+    dequantized = x.dequantize()
+    fake_quantized = mx_fake_quantize(tensor, -1, config)
+
+    assert dequantized.shape == tensor.shape, f"shape mismatch: {dequantized.shape} vs {tensor.shape}"
+    assert dequantized.dtype is tensor.dtype, f"dtype mismatch: {dequantized.dtype} vs {tensor.dtype}"
+    assert dequantized.stride() == fake_quantized.stride(), (
+        f"stride mismatch: {dequantized.stride()} vs {fake_quantized.stride()}"
+    )
+    assert torch.equal(dequantized, fake_quantized), "dequantized values differ from mx_fake_quantize"
+
+
+def test_dequantize_honors_output_dtype():
+    """Every MX value fits in bfloat16, so both output dtypes agree bit for bit."""
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    tensor = torch.randn(64, 128, device="npu", dtype=torch.bfloat16)
+    x = MXTensor.from_hp(tensor, config, axis=-1)
+
+    as_bfloat16 = x.dequantize()
+    as_float32 = x.dequantize(torch.float32)
+
+    assert as_bfloat16.dtype is torch.bfloat16, f"dtype {as_bfloat16.dtype} != torch.bfloat16"
+    assert as_float32.dtype is torch.float32, f"dtype {as_float32.dtype} != torch.float32"
+    assert as_float32.stride() == as_bfloat16.stride(), (
+        f"stride mismatch: {as_float32.stride()} vs {as_bfloat16.stride()}"
+    )
+    assert torch.equal(as_float32, as_bfloat16.to(torch.float32)), "the two output dtypes disagree"
+
+
+def test_dequantize_rejects_a_strided_quant_axis():
+    """A pass-through quantization keeps the quant axis strided, which cannot be dequantized."""
+    config = MXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    tensor = torch.randn(4, 256, 128, device="npu", dtype=torch.bfloat16)
+
+    x = MXTensor.from_hp(tensor, config, axis=1)  # dense, non-trailing axis: no permutation
+    assert x.qdata.stride(x.quant_axis) != 1, "the pass-through route should keep the quant axis strided"
+
+    with pytest.raises(AssertionError, match="unit stride"):
+        x.dequantize()

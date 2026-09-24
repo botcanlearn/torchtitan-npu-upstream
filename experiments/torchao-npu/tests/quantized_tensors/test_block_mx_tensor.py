@@ -10,6 +10,7 @@ import torch
 import torch_npu  # noqa: F401
 from torchao_npu.quantization.quant_configs import BlockMXQuantizeConfig, MXQuantizeConfig
 from torchao_npu.quantization.quant_primitives.block_mx import block_mx_quantize
+from torchao_npu.quantization.quant_primitives.mx import mx_dequantize
 from torchao_npu.quantized_tensors.block_mx_tensor import BlockMXTensor
 
 # =========================================================================
@@ -355,3 +356,81 @@ def test_from_hp_matches_block_mx_quantize():
     assert torch.equal(y.scale2.view(torch.uint8), scale2.view(torch.uint8)), (
         "scale2 values differ from the primitive's"
     )
+
+
+# =========================================================================
+# Dequantize
+# =========================================================================
+
+
+@pytest.mark.parametrize("elem_dtype", [torch.float8_e4m3fn, torch.float4_e2m1fn_x2])
+def test_dequantize_uses_the_last_dim_scale(elem_dtype):
+    """For a freshly quantized tensor the innermost-contiguous quant axis is the last dim.
+
+    Its scale, ``scale1``, is the one whose dequantization the result must match; using the
+    other scale would give different values, so this pins the choice.
+    """
+    config = BlockMXQuantizeConfig(elem_dtype=elem_dtype)
+    tensor = torch.randn(64, 128, device="npu", dtype=torch.bfloat16)
+    x = BlockMXTensor.from_hp(tensor, config)
+
+    dequantized = x.dequantize()
+    expected = mx_dequantize(
+        x.qdata,
+        x.scale1,
+        x.qdata.ndim - 1,
+        block_size=config.block_size,
+        src_dtype=config.elem_dtype,
+        output_dtype=tensor.dtype,
+    )
+
+    assert dequantized.shape == tensor.shape, f"shape mismatch: {dequantized.shape} vs {tensor.shape}"
+    assert dequantized.dtype is tensor.dtype, f"dtype mismatch: {dequantized.dtype} vs {tensor.dtype}"
+    assert dequantized.stride() == expected.stride(), f"stride mismatch: {dequantized.stride()} vs {expected.stride()}"
+    assert torch.equal(dequantized, expected), "the result is not the last-dim scale's"
+
+
+def test_dequantize_after_a_swap_dequantizes_the_same_axis():
+    """A swap exchanges the two scales, and with them the trailing dim each one covers.
+
+    ``t()`` makes the unit-stride dim second-to-last, so ``dequantize`` has to fall through to
+    the second scale -- which now covers the last dim, the axis ``scale1`` covered before the
+    swap. The values are therefore the same quantization, transposed.
+    """
+    config = BlockMXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    tensor = torch.randn(64, 128, device="npu", dtype=torch.bfloat16)
+    x = BlockMXTensor.from_hp(tensor, config)
+
+    y = x.t()
+    dequantized = y.dequantize()
+    expected = mx_dequantize(
+        x.qdata,
+        x.scale1,
+        x.qdata.ndim - 1,
+        block_size=config.block_size,
+        src_dtype=config.elem_dtype,
+        output_dtype=tensor.dtype,
+    )
+
+    assert dequantized.shape == y.shape, f"shape mismatch: {dequantized.shape} vs {y.shape}"
+    assert dequantized.stride() == expected.t().stride(), (
+        f"stride mismatch: {dequantized.stride()} vs {expected.t().stride()}"
+    )
+    assert torch.equal(dequantized, expected.t()), "the swapped tensor dequantized the wrong scale"
+
+
+def test_dequantize_rejects_qdata_without_a_unit_stride_quant_axis():
+    """Neither trailing dim is innermost-contiguous: there is no scale to dequantize.
+
+    ``from_hp`` and the shape ops cannot produce such a tensor -- they leave one of the two dims
+    unit-stride -- but the constructor does not forbid it, so the error is checked here.
+    """
+    config = BlockMXQuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+    # A permutation that puts the unit-stride dim first: both trailing strides are > 1.
+    qdata = torch.randn(4, 8, 8).to(torch.float8_e4m3fn).permute(2, 1, 0)
+    scale1 = torch.full((8, 8, 1, 2), 2.0, dtype=torch.float8_e8m0fnu)
+    scale2 = torch.full((8, 1, 4, 2), 4.0, dtype=torch.float8_e8m0fnu)
+    x = BlockMXTensor(qdata, scale1, scale2, torch.bfloat16, config)
+
+    with pytest.raises(RuntimeError, match="innermost-contiguous"):
+        x.dequantize()
