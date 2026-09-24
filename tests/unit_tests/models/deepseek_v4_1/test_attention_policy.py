@@ -103,7 +103,13 @@ def test_v41_config_uses_specialized_attention_with_explicit_ownership() -> None
 
 
 def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
-    """The pool source and its consumers are config policy, not layer-id lookups."""
+    """The pool source and its consumers are config policy, not layer-id lookups.
+
+    The capacity and the block size are read off the *selector*, which is the node that
+    builds or searches the pool; the indexer only carries the candidate tensor between
+    layers.  A layer outside the hierarchy spells the pool off with the kernels' negative
+    sentinel rather than a local zero.
+    """
     config = model_registry("deepseek_v4_1_debugmodel").model
     # The frozen debug recipe: one pool built at layer 20, consumed by every later
     # index source, over blocks of 8 slots.
@@ -111,20 +117,21 @@ def test_candidate_pool_roles_are_declared_per_indexer_layer() -> None:
 
     for layer_id, layer in enumerate(config.layers):
         indexer = layer.attention.indexer
+        selector = indexer.selector
         if layer_id == V41_CANDIDATE_SOURCE_LAYER:
             # The Full Mode source is the only layer that builds the pool.
             assert indexer.mode is FULL
-            assert indexer.candidate_topk_blocks == 4
-            assert indexer.candidate_block_size == 8
+            assert selector.candidate_topk_blocks == 4
+            assert selector.candidate_block_size == 8
         elif layer_id in pool_consumers:
             # A Reindex Mode layer after the source searches the shared pool.
             assert indexer.mode is REINDEX
-            assert indexer.candidate_topk_blocks == 4
-            assert indexer.candidate_block_size == 8
+            assert selector.candidate_topk_blocks == 4
+            assert selector.candidate_block_size == 8
         else:
             # Everything else scores every visible entry, or checks nothing at all.
-            assert indexer.candidate_topk_blocks == 0
-            assert indexer.candidate_block_size == 0
+            assert selector.candidate_topk_blocks == -1
+            assert selector.candidate_block_size == -1
 
     assert config.layers[V41_CANDIDATE_SOURCE_LAYER].attention.indexer.mode is FULL
     assert config.layers[24].attention.indexer.mode is REINDEX

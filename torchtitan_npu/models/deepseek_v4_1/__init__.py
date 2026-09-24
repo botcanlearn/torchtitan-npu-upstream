@@ -28,7 +28,13 @@ from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .attention import Attention, CompressedSparseInnerAttention2
 from .compressor import Compressor
-from .indexer import FULL, REINDEX, REUSE, HierarchicalIndexer, Selector
+from .indexer import (
+    FULL,
+    REINDEX,
+    REUSE,
+    HierarchicalIndexer,
+    Selector,
+)
 from .mhc import HcPost, HcPre
 from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, DeepSeekV41TransformerBlock
 from .state_dict_adapter import DeepSeekV41StateDictAdapter
@@ -116,8 +122,9 @@ _HC_PARAM_INIT = {
     "hc_scale": partial(nn.init.trunc_normal_, std=0.02),
 }
 _SWIGLU_LIMIT = 10.0
-# Positions per candidate block of the hierarchical indexer.
-_CANDIDATE_BLOCK_SIZE = 8
+# Positions per candidate block of the hierarchical indexer.  A compile-time constant of
+# both fused kernels (``CANDIDATE_BLOCK_SIZE`` in the QLI and QSLI sources), not a tunable.
+CANDIDATE_BLOCK_SIZE = 8
 
 
 # Flash and debug widths share the same 40-layer KV/indexer reuse topology.
@@ -125,6 +132,16 @@ V41_CANDIDATE_SOURCE_LAYER = 20
 V41_FULL_COMPRESS_RATIOS = (0, 0) + (2,) * 18 + (1,) * 20
 V41_KV_SOURCE_LAYERS = (2, 8, 14, 20)
 V41_FULL_INDEX_SOURCE_LAYERS = (2, 8, 14, 20, 24, 28, 32, 36)
+
+# The miniature topology the single-card fused-kernel runs use: the released recipe cut to
+# the three layers that reach every branch of the fused selector -- one Full Mode layer at
+# ratio 2 with the pool off, one Full Mode pool source at ratio 1, and one Reindex Mode
+# layer that searches what the source built.  Every additional layer would only recompile
+# the same kernels, and the cannbotdsl JIT dominates the cost of a cold run.
+V41_STRIPPED_COMPRESS_RATIOS = (2, 1, 1)
+V41_STRIPPED_KV_SOURCE_LAYERS = (0, 1)
+V41_STRIPPED_INDEX_SOURCE_LAYERS = (0, 1, 2)
+V41_STRIPPED_CANDIDATE_SOURCE_LAYER = 1
 
 
 def _output_linear_init(dim: int) -> dict:
@@ -224,7 +241,8 @@ def _make_indexer_config(
     A layer that owns the compressed KV is Full Mode (it projects its own index keys); an
     index source without it is Reindex Mode (it rescores the shared keys); every other
     layer is Reuse Mode.  The candidate pool is built by the Full Mode source and searched
-    by the Reindex Mode layers after it, so those carry ``candidate_topk_blocks``.
+    by the Reindex Mode layers after it, so only those carry a pool capacity; every other
+    layer spells the pool off with the kernels' own sentinel.
     """
     owns_index_k = owns_k and is_source
     if not is_source:
@@ -234,6 +252,10 @@ def _make_indexer_config(
     else:
         mode = REINDEX
     wants_pool = is_candidate_source or uses_candidates
+    # A layer outside the hierarchy spells the pool off with the kernels' negative sentinel;
+    # only the source and the Reindex Mode layers after it carry a capacity.
+    pool_capacity = candidate_topk_blocks if wants_pool else -1
+    pool_block_size = candidate_block_size if wants_pool else -1
     return HierarchicalIndexer.Config(
         mode=mode,
         selector=Selector.Config(
@@ -242,15 +264,13 @@ def _make_indexer_config(
             num_index_heads=num_index_heads,
             index_head_dim=index_head_dim,
             index_topk=index_topk,
-            candidate_topk_blocks=candidate_topk_blocks if wants_pool else 0,
-            candidate_block_size=candidate_block_size if wants_pool else 0,
+            candidate_topk_blocks=pool_capacity,
+            candidate_block_size=pool_block_size,
         ),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,
         index_topk=index_topk,
         compress_ratio=compress_ratio,
-        candidate_topk_blocks=candidate_topk_blocks if wants_pool else 0,
-        candidate_block_size=candidate_block_size if wants_pool else 0,
         rope=dataclasses.replace(rope) if rope is not None else None,
         wq_b=(
             Linear.Config(
@@ -559,8 +579,8 @@ def _make_v41_config(
             "the candidate-pool source must also be an index source: "
             f"layer {candidate_source_layer} is not in index_source_layers"
         )
-    if candidate_topk_blocks <= 0 or _CANDIDATE_BLOCK_SIZE <= 0:
-        raise ValueError("candidate block parameters must be positive")
+    if candidate_topk_blocks <= 0:
+        raise ValueError(f"the candidate pool capacity must be positive, got {candidate_topk_blocks}")
 
     source_key_indexer_layers = tuple(layer_id for layer_id in index_source_layers if layer_id in kv_source_layers)
     external_key_indexer_layers = tuple(
@@ -617,7 +637,7 @@ def _make_v41_config(
                 and 0 <= candidate_source_layer < layer_id
             ),
             candidate_topk_blocks=candidate_topk_blocks,
-            candidate_block_size=_CANDIDATE_BLOCK_SIZE,
+            candidate_block_size=CANDIDATE_BLOCK_SIZE,
             layer_id=layer_id,
             index_source_layers=index_source_layers,
         )
@@ -691,7 +711,7 @@ def _make_v41_config(
         index_source_layers=index_source_layers,
         candidate_source_layer=candidate_source_layer,
         candidate_topk_blocks=candidate_topk_blocks,
-        candidate_block_size=_CANDIDATE_BLOCK_SIZE,
+        candidate_block_size=CANDIDATE_BLOCK_SIZE,
     )
     if not vision:
         return DeepSeekV41Model.Config(**common)
@@ -853,6 +873,76 @@ def _flash_engram_geometry():
     )
 
 
+def _stripped(
+    moe_comm_backend: str = "standard",
+    non_blocking_capacity_factor: float | None = None,
+    *,
+    num_experts: int = 4,
+) -> DeepSeekV41Model.Config:
+    """A single-card DeepSeek-V4.1 that differs from the flash flavor in layers alone.
+
+    Only the layer count and the layer-role tables are trimmed.  ``dim``, the attention
+    heads and both released geometries are the flash ones untouched -- the MLA attention
+    because SMLA's metadata operator requires ``head_dim`` to be exactly 512, and the
+    indexer because the ``ds41`` kernels fix all four of its numbers.  The expert count is
+    the only other reduction, so that six layers fit on one card.
+
+    The topology is the flash one in miniature: ``candidate_source_layer`` sits at the first
+    full-resolution layer, so the pool source is a Full Mode layer and the Reindex Mode
+    layer after it searches what that source built.  Together with the ratio-2 Full Mode
+    layer outside the hierarchy, all three branches of the fused selector are reachable.
+    """
+    return _make_v41_config(
+        dim=5120,
+        # The released MLA attention geometry; SMLA rejects anything but head_dim 512.
+        n_heads=64,
+        head_dim=512,
+        rope_head_dim=64,
+        q_lora_rank=1280,
+        o_lora_rank=1024,
+        n_groups=8,
+        # The released indexer geometry, which the ds41 QLI/QSLI pair fixes in full.
+        index_n_heads=32,
+        index_head_dim=128,
+        index_topk=512,
+        candidate_topk_blocks=2048,
+        moe_inter_dim=2304,
+        max_seq_len=4096,
+        n_layers=len(V41_STRIPPED_COMPRESS_RATIOS),
+        vocab_size=129280,
+        window_size=128,
+        norm_eps=1e-20,
+        hc_mult=4,
+        num_shared_experts=1,
+        # The router's top-k must fit the expert count, and the count is what the 32 GiB
+        # container cap constrains; both are small for the same reason.
+        top_k=2,
+        route_scale=1.5,
+        route_norm=True,
+        load_balance_coeff=0.001,
+        sinkhorn_iters=20,
+        hc_eps=1e-06,
+        rope_theta=10000.0,
+        compress_rope_theta=160000.0,
+        rope_factor=16.0,
+        original_seq_len=65536,
+        vision_layers=32,
+        patch_size=14,
+        downsample_ratio=3,
+        compress_ratios=V41_STRIPPED_COMPRESS_RATIOS,
+        kv_source_layers=V41_STRIPPED_KV_SOURCE_LAYERS,
+        index_source_layers=V41_STRIPPED_INDEX_SOURCE_LAYERS,
+        candidate_source_layer=V41_STRIPPED_CANDIDATE_SOURCE_LAYER,
+        num_experts=num_experts,
+        vision=False,
+        vision_dim=128,
+        vision_heads=8,
+        vision_inter_dim=256,
+        moe_comm_backend=moe_comm_backend,
+        non_blocking_capacity_factor=non_blocking_capacity_factor,
+    )
+
+
 def _attach_engram(config, engram):
     from .engram.config import _make_engram_configs
 
@@ -884,6 +974,7 @@ deepseek_v4_1_configs = {
     ),
     "deepseek_v4_1_debugmodel": _debugmodel,
     "deepseek_v4_1_debugmodel_text": partial(_debugmodel, vision=False),
+    "deepseek_v4_1_stripped": _stripped,
 }
 
 
@@ -925,6 +1016,7 @@ def _register_step_pre_hooks(optimizers, model_parts, parallel_dims) -> None:
 
 
 __all__ = [
+    "CANDIDATE_BLOCK_SIZE",
     "V41_CANDIDATE_SOURCE_LAYER",
     "V41_FULL_COMPRESS_RATIOS",
     "V41_FULL_INDEX_SOURCE_LAYERS",

@@ -148,8 +148,13 @@ class Selector(Module):
         num_index_heads: int
         index_head_dim: int
         index_topk: int
-        candidate_topk_blocks: int
-        candidate_block_size: int
+        # Candidate pool, in the kernels' own spelling: a negative capacity scores every
+        # visible entry, a positive one (with a block size of ``CANDIDATE_BLOCK_SIZE``)
+        # builds or searches the shared pool.  Which of those two a capacity-carrying layer
+        # does is ``mode``'s answer, not the config's: only a Full Mode layer owns the
+        # compressed KV the pool indexes, so only it can build one.
+        candidate_topk_blocks: int = -1
+        candidate_block_size: int = -1
 
     def __init__(self, config: Config):
         super().__init__()
@@ -160,6 +165,16 @@ class Selector(Module):
         self.index_topk = config.index_topk
         self.candidate_topk_blocks = config.candidate_topk_blocks
         self.candidate_block_size = config.candidate_block_size
+
+    @property
+    def has_candidate_pool(self) -> bool:
+        """Whether this layer builds or searches the shared candidate pool.
+
+        The test is the kernel's own: it enables the pool on a positive capacity and rejects
+        anything else, so a value that is neither positive nor the disabled sentinel is the
+        operator's to refuse, not this property's to guess at.
+        """
+        return self.candidate_topk_blocks > 0
 
     @staticmethod
     def select_candidate_blocks(
@@ -215,7 +230,7 @@ class Selector(Module):
         weights_BLHi: torch.Tensor,
         attention_masks: DeepSeekV41Metadata,
         *,
-        candidates_BLN: torch.Tensor | None,
+        candidates_BL1C: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """The score-and-select half, and the half a fused kernel replaces.
 
@@ -233,8 +248,16 @@ class Selector(Module):
            pass rather than a gather from step 1 for exactly the reason step 1 is outside
            the graph -- the full ``[B, L, Hi, N]`` tensor must not enter it.
 
+        ``candidates_BL1C`` is the cross-layer candidate tensor, and its *carrier* is the
+        selector's business: this reference path moves a boolean position mask ``[B, L, N]``
+        between layers, while a fused selector moves the kernels' block table
+        ``[B, L, 1, capacity]``.  The name follows the fused contract because that is the one
+        a run ships; a reference selector is the deviation, and its two consumers
+        (``select_candidate_blocks`` here, the mask in step 2) are the only places that read
+        the shape.
+
         Returns:
-            ``(topk_indices_BLK, topk_scores_BLK, candidates_BLN)``.  An unused slot of a
+            ``(topk_indices_BLK, topk_scores_BLK, candidates_BL1C)``.  An unused slot of a
             padded row is ``-1`` in the indices and ``-inf`` in the student logits, so
             that the distillation's softmax drops it without looking at the indices.
         """
@@ -245,20 +268,20 @@ class Selector(Module):
             scores_BLN = (scores_BLHiN.relu() * weights_BLHi.unsqueeze(-1)).sum(dim=2)
             scores_BLN = scores_BLN.masked_fill(~visible_LN, -torch.inf)
 
-            if self.mode is FULL and self.candidate_topk_blocks > 0:
-                candidates_BLN = self.select_candidate_blocks(
+            if self.mode is FULL and self.has_candidate_pool:
+                candidates_BL1C = self.select_candidate_blocks(
                     scores_BLN,
                     newest_L1,
                     newest_valid_L1,
                     self.candidate_topk_blocks,
                     self.candidate_block_size,
                 )
-            elif self.mode is REINDEX and self.candidate_topk_blocks > 0:
-                assert candidates_BLN is not None, (
+            elif self.mode is REINDEX and self.has_candidate_pool:
+                assert candidates_BL1C is not None, (
                     "A Reindex Mode indexer with candidate_topk_blocks set searches the "
                     "pool the candidate source built, which no preceding layer produced."
                 )
-                scores_BLN = scores_BLN.masked_fill(~candidates_BLN, -torch.inf)
+                scores_BLN = scores_BLN.masked_fill(~candidates_BL1C, -torch.inf)
 
             topk = min(self.index_topk, scores_BLN.size(-1))
             # The selection is emitted in the same order the fused selector uses: position
@@ -286,7 +309,7 @@ class Selector(Module):
         # A ``-1`` slot scores against entry 0 and means nothing: it is marked with
         # the value that drops it from the distillation's student softmax.
         topk_scores_BLK = logits_BLHiK.sum(dim=2).masked_fill(topk_indices_BLK < 0, -torch.inf)
-        return topk_indices_BLK, topk_scores_BLK, candidates_BLN
+        return topk_indices_BLK, topk_scores_BLK, candidates_BL1C
 
 
 class HierarchicalIndexer(Module):
@@ -301,11 +324,11 @@ class HierarchicalIndexer(Module):
     the adapter over them:
 
     - ``FULL``: the layer owns the main KV, so it projects the index keys from the
-      compressor latent and runs the indexer.  With ``candidate_topk_blocks > 0`` it is
-      also the group's candidate source and builds the shared pool.
+      compressor latent and runs the indexer.  Its selector is the group's candidate
+      source when it carries a pool capacity, and builds the shared pool.
     - ``REINDEX``: it reuses the main KV and index keys of a preceding Full Mode layer,
-      computes its own index query and rescores them.  With ``candidate_topk_blocks > 0``
-      it searches only the shared candidate pool, otherwise every visible entry.
+      computes its own index query and rescores them.  With a pool capacity its selector
+      searches only the shared candidate pool, otherwise every visible entry.
     - ``REUSE``: no index query and no scores; it carries the latest Top-K indices and
       the shared keys forward.
 
@@ -315,6 +338,10 @@ class HierarchicalIndexer(Module):
     ``index_topk`` 512 in V4.1-Flash -- and the Reindex Mode layers search only those.
     The pool boundary comes from a top-k over blocks, so it receives no gradient: it is a
     training/inference consistency and per-query cost device, not a learned component.
+
+    Which layer plays which part is the selector's business, not the indexer's: the pool
+    capacity and the block size both live on ``Selector.Config``, and this adapter only
+    carries the candidate tensor between layers.
 
     The indexer is trained by distillation alone, so its graph starts at its own
     parameters: the caller detaches the trunk inputs (``Attention.forward``).  The shared
@@ -329,10 +356,6 @@ class HierarchicalIndexer(Module):
         index_head_dim: int
         index_topk: int
         compress_ratio: int
-        # Candidate pool: a Full Mode source builds it, Reindex Mode layers search it.
-        # 0 leaves the mode's plain behaviour, scoring every visible entry.
-        candidate_topk_blocks: int = 0
-        candidate_block_size: int = 0
         # Present on Full and Reindex Mode layers:
         rope: RoPE.Config | None = None
         wq_b: Linear.Config | None = None
@@ -349,8 +372,6 @@ class HierarchicalIndexer(Module):
         self.num_index_heads = config.num_index_heads
         self.index_head_dim = config.index_head_dim
         self.index_topk = config.index_topk
-        self.candidate_topk_blocks = config.candidate_topk_blocks
-        self.candidate_block_size = config.candidate_block_size
         self.selector = config.selector.build()
         if self.mode is REUSE:
             return
@@ -448,6 +469,6 @@ class HierarchicalIndexer(Module):
             idx_k,
             weights,
             attention_masks,
-            candidates_BLN=candidates,
+            candidates_BL1C=candidates,
         )
         return idx_k, topk_indices, topk_scores, candidates

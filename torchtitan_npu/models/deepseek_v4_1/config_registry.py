@@ -275,3 +275,13 @@ def deepseek_v4_1_debugmodel_multimodal() -> TrainerEx.Config:
 
 def deepseek_v4_1_debugmodel_text() -> TrainerEx.Config:
     return _make_trainer_config("deepseek_v4_1_debugmodel_text")
+
+
+def deepseek_v4_1_stripped() -> TrainerEx.Config:
+    """The single-card flavor: debug widths, released indexer geometry, ten layers.
+
+    See :func:`torchtitan_npu.models.deepseek_v4_1._stripped` for what is and is not
+    shrunk; the point of the flavor is to reach all three branches of the fused selector
+    on one card.
+    """
+    return _make_trainer_config("deepseek_v4_1_stripped")

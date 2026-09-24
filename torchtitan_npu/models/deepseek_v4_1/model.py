@@ -417,10 +417,16 @@ class DeepSeekV41Model(Decoder):
                     indexer = attention.indexer
                     if indexer.mode is not IndexerMode.REUSE:
                         indexer_seq_len = compressed_seq_len
-                        if indexer.mode is IndexerMode.REINDEX and indexer.candidate_topk_blocks > 0:
+                        # The pool's geometry lives on the selector -- the one node that
+                        # builds or searches it -- so the estimate is read off the same
+                        # config the layers read it from and cannot drift from it.  The
+                        # positivity test is the kernels' own, matching the module's
+                        # ``Selector.has_candidate_pool``.
+                        selector = indexer.selector
+                        if indexer.mode is IndexerMode.REINDEX and selector.candidate_topk_blocks > 0:
                             # MFU counts the model's bounded candidate search, not
                             # wider eager-reference scoring that is masked afterwards.
-                            candidate_seq_len = indexer.candidate_topk_blocks * indexer.candidate_block_size
+                            candidate_seq_len = selector.candidate_topk_blocks * selector.candidate_block_size
                             indexer_seq_len = min(indexer_seq_len, candidate_seq_len)
 
                         num_flops_per_token += 6 * indexer.num_index_heads * indexer.index_head_dim * indexer_seq_len

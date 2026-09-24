@@ -170,7 +170,7 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
 | `common.rope.asc_partial`（A5 文本） | 同上三处文本位点；单个 `inplace_partial_rotary_mul` 只旋转尾部 `dim` 通道 | AscendC partial rotary |
 | `common.rope.asc_half_rotation` | 视觉塔 2D 位置表的 half 旋转（半宽 cos/sin，融合前复制为全宽表，逐 batch 折叠保位置） | 同上 |
 | `sparse_attn.asc`（仅 A5，须与下一行同开） | 替换完整 attention forward；反向除自身梯度外还在 `topk_scores` 梯度上产出 indexer 教师 | Ascend sparse flash MLA |
-| `lightning_indexer.asc`（仅 A5，须与上一行同开） | 替换 selector 节点；候选池路径保留 eager | LI / SLIKG |
+| `lightning_indexer.asc`（仅 A5，须与上一行同开） | 替换 selector 节点；候选池由量化算子对 `ds41.quant_lightning_indexer` / `quant_sparse_lightning_indexer` 承担，条目默认走未量化 `lightning_indexer`，加 `={"legacy":false}` 启用 | QLI / QSLI / SLIKG |
 | `common.swiglu_group.asc`（仅 A5） | `*.moe.routed_experts.inner_experts` 的 grouped SwiGLU（FQN 限定） | cann_ops_nn.swiglu_group |
 | `common.swiglu_group.asc_shared_experts`（仅 A5） | `*.moe.shared_experts` 的 SwiGLU（FQN 限定，不替换视觉 MLP） | 同上 |
 | `common.token_dispatcher.asc` | 公共 MoE 的 permute / re-routing / unpermute；reference 不启用 | Ascend token dispatcher |
