@@ -84,6 +84,7 @@ def _mutation_functionalization_pipeline(
     config: Any,
     *,
     parallel_dims: Any = None,
+    runtime_context: Any = None,
 ) -> list:
     """Default GraphTrainer passes with mutation functionalization inserted.
 
@@ -91,6 +92,11 @@ def _mutation_functionalization_pipeline(
     CPU offload -> native SAR, so the SAR replay sees the mutation writes as
     ordinary dataflow.
     """
+    from . import ep_forward_accumulation
+
+    # This compatibility is needed only when mutation functionalization can
+    # feed functionalized buffer updates into EP chunking.
+    ep_forward_accumulation.apply()
     passes = construct_default_graph_passes(traced_result, config, parallel_dims=parallel_dims)
     names = [_get_pass_name(pass_fn) for pass_fn in passes]
     if "functionalize_recompute_mutations_pass" in names:

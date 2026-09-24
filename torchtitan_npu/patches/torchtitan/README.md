@@ -8,6 +8,8 @@
 - https://github.com/pytorch/torchtitan/pull/4650
 - https://github.com/pytorch/torchtitan/pull/4651
 - https://github.com/pytorch/torchtitan/pull/4734
+- https://github.com/pytorch/torchtitan/pull/4708
+- https://github.com/pytorch/torchtitan/pull/4763
 -->
 
 # TorchTitan 临时补丁
@@ -50,6 +52,8 @@ grep -L "Pending upstream PR: https://github.com/pytorch/torchtitan/pull/" \
 | [#4598](https://github.com/pytorch/torchtitan/pull/4598) | 导出副本恢复状态前刷新缓存中的学习率等元数据，对应 `experiments/torchft/optimizer.py` 和 `checkpoint.py` |
 | [#4663](https://github.com/pytorch/torchtitan/pull/4663) | 按当前参与副本数平均 TorchFT 日志 loss，对应 `experiments/torchft/trainer.py` |
 | [#4664](https://github.com/pytorch/torchtitan/pull/4664) | 为每个 FSDP 参数组注册 TorchFT 梯度平均 hook，对应 `experiments/torchft/manager.py` |
+| [#4708](https://github.com/pytorch/torchtitan/pull/4708) | 修复 functionalize_recompute_mutations_pass 和 EpOverlap 的冲突 |
+| [#4763](https://github.com/pytorch/torchtitan/pull/4763) | 向 GraphTrainer graph pass 提供运行时上下文，用于 auto-overlap 调度时整图 profiling |
 
 上述 6 个 TorchTitan PR（#4534、#4575、#4578、#4598、#4663、#4664）已在上游合入，但 `v0.3.0` 尚未包含这些修复。
 

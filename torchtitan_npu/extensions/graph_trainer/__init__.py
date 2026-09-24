@@ -15,8 +15,19 @@ from torchtitan_npu.config.configs import OptimizerConfig, TrainingConfig
 from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.extensions.components.checkpoint import CheckpointManager
 
-from .profiler import CANNProfiler
-from .trainer import TrainerEx
+from ..profiler import CANNProfiler
+from ..trainer import TrainerEx
+from . import auto_overlap
+
+
+def _apply_auto_overlap_runtime_context_patch(config) -> None:
+    if not auto_overlap.is_npu_auto_overlap_pipeline(config.compile.pass_pipeline):
+        return
+    from torchtitan_npu.patches.torchtitan.experiments.graph_trainer import (
+        graph_trainer_runtime_context,
+    )
+
+    graph_trainer_runtime_context.apply()
 
 
 class GraphTrainerEx(TrainerEx, GraphTrainer):
@@ -27,6 +38,11 @@ class GraphTrainerEx(TrainerEx, GraphTrainer):
         compile: GraphTrainerCompileConfig = field(  # pyrefly: ignore [bad-override]
             default_factory=GraphTrainerCompileConfig,
         )
+
+    def __init__(self, config: Config) -> None:
+        # This patch must wrap GraphTrainer before its first trace.
+        _apply_auto_overlap_runtime_context_patch(config)
+        super().__init__(config)
 
 
 config_manager.register_config_converter(

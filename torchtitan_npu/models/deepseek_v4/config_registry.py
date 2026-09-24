@@ -21,9 +21,7 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-)
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.configs import (
     to_graph_trainer_config as _to_graph_trainer_config,
 )
