@@ -88,6 +88,32 @@ else:
     _ops_to_preserve_subclass.add(torch.ops.spmd_types.replicate_to_varying.default)
 
 
+def _pad_uneven_shard_dim0(
+    inputs: tuple[torch.Tensor, ...],
+    outer_size: torch.Size,
+    world_size: int,
+) -> tuple[torch.Tensor, ...]:
+    """Zero-pad dim 0 of each input to the largest chunk when FSDP shards dim 0 unevenly.
+
+    ``fsdp_pre_all_gather`` must return the padded shard size or the padded
+    rank alone fails the all-gather size assert and the collective hangs.
+    Only dim 0 can shard unevenly, and the gathered padding tail is dropped
+    by FSDP2 via ``as_strided(_orig_size)``.
+    """
+    if world_size <= 1 or outer_size[0] % world_size == 0:
+        return inputs
+    padded_dim0 = -(-outer_size[0] // world_size)  # size of the largest chunk
+
+    def pad_dim0(t: torch.Tensor) -> torch.Tensor:
+        if t.size(0) >= padded_dim0:
+            return t
+        padded = t.new_zeros((padded_dim0, *t.shape[1:]))
+        padded.narrow(0, 0, t.size(0)).copy_(t)
+        return padded
+
+    return tuple(pad_dim0(t) for t in inputs)
+
+
 class BaseTrainingWeightWrapperTensor(TorchAOBaseTensor):
     """
     Base class for wrapper tensor subclasses that intercept computation ops
@@ -316,10 +342,11 @@ class BaseTrainingWeightWrapperTensor(TorchAOBaseTensor):
         module: nn.Module,
         mp_policy: MixedPrecisionPolicy,
     ):
-        # Cast to mixed precision dtype prior to all-gather
+        # Cast to the mixed-precision dtype, then pad dim 0 for uneven sharding
+        # (e.g. 3 experts over 2 ranks) so all ranks all-gather equal-sized buffers.
         all_gather_inputs = (self._data.to(mp_policy.param_dtype),)
         all_gather_metadata = ()
-        return all_gather_inputs, all_gather_metadata
+        return _pad_uneven_shard_dim0(all_gather_inputs, outer_size, mesh.size()), all_gather_metadata
 
     def fsdp_post_all_gather(
         self,

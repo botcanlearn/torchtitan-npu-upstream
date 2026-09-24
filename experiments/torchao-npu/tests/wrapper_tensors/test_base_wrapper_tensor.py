@@ -26,6 +26,7 @@ from torchao_npu.wrapper_tensors import (
     Float8TrainingWeightWrapperTensor,
     MXTrainingWeightWrapperTensor,
 )
+from torchao_npu.wrapper_tensors.base_wrapper_tensor import _pad_uneven_shard_dim0
 
 from ..testing_utils import target_devices
 
@@ -390,31 +391,108 @@ def test_meta_weights(wrapper_cls, weight_config, act_config):
 
 @pytest.mark.parametrize("wrapper_cls, weight_config, act_config", _ALL_WRAPPER_CASES)
 @pytest.mark.parametrize(
-    "tensor_dtype",
+    "dtypes",
     [
-        torch.float32,
-        torch.bfloat16,
+        (torch.float32, torch.float32),
+        (torch.float32, torch.bfloat16),
+        (torch.bfloat16, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
     ],
+    ids=["fp32-fp32", "fp32-bf16", "bf16-fp32", "bf16-bf16"],
 )
-@pytest.mark.parametrize(
-    "param_dtype",
-    [
-        torch.float32,
-        torch.bfloat16,
-    ],
-)
-def test_fsdp_pre_all_gather(wrapper_cls, weight_config, act_config, tensor_dtype, param_dtype):
+def test_fsdp_pre_all_gather(wrapper_cls, weight_config, act_config, dtypes, mock_distributed_env):
     """fsdp_pre_all_gather casts _data to mp_policy.param_dtype and returns it."""
+    tensor_dtype, param_dtype = dtypes
     w = torch.randn(64, 128, dtype=tensor_dtype)
     wrapper = wrapper_cls(w, activation_config=act_config, weight_config=weight_config)
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype)
+    mesh = DeviceMesh("cpu", torch.arange(1))
 
-    all_gather_inputs, metadata = wrapper.fsdp_pre_all_gather(None, None, None, None, mp_policy)
+    all_gather_inputs, metadata = wrapper.fsdp_pre_all_gather(mesh, w.shape, w.stride(), None, mp_policy)
     (data,) = all_gather_inputs
     assert metadata == ()
     assert data.dtype == param_dtype
     assert data.shape == w.shape
     assert torch.equal(data, w.to(param_dtype))
+
+
+class _SizeOnlyMesh:
+    """Minimal DeviceMesh stand-in: the base hook only reads ``mesh.size()``."""
+
+    def __init__(self, size):
+        self._size = size
+
+    def size(self):
+        return self._size
+
+
+@pytest.mark.parametrize(
+    "local_shape, outer_size, world_size",
+    [
+        # Uneven: the padded rank (1 of 3 rows over 2 ranks) pads to the largest chunk.
+        (torch.Size([1, 8, 16]), torch.Size([3, 8, 16]), 2),
+        # Even sharding: the hook returns the cast input untouched.
+        (torch.Size([2, 8, 16]), torch.Size([4, 8, 16]), 2),
+    ],
+)
+def test_fsdp_pre_all_gather_pads_uneven_shard(local_shape, outer_size, world_size):
+    """The hook pads dim 0 to the largest chunk for uneven shards; even shards pass through."""
+    w = torch.randn(local_shape)
+    wrapper = BaseTrainingWeightWrapperTensor(w)
+    mp_policy = MixedPrecisionPolicy(param_dtype=torch.bfloat16)
+
+    all_gather_inputs, metadata = wrapper.fsdp_pre_all_gather(
+        _SizeOnlyMesh(world_size), outer_size, w.stride(), None, mp_policy
+    )
+
+    (data,) = all_gather_inputs
+    assert metadata == ()
+    assert data.dtype == torch.bfloat16
+    local_dim0 = local_shape[0]
+    padded_dim0 = -(-outer_size[0] // world_size)
+    assert data.shape == (padded_dim0, *local_shape[1:])
+    assert torch.equal(data[:local_dim0], w.to(torch.bfloat16))
+    if local_dim0 < padded_dim0:
+        assert torch.count_nonzero(data[local_dim0:]) == 0
+
+
+@pytest.mark.parametrize(
+    "local_shape, outer_size, world_size",
+    [
+        # Uneven: the padded rank (1 of 3 rows over 2 ranks) pads to the largest chunk.
+        (torch.Size([1, 8, 16]), torch.Size([3, 8, 16]), 2),
+        # Uneven: rank 0 already holds the largest chunk, left untouched.
+        (torch.Size([2, 8, 16]), torch.Size([3, 8, 16]), 2),
+        # Uneven: an empty shard (2 rows over 4 ranks) pads to one zero row.
+        (torch.Size([0, 8, 16]), torch.Size([2, 8, 16]), 4),
+        # Even sharding or a single rank: no padding.
+        (torch.Size([2, 8, 16]), torch.Size([4, 8, 16]), 2),
+        (torch.Size([3, 8, 16]), torch.Size([3, 8, 16]), 1),
+    ],
+)
+def test_pad_uneven_shard_dim0(local_shape, outer_size, world_size):
+    """Uneven dim-0 FSDP shards are zero-padded to the largest chunk; others pass through unchanged."""
+    t = torch.randn(local_shape)
+    (padded,) = _pad_uneven_shard_dim0((t,), outer_size, world_size)
+    local_dim0 = local_shape[0]
+    padded_dim0 = -(-outer_size[0] // world_size)
+    assert padded.shape == (padded_dim0, *local_shape[1:])
+    if local_dim0 < padded_dim0:
+        assert torch.equal(padded[:local_dim0], t)
+        assert torch.count_nonzero(padded[local_dim0:]) == 0
+    else:
+        assert padded is t
+
+
+def test_pad_uneven_shard_dim0_pads_all_inputs():
+    """A multi-tensor payload (e.g. data + block scales) is padded on dim 0 together."""
+    inputs = (torch.randn(1, 8, 16), torch.randn(1, 8, 1), torch.randn(1, 1, 16))
+
+    padded = _pad_uneven_shard_dim0(inputs, torch.Size([3, 8, 16]), 2)
+
+    assert [p.shape for p in padded] == [(2, 8, 16), (2, 8, 1), (2, 1, 16)]
+    assert torch.equal(padded[1][:1], inputs[1])
+    assert torch.count_nonzero(padded[2][1]) == 0
 
 
 @pytest.mark.parametrize("device", target_devices)
