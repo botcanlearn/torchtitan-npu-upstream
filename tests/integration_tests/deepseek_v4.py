@@ -95,6 +95,28 @@ def build_deepseek_v4_checkpoint_resume_test_list() -> list[OverrideDefinitions]
 def build_deepseek_v4_test_list() -> list[OverrideDefinitions]:
     return [
         OverrideDefinitions(
+            test_name="dsv4_anticipatory_recovery",
+            test_descr="DeepSeek-V4 CLI loss spike, native checkpoint rollback and route replay",
+            env_vars={
+                "MODULE": "torchtitan_npu.models.deepseek_v4",
+                "CONFIG": "deepseek_v4_debugmodel",
+                "TRAIN_FILE": "tests.integration_tests.anticipatory_routing",
+            },
+            override_args=[(*GOLDEN_OVERRIDES,
+                "--training.steps=10", "--training.seq-len=256", "--training.global-batch-size=1",
+                "--parallelism.data-parallel-shard-degree=1", "--parallelism.expert-parallel-degree=1",
+                "--hf-assets-path=tests/assets/deepseek_v3", "--debug.seed=42",
+                "--checkpoint.enable", "--checkpoint.no-load-only", "--checkpoint.interval=2",
+                "--checkpoint.keep-latest-k=0", "--checkpoint.no-last-save-model-only",
+                "--anticipatory.enable", "--anticipatory.delay-steps=1", "--anticipatory.active-steps=2",
+                "--anticipatory.max-rollbacks=1", "--anticipatory.detector.warmup-steps=4",
+            )],
+            ngpu=1,
+            timeout=600,
+            use_golden=True,
+            check_loss=False,
+        ),
+        OverrideDefinitions(
             test_name="dsv4_lora_ep2_fsdp2",
             test_descr="DeepSeek-V4 LoRA A/B training, frozen base and PEFT export EP2/FSDP2",
             env_vars={"MODULE": "tests.integration_tests.lora_config", "CONFIG": "deepseek_v4_lora_training"},

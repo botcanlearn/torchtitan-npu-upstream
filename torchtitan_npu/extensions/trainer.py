@@ -21,6 +21,12 @@ from torchtitan_npu.config.converters import TrainerConfigConverter
 from torchtitan_npu.distributed.utils import set_allow_hf32
 from torchtitan_npu.extensions.components.checkpoint import CheckpointManager
 from torchtitan_npu.extensions.components.sdc import SDC
+from torchtitan_npu.extensions.experiment.anticipatory_routing.config import (
+    AnticipatoryRoutingConfig,
+    validate_anticipatory_config,
+)
+from torchtitan_npu.extensions.experiment.anticipatory_routing.router import configure_router_override
+from torchtitan_npu.extensions.experiment.anticipatory_routing.schedule import AnticipatorySchedule
 
 from .profiler import CANNProfiler
 
@@ -44,6 +50,7 @@ class TrainerEx(Trainer):
             default_factory=TrainingConfig,
         )
         sdc: SDC.Config = field(default_factory=SDC.Config)
+        anticipatory: AnticipatoryRoutingConfig = field(default_factory=AnticipatoryRoutingConfig)
 
         def __post_init__(self) -> None:
             # ``slots=True`` dataclasses are recreated by the decorator, so a
@@ -58,6 +65,7 @@ class TrainerEx(Trainer):
             if hasattr(self.optimizer, "_cpu_offload"):
                 self.optimizer._cpu_offload = self.training.enable_cpu_offload
             self._post_init_optimizer()
+            validate_anticipatory_config(self)
 
         def _post_init_optimizer(self) -> None:
             self.optimizer.materialize()
@@ -125,6 +133,8 @@ class TrainerEx(Trainer):
             )
 
         set_allow_hf32(config.training.extension.allow_hf32)
+        # Both parent initialization paths apply overrides before building the model.
+        configure_router_override(config)
         if getattr(config.training, "enable_cpu_offload", False):
             # CPU DTensor parameters need NPU-side initialization during
             # model materialization: Module._init_param fires inside
@@ -195,12 +205,31 @@ class TrainerEx(Trainer):
                     "derived for it automatically"
                 )
 
+        self.anticipatory_schedule = AnticipatorySchedule(self) if config.anticipatory.enable else None
+
     def forward_backward_step(self, *args: Any, **kwargs: Any) -> Any:
+        if self.anticipatory_schedule is not None:
+            self.anticipatory_schedule.prepare_microbatch()
         result = super().forward_backward_step(*args, **kwargs)
+        if self.anticipatory_schedule is not None:
+            self.anticipatory_schedule.accumulate_microbatch_loss(result)
         # Advancing SDC state after a failed or partial step would corrupt its
         # accumulation window, so post-processing is intentionally success-only.
         self._sdc.finalize_sdc_step()
         return result
+
+    def train_step(self, data_iterator):
+        if self.anticipatory_schedule is not None:
+            with self.anticipatory_schedule.training_step_context(data_iterator) as batches:
+                return super().train_step(batches)
+        return super().train_step(data_iterator)
+
+    def batch_generator(self, data_iterable):
+        if self.anticipatory_schedule is not None:
+            if data_iterable is not self.dataloader:
+                raise ValueError("Anticipatory mode requires the trainer's own resumable dataloader")
+            return self.anticipatory_schedule.data
+        return super().batch_generator(data_iterable)
 
     def close(self) -> None:
         super().close()
