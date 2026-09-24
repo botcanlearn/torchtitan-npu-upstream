@@ -75,9 +75,6 @@ class _BlockMXQuantMM(torch.autograd.Function):
         config_B: BlockMXQuantizeConfig,
     ):
         assert A.ndim >= 2, f"A must be >=2D, got {A.ndim}D"
-        assert A.shape[-2] % config_A.block_size == 0, (
-            f"A.shape[-2]={A.shape[-2]} must be a multiple of config_A.block_size"
-        )
         assert B.ndim == 2, f"B must be 2D, got {B.ndim}D"
         assert A.shape[-1] == B.shape[-2], f"contracting dim mismatch: A[-1]={A.shape[-1]} != B[-2]={B.shape[-2]}"
 
@@ -425,15 +422,6 @@ class _BlockMXQuantBMM(torch.autograd.Function):
         assert B.ndim == 3, f"B must be 3D, got {B.ndim}D"
         assert A.shape[0] == B.shape[0], f"batch dim mismatch: A[0]={A.shape[0]} != B[0]={B.shape[0]}"
         assert A.shape[-1] == B.shape[-2], f"contracting dim mismatch: A[-1]={A.shape[-1]} != B[-2]={B.shape[-2]}"
-        assert A.shape[-2] % config_A.block_size == 0, (
-            f"A.shape[-2]={A.shape[-2]} must be a multiple of config_A.block_size"
-        )
-        assert B.shape[-2] % config_B.block_size == 0, (
-            f"B.shape[-2]={B.shape[-2]} must be a multiple of config_B.block_size"
-        )
-        assert B.shape[-1] % config_B.block_size == 0, (
-            f"B.shape[-1]={B.shape[-1]} must be a multiple of config_B.block_size"
-        )
 
         # --- Step 1: dual-axis MX quantize A (left operand) ---
         A_q1, A_s1, A_q2, A_s2 = mx_quantize_dual_axis(A, config_A)
