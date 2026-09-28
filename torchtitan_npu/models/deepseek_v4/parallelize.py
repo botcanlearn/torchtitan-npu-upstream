@@ -72,6 +72,10 @@ def _dsv4_fp32_overrides(
         "layers.*.attention.indexer.compressor.ape",
         "mtp_layers.*.attention.compressor.ape",
         "mtp_layers.*.attention.indexer.compressor.ape",
+        # Learned per-head softmax logits: created FP32 in attention.py and
+        # required FP32 by the attention kernels.
+        "layers.*.attention.attn_sink",
+        "mtp_layers.*.attention.attn_sink",
     )
 
     fp32_modules = [module for name, module in model.named_modules() if matches_any(name, fp32_module_fqns)]
