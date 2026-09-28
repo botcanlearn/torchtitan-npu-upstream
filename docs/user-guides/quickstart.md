@@ -133,55 +133,26 @@ CKPT_INIT_LOAD_PATH=/path/to/init_load_ckpt \
 bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
   --extension.quantization.enable-quantized-training \
   --extension.quantization.recipe all_block_fp8 \
-  --extension.quantization.no-enable-mxfp4-qat \
   --training.steps 5
 ```
 
-低精度 recipe 的目标范围如下：
+常用低精度配置如下，均位于 `--extension.quantization` 下；表中参数和布尔开关省略该公共前缀：
 
-| `RECIPE` | Attention 和 shared expert | Routed grouped experts |
+| 参数 | 选项 | 用途 |
 | --- | --- | --- |
-| `all_mxfp8` | MXFP8 | MXFP8 |
-| `mix`（默认） | MXFP8 | Block FP8 |
-| `all_block_fp8` | Block FP8 | Block FP8 |
-
-LI Q/K 量化可通过以下参数单独选择，必须同时启用低精度训练：
-
-```bash
---extension.quantization.enable-quantized-training \
---extension.quantization.li-quantization mxfp4
-```
-
-支持的 LI 量化类型及对应 CANN `quant_mode` 为：
-
-| `li-quantization` | CANN `quant_mode` | Q/K 量化方式 |
-| --- | ---: | --- |
-| `fp8` | 1 | FP8 per-token-head |
-| `mxfp8` | 3 | MXFP8 |
-| `mxfp4` | 5 | MXFP4 |
-| `hif8` | 4 | HiFloat8 per-tensor |
-
-量化相关 CLI 参数：
-
-- `--extension.quantization.enable-quantized-training` 与 `--extension.quantization.no-enable-quantized-training`：选择低精度或高精度通路；默认使用高精度，只有显式传入 enable 开关才启用低精度。
-- `--extension.quantization.recipe`：选择 `all_mxfp8`、`mix` 或 `all_block_fp8`，默认使用 `mix`。
-- `--extension.quantization.enable-mxfp4-qat` 与 `--extension.quantization.no-enable-mxfp4-qat`：控制 routed expert 的 Block FP8 weight 是否增加 MXFP4 QAT fake quant 数值约束，默认关闭，仅对包含 Block FP8 的 recipe 生效。该选项不是持久化 4-bit 参数训练，也不会把算子替换为原生 A8W4 GEMM。
-- `--extension.quantization.li-quantization`：选择 LI Q/K 量化类型，可选 `mxfp4`、`mxfp8`、`fp8` 或 `hif8`；需要同时启用 `enable-quantized-training`。
-- `--extension.quantization.dst-type-max`：量化目标数据类型最大值，用于 MXFP4 fake quant 和 HiF8 LI 量化时，默认值为 `0.0`；HiF8 支持 `0`、`15`、`56`、`224` 和 `32768`。
-- `--extension.quantization.fsdp-prequantize`：将 Block FP8 权重的量化提前到 FSDP all-gather 之前，默认关闭。开启后权重在 `fsdp_pre_all_gather` 中量化为 block MX，all-gather 传输量化后的 FP8 权重与 scale，前向和反向复用该数据，减少通信量和重复量化计算；用 `--extension.quantization.no-fsdp-prequantize` 可显式关闭。该选项只对 recipe 中包含 Block FP8 的部分生效（`mix` 的 routed expert 与 `all_block_fp8`），对 `all_mxfp8` 无效果；需要同时启用 `enable-quantized-training`。当分片未按 32 对齐或不存在 FSDP 分片（如 EFSDP=1 的 MoE）时，自动回退为高精度通信加运行时量化。
-- `--profiler.enable-profiling`：启用性能分析。
-- `USE_GOLDEN`：设为 `1` 时选择 golden attention override；默认使用 Ascend 融合算子路径。
-
-启动日志中出现 `Applied TorchAO-NPU recipe=...` 表示低精度 recipe 已生效。
+| `enable-quantized-training` | `--enable-quantized-training` / `--no-enable-quantized-training` | 启用或关闭低精度训练，默认关闭。 |
+| `recipe` | `all_mxfp8`、`mix`、`all_block_fp8` | 选择全 MXFP8、混合 MXFP8/Block FP8 或全 Block FP8。 |
+| `enable-mxfp4-qat` | `--enable-mxfp4-qat` / `--no-enable-mxfp4-qat` | 为 routed expert 启用或关闭 MXFP4 QAT 约束，默认关闭。 |
+| `li-quantization` | `fp8`、`mxfp8`、`mxfp4`、`hif8` | 选择 DeepSeek-V4 LI Q/K 的量化类型，默认不启用。 |
+| `kv-norm-quantization.format` | `mxfp8` | 启用 DeepSeek-V4 KV Cache 的 MXFP8 量化。 |
+| `enable-fsdp-prequantize` | `--enable-fsdp-prequantize` / `--no-enable-fsdp-prequantize` | 在 FSDP all-gather 前预量化 Block FP8 权重，减少通信量，默认关闭。 |
 
 ### DeepSeek-V4.1 TorchAO-NPU 低精度训练
 
-DeepSeek-V4.1 复用上述 TorchAO-NPU 低精度入口。除启用量化训练和选择 `recipe` 外，增加
-`--extension.quantization.enable-sparse-attention-quantization`，将 V4.1 的稀疏 attention
-替换为混合量化路径；该开关需要与
-`--extension.quantization.enable-quantized-training` 同时传入。当前入口面向 A5（Ascend 950）硬件：
-> [!NOTE]
-> 启用 'enable-sparse-attention-quantization' 会对KV做 'mxfp8_bf16' 和 'mxfp4_bf16' 量化，需要参考 [Ascend C 自定义算子编译安装说明](https://gitcode.com/cann/cann-recipes-infer/blob/master/ops/ascendc/README.md) 编译并安装 'kv_compress_epilog_v2' 算子，注意添加自定义算子环境变量。
+DeepSeek-V4.1 复用上述 TorchAO-NPU 低精度入口，当前面向 A5（Ascend 950）硬件。稀疏 attention 量化的配置、依赖和限制见[低精度训练特性指南](../feature_guides/low_precision_training.md#deepseek-v41-稀疏-attention-量化)。
+
+DeepSeek-V4.1 稀疏 attention 的 KV Cache 量化使用独立的
+`enable-sparse-attention-quantization` 开关。上述配置的默认值、组合限制和完整参数见[低精度训练特性指南](../feature_guides/low_precision_training.md)。启动日志中出现 `Applied TorchAO-NPU recipe=...` 表示 recipe 已应用。
 
 deepseek v4.1 模型做低精预训练可运行以下脚本：
 
@@ -196,9 +167,6 @@ deepseek v4.1 模型做QAT训练可运行以下脚本：
 HF_ASSETS_PATH=/path/to/DeepSeek-V41_tokenizer \
 bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_qat_4k_a5.sh
 ```
-
-不使能 `enable-sparse-attention-quantization` 时，`recipe` 仍会量化匹配的权重和其他模块，V4.1 稀疏 attention 保持原始路径。启动日志中的
-`sparse_attention_quantization=True` 可用于确认该开关已生效。
 
 ### 排查启动报错：查看更多 rank 日志
 

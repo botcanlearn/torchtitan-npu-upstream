@@ -144,8 +144,7 @@ class QuantizationExtensionConfig:
 
     enable_quantized_training: bool = False
     enable_sparse_attention_quantization: bool = False
-    """V4.1 source-Compressor FP4 Q/DQ and sparse-attention SWA FP8 Q/DQ."""
-    recipe: QuantizationRecipe = "mix"
+    recipe: QuantizationRecipe = "all_block_fp8"
     enable_mxfp4_qat: bool = False
     li_quantization: LIQuantization | None = None
     """LI Q/K format.
@@ -154,7 +153,7 @@ class QuantizationExtensionConfig:
     uses per-tensor scales.
     """
     dst_type_max: float = 0.0
-    fsdp_prequantize: bool = False
+    enable_fsdp_prequantize: bool = False
     kv_norm_quantization: KVNormQuantizationConfig = field(default_factory=KVNormQuantizationConfig)
 
     def validate(self) -> None:

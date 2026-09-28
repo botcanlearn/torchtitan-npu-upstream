@@ -141,18 +141,18 @@ pip install -e .
     <!-- 训练精度 -->
     <tr>
       <td rowspan="3">低精度训练</td>
-      <td>MXFP4/MXFP8/Block FP8 低精度训练</td>
-      <td>❌（仅 MXFP8）</td>
+      <td><a href="docs/feature_guides/low_precision_training.md">MXFP4/MXFP8/Block FP8 低精度训练</a></td>
+      <td>✅</td>
       <td>✅（Ascend 950）</td>
     </tr>
     <tr>
-      <td>HiFloat8 低精度训练</td>
-      <td>❌</td>
+      <td><a href="docs/feature_guides/low_precision_training.md">HiFloat8 低精度训练</a></td>
+      <td>✅</td>
       <td>✅（Ascend 950）</td>
     </tr>
     <tr>
-      <td>Attention KV 低精度训练</td>
-      <td>❌</td>
+      <td><a href="docs/feature_guides/low_precision_training.md">Attention KV 低精度训练</a></td>
+      <td>✅</td>
       <td>✅（Ascend 950）</td>
     </tr>
     <!-- 权重与 Checkpoint -->

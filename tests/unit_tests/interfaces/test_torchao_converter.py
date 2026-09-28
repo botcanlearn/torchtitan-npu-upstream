@@ -155,7 +155,7 @@ def test_recipe_converters_select_filters_for_model_type(
         enable_sparse_attention_quantization=True,
         enable_mxfp4_qat=False,
         dst_type_max=0.0,
-        fsdp_prequantize=False,
+        enable_fsdp_prequantize=False,
         model_compile_enabled=False,
     )
 
@@ -175,7 +175,7 @@ def test_recipe_converters_warn_when_sparse_attention_filter_is_unavailable(conv
             enable_sparse_attention_quantization=True,
             enable_mxfp4_qat=False,
             dst_type_max=0.0,
-            fsdp_prequantize=False,
+            enable_fsdp_prequantize=False,
             model_compile_enabled=False,
         )
 
@@ -202,7 +202,7 @@ def test_recipe_converters_reject_unknown_model_type(converter_module):
             model_type="v3",  # type: ignore[arg-type]
             enable_mxfp4_qat=False,
             dst_type_max=0.0,
-            fsdp_prequantize=False,
+            enable_fsdp_prequantize=False,
             model_compile_enabled=False,
         )
 
@@ -223,7 +223,7 @@ def test_apply_quantization_converter_passes_model_type(converter_module, monkey
         recipe="mix",
         enable_mxfp4_qat=False,
         dst_type_max=0.0,
-        fsdp_prequantize=False,
+        enable_fsdp_prequantize=False,
         li_quantization=None,
         validate=lambda: None,
     )

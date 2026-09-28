@@ -38,7 +38,7 @@ export NODE_IPS NGPU
 QUANTIZATION_ARGS=(
     --extension.quantization.enable-quantized-training
     --extension.quantization.recipe all_block_fp8
-    --extension.quantization.fsdp-prequantize
+    --extension.quantization.enable-fsdp-prequantize
     --extension.quantization.li-quantization fp8
     --extension.quantization.kv-norm-quantization.format mxfp8
     --extension.quantization.kv-norm-quantization.fqns .attention.kv_norm,.attention.compressor.norm

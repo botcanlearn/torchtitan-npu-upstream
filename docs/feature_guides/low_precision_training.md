@@ -1,0 +1,176 @@
+# 低精度训练
+
+torchtitan-npu 通过 TorchAO-NPU 为 DeepSeek-V4 和 DeepSeek-V4.1 提供 MXFP8、Block FP8 低精度训练，以及 MXFP4 量化感知训练（QAT）。量化配置复用现有预训练和续训练循环，可按需选择线性层、专家权重和 attention Q/KV 的量化方式。
+
+## 环境要求
+
+- 当前低精度训练面向 A5（Ascend 950）硬件，需要配套的 torch_npu、CANN、HCCL 和融合算子环境。
+- 按[软件安装](../user-guides/installation.md)准备基础环境，并安装其中的可选依赖 TorchAO-NPU。仓内适配包依赖 `torchao==0.17.0`，也可按安装文档通过 `PYTHONPATH` 加载源码。
+- 数据集、Tokenizer、CANN 环境变量及单机启动命令见[快速上手](../user-guides/quickstart.md)。本文中的参数组合用于追加到对应训练命令。
+
+配置默认关闭量化训练，DeepSeek-V4/DeepSeek-V4.1 的 A5 示例脚本会显式启用量化。
+
+## 当前支持的数据格式
+
+当前实现中的量化数据和 scale 表示如下。不同量化路径分别使用低精度计算或 fake quant，并通过对应的反向实现传递梯度。
+
+| 路径 | 量化数据 | scale 表示 | 分组方式 |
+| --- | --- | --- | --- |
+| MXFP4 | FP4（e2m1，pack uint8） | E8M0 | 每 32 个元素一个 scale |
+| MXFP8 | FP8（E4M3） | E8M0 | 每 32 个元素一个 scale |
+| Block FP8 | FP8（E4M3） | E8M0（二维 block 路径保存两组 scale） | 每 32×32 block 一个 scale |
+
+Block FP8 的二维 block 路径中，两组 scale 分别覆盖最后一维和倒数第二维，scale 张量采用带 pack-2 末维的 E8M0 布局。MXFP4 此处主要用在 SFT-QAT 训练中， MXFP4 是训练时的 fake quant 约束，参数和 matmul 数据仍由 Block FP8 wrapper 保存和计算。
+
+## MXFP8 与 Block FP8
+
+`--extension.quantization.recipe` 决定匹配模块的量化方式：
+
+| recipe | attention linear 和 shared expert | routed grouped experts |
+| --- | --- | --- |
+| `all_mxfp8` | MXFP8 | MXFP8 |
+| `mix` | MXFP8 | Block FP8 |
+| `all_block_fp8` | Block FP8 | Block FP8 |
+
+recipe 按模型配置中的模块路径匹配 Attention linear、shared expert 和 routed expert，将匹配上的模块转化为对应的量化实现。MXFP8 路径对权重和激活使用 MX 量化；Block FP8 路径对权重使用 Block FP8 量化，激活使用 MX 量化。
+
+## MXFP4 QAT
+
+`--extension.quantization.enable-mxfp4-qat` 为 routed expert 的 Block FP8 权重增加 MXFP4 fake quant 数值约束，先将权重量化至 MXFP4 格式然后再反量化至 Block FP8，用于在训练中模拟 MXFP4 量化误差。它仅对 `mix` 和 `all_block_fp8` 中的 routed expert 生效，默认关闭。
+
+在训练命令中使用以下参数组合：
+
+```bash
+--extension.quantization.enable-quantized-training \
+--extension.quantization.recipe all_block_fp8 \
+--extension.quantization.enable-mxfp4-qat
+```
+
+该选项不会将参数持久化为 4-bit，也不会将计算替换为原生 A8W4 GEMM。`all_mxfp8` 不包含 Block FP8 权重，启用该项 QAT 约束无效。
+
+QAT 下做 MXFP4 量化时可以使用 `--extension.quantization.dst_type_max` 传参来指定量化时目标域的最大值。参数默认值为 0.0 对应 `Amax(Dtype)`；可以传参 7.0，以防止量化数据中的最大值被截断而产生较大精度损失。
+
+DeepSeek-V4/V4.1 完整的的 QAT 启动方式见[快速上手](../user-guides/quickstart.md#deepseek-v41-torchao-npu-低精度训练)，对应的 qat 脚本同时启用 MXFP4 QAT 和稀疏 attention 量化，后者的自定义算子依赖见下一节。
+
+## Attention 量化
+
+### DeepSeek-V4 KV Cache 量化训练
+
+DeepSeek-V4 的 KV Cache 量化训练针对 attention 的 nope 部分进行 MXFP8 fake quant，从而在训练阶段模拟 KV Cache 的量化误差。实现通过替换指定 norm 节点的配置，在 norm 输出上插入量化，量化对象是 norm 输出中的 nope 通道。该配置不适用于 DeepSeek-V4.1 的稀疏 attention 路径。A5 的 DeepSeek-V4 启动脚本已包含以下默认配置：
+
+```bash
+--extension.quantization.kv-norm-quantization.format mxfp8 \
+--extension.quantization.kv-norm-quantization.fqns .attention.kv_norm,.attention.compressor.norm \
+--extension.quantization.kv-norm-quantization.block-size 64
+```
+
+三个参数分别指定量化格式、需要替换的配置树节点后缀和 MX block size。`fqns` 中的两个节点分别对应 attention 的 `kv_norm` 与 compressor 的 `norm`，这些节点是量化插入位置。配置字段默认不启用（`format=None`，节点列表为空）；启用时需同时打开 `enable-quantized-training`。当前唯一支持的格式是 `mxfp8`，block size 由消费该配置的 MX 量化实现校验。
+
+该路径使用 8 bit E4M3 的 MXFP8 数据和 8 bit E8M0 scale；默认脚本把 block size 设为 64，因此每 64 个 nope 通道共享一个 scale。量化结果随后反量化回原始高精度 dtype 参与训练，梯度通过 fake quant 的 STE 传递。
+
+### DeepSeek-V4 LI Q/K 量化
+
+Lightning Indexer（LI）的 Q/K 量化通过 `li-quantization` 单独选择，需要同时启用低精度训练。例如，在 DeepSeek-V4 命令中追加：
+
+```bash
+--extension.quantization.enable-quantized-training \
+--extension.quantization.li-quantization mxfp4
+```
+
+| `li-quantization` | CANN `quant_mode` | Q/K 量化方式 |
+| --- | ---: | --- |
+| `fp8` | 1 | FP8 per-token-head |
+| `mxfp8` | 3 | MXFP8 |
+| `mxfp4` | 5 | MXFP4 |
+| `hif8` | 4 | HiFloat8 per-tensor |
+
+LI 各模式的实现细节不同：`fp8` 使用 8 bit E4M3 数据，按 token-head 动态量化，scale 以 FP32 保存；`mxfp8` 使用 8 bit E4M3 数据和 E8M0 scale；`mxfp4` 使用 4 bit E2M1 数据和 E8M0 scale；`hif8` 使用 8 bit HiFloat8 数据，按 tensor 动态量化，scale 以 FP32 保存。CANN 的 `quant_mode` 由这些数据格式和量化粒度共同决定。
+
+`li-quantization` 默认传参为 none 不启用量化。当前独立 LI 配置入口匹配 DeepSeek-V4 的模块结构。
+
+### DeepSeek-V4.1 稀疏 attention KV Cache 量化
+
+`--extension.quantization.enable-sparse-attention-quantization` 将 V4.1 稀疏 attention 替换为混合量化路径：swa_kv 使用 `mxfp8_bf16`，cmp_kv 使用 `mxfp4_bf16`。该路径对 KV 量化再反量化后调用 sparse attention 算子，以引入对应的量化误差。
+
+该缓存布局使用按组保存的 BF16 scale：滑窗 KV 为 8 bit E4M3 数据，每 32 个元素共享一个 BF16 scale；压缩 KV 为 4 bit E2M1 数据，每 16 个元素共享一个 BF16 scale。MXFP4 数据以 `uint8` 打包，每个字节包含两个 4 bit 值。V4.1 的反向计算使用量化反量化的 `swa_kv` 和 `cmp_kv`，并结合量化前向的输出和 LSE 计算梯度。
+
+> [!NOTE]
+> 启用前需参考 [Ascend C 自定义算子编译安装说明](https://gitcode.com/cann/cann-recipes-infer/blob/master/ops/ascendc/README.md)，编译并安装 `kv_compress_epilog_v2`，并配置自定义算子环境变量。
+
+在 V4.1 的 CPT 命令中追加以下参数即可启用，QAT 脚本已包含这些开关：
+
+```bash
+--extension.quantization.enable-quantized-training \
+--extension.quantization.enable-sparse-attention-quantization
+```
+
+未启用时，recipe 仍会量化匹配的线性层和专家模块，稀疏 attention 保持原始路径。此开关仅用于 V4.1，若没有对应的匹配节点，会记录警告并跳过替换。
+
+## FSDP 权重预量化
+
+`--extension.quantization.enable-fsdp-prequantize` 将 Block FP8 权重的量化提前到 FSDP all-gather 之前。all-gather 传输量化后的 FP8 权重与 scale，前向和反向复用量化数据，以减少通信量和重复量化计算。
+
+### 工作原理
+
+FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通过 all-gather 恢复，反向结束后通过 reduce-scatter 规约并重新分片。预量化只改变参数 all-gather 的 payload，不改变梯度 reduce-scatter 使用的 `reduce_dtype`：
+
+```text
+本地权重 shard
+    │ fsdp_pre_all_gather()
+    ├─ 满足条件：cast 到 param_dtype → Block MX 量化
+    │              → B_q（FP8）+ B_s1/B_s2（scale）
+    └─ 不满足条件：回退普通参数通信
+    │
+    ├─ FSDP 分别 all-gather B_q、B_s1、B_s2
+    │
+    └─ fsdp_post_all_gather()
+       重建 wrapper：逻辑参数接口保持 BF16，内部保存 FP8 权重和 scale
+       → 前向/反向复用预量化 payload
+       → 梯度按 reduce_dtype reduce-scatter
+```
+
+`fsdp_pre_all_gather()` 只处理当前 rank 持有的本地分片；量化结果由 FP8 权重 `B_q` 和两个方向的 scale `B_s1`、`B_s2` 组成，FSDP 对三类数据分别执行 all-gather。通信完成后，`fsdp_post_all_gather()` 首次创建 wrapper，后续更新已分配的 wrapper。wrapper 对 PyTorch、FSDP 和 autograd 暴露 shape 不变的逻辑参数，量化 MatMul 则直接读取内部的 `B_q + scale`，避免在同一次 unshard 周期的每个 MatMul 前重复量化权重。
+
+这里的逻辑 dtype 与物理 payload 是两个概念：逻辑参数仍用于梯度路由和 FSDP 状态管理，实际通信和量化计算使用 FP8 权重及 scale。量化 wrapper 的自定义反向将梯度转换回逻辑权重，再交给 FSDP 按 `reduce_dtype` 做 reduce-scatter；优化器参数和 checkpoint 不会因此永久变成 FP8。
+
+该选项默认关闭，需要同时启用低精度训练。它只作用于 `mix` 中的 routed expert 和 `all_block_fp8` 中匹配的 Block FP8 模块，对 `all_mxfp8` 无效果：
+
+```bash
+--extension.quantization.enable-quantized-training \
+--extension.quantization.recipe all_block_fp8 \
+--extension.quantization.enable-fsdp-prequantize
+```
+
+当前实现要求本地权重分片的倒数第二维按 64 对齐、最后一维按 32 对齐。不满足对齐要求、没有 FSDP 分片（如 EFSDP=1 的 MoE）或本地存储未分配时，回退为高精度通信加运行时量化。
+
+## 配置与生效检查
+
+以下字段均位于 `--extension.quantization` 下，表中省略公共前缀：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enable-quantized-training` | `False` | 低精度训练总开关 |
+| `recipe` | `all_block_fp8` | 选择 `all_mxfp8`、`mix` 或 `all_block_fp8` |
+| `enable-mxfp4-qat` | `False` | Routed expert 的 MXFP4 fake quant 约束 |
+| `li-quantization` | `none` | V4 LI Q/K 量化，可选 `fp8`、`mxfp8`、`mxfp4`、`hif8` |
+| `enable-sparse-attention-quantization` | `False` | V4.1 稀疏 attention 混合量化 |
+| `dst-type-max` | `0.0` | 用于 MXFP4 量化的目标类型最大值，可取值 0.0, 6.0-12.0 |
+| `enable-fsdp-prequantize` | `False` | Block FP8 权重在 FSDP all-gather 前预量化 |
+| `kv-norm-quantization.format` | 未设置 | V4 nope KV Cache 量化格式，目前为 `mxfp8`（8 bit E4M3） |
+| `kv-norm-quantization.fqns` | 空列表 | V4 的量化插入位置，脚本使用 `.attention.kv_norm,.attention.compressor.norm` |
+| `kv-norm-quantization.block-size` | `32` | V4 KV Cache MXFP8 的 block size；A5 脚本使用 `64` |
+
+布尔开关可通过对应的 `no-` 形式显式关闭，例如 `--extension.quantization.no-enable-mxfp4-qat`、`--extension.quantization.no-enable-fsdp-prequantize`。使用 `--extension.quantization.no-enable-quantized-training` 可关闭量化训练总开关。
+
+启动日志中的 `Applied TorchAO-NPU recipe=...` 表示 recipe 已应用；同时检查 `mxfp4_qat`、`li_quantization`、`sparse_attention_quantization` 和 `enable_fsdp_prequantize` 是否符合预期。该日志用于确认配置应用情况，不能替代训练精度和性能验证。
+
+需要采集性能信息时，可增加 `--profiler.enable-profiling`。示例脚本中的 `USE_GOLDEN=1` 用于选择数值基线 attention override，默认使用 Ascend 融合路径；该变量不控制低精度训练总开关。
+
+## 实现与验证入口
+
+量化入口根据模型类型选择匹配规则，通过 converter 转换模型配置节点，并在模块构建时应用 TorchAO-NPU 量化。本文依据当前配置、转换逻辑和启动脚本整理，未在本文档重构中执行 NPU 训练；不同并行配置的精度与性能需在目标环境中验证。
+
+- [量化配置字段](../../torchtitan_npu/config/configs.py)
+- [TorchAO-NPU converter 与 recipe](../../interfaces/torchao_converter.py)
+- [Block FP8 权重与 FSDP 预量化实现](../../experiments/torchao-npu/torchao_npu/wrapper_tensors/block_mx_wrapper_tensor.py)
+- [V4.1 稀疏 attention 量化实现](../../experiments/torchao-npu/torchao_npu/quantized_modules/v41_sparse_attention.py)
