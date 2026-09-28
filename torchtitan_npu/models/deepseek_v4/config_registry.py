@@ -5,6 +5,7 @@
 
 from collections.abc import Callable
 from dataclasses import fields
+from importlib import import_module
 from typing import Any, cast
 
 from torch.distributed.tensor import Shard
@@ -356,6 +357,75 @@ def deepseek_v4_flash_43layers_16experts(
         num_mtp_layers=num_mtp_layers,
         converters=converters,
     )
+
+
+def _torchft_flash_config(
+    base: Trainer.Config,
+    *,
+    expert_parallel_degree: int,
+    data_parallel_shard_degree: int = 64,
+    global_batch_size: int = 1024,
+) -> Trainer.Config:
+    # Check the optional dependency before importing upstream TorchFT modules.
+    import_module("torchtitan_npu.extensions.experiment.torchft")
+
+    from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
+
+    from torchtitan_npu.extensions.experiment.torchft.optimizer import TorchFTOptimizersContainerEx
+    from torchtitan_npu.extensions.experiment.torchft.trainer import FaultTolerantTrainerEx
+
+    def config_values(source: object, target: type) -> dict[str, Any]:
+        return {
+            item.name: getattr(source, item.name) for item in fields(target) if item.init and hasattr(source, item.name)
+        }
+
+    values = config_values(base, FaultTolerantTrainerEx.Config)
+    checkpoint_values = config_values(base.checkpoint, TorchFTCheckpointManager.Config)
+    checkpoint_values.update(enable=True, enable_ft_dataloader_checkpoints=True)
+    values["checkpoint"] = TorchFTCheckpointManager.Config(**checkpoint_values)
+    values["optimizer"] = TorchFTOptimizersContainerEx.Config(
+        **config_values(base.optimizer, TorchFTOptimizersContainerEx.Config)
+    )
+    config = FaultTolerantTrainerEx.Config(**values)
+    config.fault_tolerance.group_size = 2
+    config.fault_tolerance.min_replica_size = 2
+    config.training.global_batch_size = global_batch_size
+    config.training.disable_cuda_graphs = True
+    config.parallelism.expert_parallel_degree = expert_parallel_degree
+    config.parallelism.data_parallel_shard_degree = data_parallel_shard_degree
+    config.parallelism.spmd_backend = "spmd_types"
+    return config
+
+
+def deepseek_v4_flash_torchft() -> Trainer.Config:
+    """Full Flash model on two 64-rank TorchFT replicas."""
+    return _torchft_flash_config(deepseek_v4_flash(), expert_parallel_degree=64)
+
+
+def deepseek_v4_flash_43layers_16experts_torchft() -> Trainer.Config:
+    """The 16-expert Flash model on two 64-rank TorchFT replicas."""
+    return _torchft_flash_config(deepseek_v4_flash_43layers_16experts(), expert_parallel_degree=16)
+
+
+def deepseek_v4_flash_8p_torchft() -> Trainer.Config:
+    """Four Flash layers plus MTP on two EP4/FSDP4 replicas for 8-card validation."""
+    base = deepseek_v4_flash_43layers_16experts(num_mtp_layers=1)
+    assert base.model_spec is not None
+    model = base.model_spec.model
+    assert isinstance(model, DeepSeekV4Model.Config)
+    model.layers = model.layers[:4]
+    model.n_layers = 4
+    model.compress_ratios = model.compress_ratios[:4]
+    base.model_spec.flavor = "deepseek_v4_flash_4layers_16experts"
+    config = _torchft_flash_config(
+        base,
+        expert_parallel_degree=4,
+        data_parallel_shard_degree=4,
+        global_batch_size=16,
+    )
+    config.training.seq_len = 256
+    config.debug.seed = 42
+    return config
 
 
 def deepseek_v4_pro(

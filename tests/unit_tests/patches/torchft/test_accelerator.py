@@ -47,6 +47,7 @@ def test_plain_import_does_not_require_torchft_and_opt_in_explains_installation(
     program = """
 import importlib.abc
 import sys
+from torchtitan.config import ConfigManager
 
 class BlockTorchFT(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -55,13 +56,24 @@ class BlockTorchFT(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, BlockTorchFT())
 import torchtitan_npu
+from torchtitan_npu.extensions.trainer import TrainerEx
+
 assert not any(name == 'torchft' or name.startswith('torchft.') for name in sys.modules)
+common_args = [
+    '--module', 'torchtitan_npu.models.deepseek_v4',
+    '--config', 'deepseek_v4_flash_43layers_16experts',
+]
+config = ConfigManager().parse_args(common_args)
+assert isinstance(config, TrainerEx.Config)
+assert not any(name == 'torchft' or name.startswith('torchft.') for name in sys.modules)
+from torchtitan_npu.models.deepseek_v4.config_registry import deepseek_v4_flash_torchft
 try:
-    import torchtitan_npu.extensions.experiment.torchft
+    deepseek_v4_flash_torchft()
 except ModuleNotFoundError as error:
     assert error.name == 'torchft'
     assert "pip install -e '.[torchft]'" in str(error)
 else:
-    raise AssertionError('Selecting TorchFT without its dependency must fail')
+    raise AssertionError('Selecting a TorchFT recipe without its dependency must fail')
 """
-    subprocess.run([sys.executable, "-c", program], check=True, capture_output=True, text=True, timeout=90)
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stderr
