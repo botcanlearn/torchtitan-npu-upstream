@@ -89,7 +89,9 @@ PARALLELISM_ARGS="
 
 # Compile
 COMPILE_ARGS="
-    --compile.no-enable
+    --compile.enable
+    --compile.components model
+    --compile.backend inductor
 "
 
 # Training
