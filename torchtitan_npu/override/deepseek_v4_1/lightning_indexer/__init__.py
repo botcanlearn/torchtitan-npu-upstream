@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         "kernel and legacy=false the ds41 QLI/QSLI candidate pair"
     ),
 )
-def asc(cfg: Selector.Config, legacy: bool = True) -> "AscSelector.Config":
+def asc(cfg: Selector.Config, legacy: bool = False) -> "AscSelector.Config":
     from .ascendc import AscSelector
 
     return derive(cfg, AscSelector.Config, legacy=legacy)

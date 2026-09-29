@@ -1051,13 +1051,13 @@ def test_the_override_entry_carries_the_legacy_switch(monkeypatch):
 
     plain = selectors("torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc")
     assert plain and all(isinstance(cfg, AscSelector.Config) for cfg in plain)
-    assert all(cfg.legacy is True for cfg in plain), "the switch defaults to the pool-free kernel"
+    assert all(cfg.legacy is False for cfg in plain), "the override defaults to quantized LI"
 
     switched = selectors(
-        'torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc={"legacy":false}'
+        'torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc={"legacy":true}'
     )
     assert switched and all(isinstance(cfg, AscSelector.Config) for cfg in switched)
-    assert all(cfg.legacy is False for cfg in switched)
+    assert all(cfg.legacy is True for cfg in switched)
     # The switch is additive: the contract the teacher pair is checked on is untouched.
     assert all(cfg.consumes_indexer_teacher is True for cfg in switched)
 
