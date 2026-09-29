@@ -56,7 +56,18 @@ def _metadata(bounds: list[int], *, compress_ratios: tuple[int, ...] = (1, 2)):
     from torchtitan_npu.models.deepseek_v4_1.model import DeepSeekV41Model
 
     class _ModelOwner:
-        pass
+        """A stand-in for the model, as ``get_attention_masks`` sees it.
+
+        The hook is a method, so it reaches for the frame builders on ``self``; they are taken from
+        the model class rather than restated here, so a change to the frame algebra cannot leave the
+        two disagreeing.  ``needs_reference`` is stated because a stand-in has no config to read it
+        from, and True is the conservative answer: the reference half is built.
+        """
+
+        _frame = staticmethod(DeepSeekV41Model._frame)
+        _row_frames = DeepSeekV41Model._row_frames
+        _reference = DeepSeekV41Model._reference
+        needs_reference = True
 
     owner = _ModelOwner()
     owner.compress_ratios = compress_ratios
@@ -469,10 +480,11 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
 
     One index source owns one selection and drives one SLIKG call, and the teacher that
     layer writes is its own ``p`` divided by the token count.  Which sources those are comes
-    from the layer table rather than from the run, and the run is checked against it; the
-    expected value is then named from that count and the token count, not read back out of
-    the same run.  The constant is made larger than the token count, so a teacher that never
-    got divided lands far outside what the tables allow.
+    from the layer table rather than from the run, and the run is checked against it.  Each
+    teacher must then be an integer multiple of ``constant / seqlen``, and its multiplier bounded by
+    the layers that emitted a teacher at all -- a bound the run measures for itself, so it does not
+    encode how the layer table splits contributions across sources.  The constant is made larger
+    than the token count, so a teacher that never got divided exceeds that bound outright.
 
     The ``-1`` padding slots are the exception, and must be read around here: SMLAG leaves
     them non-zero (the kernel computes a marginal for a slot the selection never reached),
@@ -481,7 +493,7 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
     A padded slot therefore says nothing about the division, and the slots that do are the
     unpadded ones.
     """
-    seen = {"calls": 0, "teacher": [], "padding": [], "tokens": []}
+    seen = {"calls": 0, "teacher": [], "padding": [], "tokens": [], "emitters": 0}
     constant = 1024.0
 
     def fake_slig(q, k, w, sparse_indices, attn_softmax_l1_norm, **kw):
@@ -508,6 +520,8 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
     def fake_smlag(q, grad, *args, **kw):
         indices = kw["cmp_sparse_indices"]
         teacher = torch.full_like(indices, constant, dtype=torch.float32) if indices is not None else None
+        if teacher is not None:
+            seen["emitters"] += 1
         shared = kw["cmp_kv"]
         return (
             grad,
@@ -558,9 +572,12 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
         assert abs(contributors - round(contributors)) < 1e-6, (
             f"the teacher is not an integer multiple of constant/seqlen ({constant}/{tokens}): got {value}"
         )
-        assert 1 <= round(contributors) <= seen["calls"], (
-            f"the teacher implies {round(contributors)} contributors but SLIKG ran "
-            f"{seen['calls']} times, so the seqlen division ({tokens}) is missing"
+        # No source can carry more contributions than there are layers emitting a teacher, and the
+        # split across sources is the layer table's business -- a per-call count of SLIKG calls, or
+        # a sum over them, would only encode today's topology (some layers feed two sources).
+        assert 1 <= round(contributors) <= seen["emitters"], (
+            f"the teacher implies {round(contributors)} contributors but only {seen['emitters']} "
+            f"layers emitted one, so the seqlen division ({tokens}) is missing"
         )
         expected = torch.full_like(teacher, constant * round(contributors) / tokens).masked_fill(padding, 0.0)
         torch.testing.assert_close(teacher, expected)

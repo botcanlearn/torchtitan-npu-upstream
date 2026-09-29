@@ -35,7 +35,7 @@ The reference forward owns Attention Gym attention; fused ports replace the comp
 inner-attention forward.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 import torch
@@ -50,6 +50,7 @@ from torchtitan.protocols.module import Module
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
 from .compressor import Compressor
+from .context_parallel import QueryExchange
 from .indexer import HierarchicalIndexer
 
 
@@ -225,6 +226,9 @@ class Attention(BaseAttention):
         kv_norm: RMSNorm.Config
         wo_a: BatchedLinear.Config
         wo_b: Linear.Config
+        # The query side's context-parallel movement; it is a module only because the process
+        # group it runs on is run-level state, wired by ``parallelize``.
+        query_exchange: QueryExchange.Config = field(default_factory=QueryExchange.Config)
 
     def __init__(self, config: "Attention.Config"):
         super().__init__()
@@ -245,6 +249,7 @@ class Attention(BaseAttention):
         self.compressor = cfg.compressor.build()
         self.indexer = cfg.indexer.build()
         self.inner_attention = cfg.inner_attention.build()
+        self.query_exchange = cfg.query_exchange.build()
         _check_indexer_teacher_pair(cfg.inner_attention, cfg.indexer)
 
     def forward(
@@ -272,8 +277,13 @@ class Attention(BaseAttention):
         computed where the layer is a source, otherwise the inputs unchanged.
         """
         bsz, seqlen, _ = x.size()
+        # Under context parallelism the queries are this rank's chunks while the keys stay the
+        # slab it holds: the query side is a permuted copy of the input, and only the
+        # projections move -- never the hidden states -- so the keys keep the rows and the
+        # positions they always had, and the queries rotate at the ones the metadata carries.
+        x_q = self.query_exchange.permute(x.squeeze(0), attention_masks.exchange).unsqueeze(0)
 
-        qr = self.q_norm(self.wq_a(x))
+        qr = self.q_norm(self.wq_a(x_q))
         q = self.wq_b(qr).view(bsz, seqlen, -1, self.head_dim)
         swa_k = self.kv_norm(self.wkv(x))
 
@@ -285,7 +295,7 @@ class Attention(BaseAttention):
         # the ``idx_k`` it was handed live, so its consumers go on training the key's
         # owner.
         idx_k, topk_indices, topk_scores, candidates = self.indexer(
-            x.detach(),
+            x_q.detach(),
             qr.detach(),
             positions,
             attention_masks,
@@ -298,7 +308,7 @@ class Attention(BaseAttention):
 
         # The rope config carries the un-rotated prefix width, so the module rotates the
         # trailing span and puts the prefix back.
-        q = self.rope(q, positions=positions)
+        q = self.rope(q, positions=attention_masks.positions_q)
         # The shared KV latent is one rank-2 head; RoPE rotates rank-3 [B, L, N, H].
         swa_k = self.rope(swa_k.unsqueeze(2), positions=positions).squeeze(2)
 
@@ -312,10 +322,18 @@ class Attention(BaseAttention):
             topk_indices=topk_indices if uses_cmp else None,
             topk_scores=topk_scores if uses_cmp else None,
         )
-        o = self.rope(o, positions=positions, inverse=True)
+        # Rotate back and project while the rows are still this rank's chunks: every step here is
+        # per token, so it commutes with the movement, and ``wo_b``'s output is an order of
+        # magnitude narrower than the attention's -- so that is what takes the collective.
+        o = self.rope(o, positions=attention_masks.positions_q, inverse=True)
 
         # The output projection is grouped: wo_a projects each query-head group on its
         # own, wo_b mixes the per-group results back to the model dimension.  The group
         # count comes from the module so a group-wise sharding can narrow it later.
         o = self.wo_a(o.reshape(bsz * seqlen, self.wo_a.n_batches, -1))
-        return (self.wo_b(o.flatten(-2)), cmp_k, idx_k, topk_indices, topk_scores, candidates)
+        o = self.wo_b(o.flatten(-2))
+        # A permutation, so undoing it is exact and accumulates nothing; ``wo_b`` has already
+        # flattened the batch axis, so the row axis is dim 0 here.  Unsharded, the exchange has
+        # no plan and hands the tensor straight back.
+        o = self.query_exchange.unpermute(o, attention_masks.exchange)
+        return (o, cmp_k, idx_k, topk_indices, topk_scores, candidates)

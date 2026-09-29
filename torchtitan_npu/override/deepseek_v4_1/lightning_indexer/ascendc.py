@@ -46,6 +46,16 @@ def _kernel_options(attention_masks, ratio):
     return dict(
         cu_seqlens_q=attention_masks.kernel.q.cu_seqlens,
         cu_seqlens_k=compressed.cu_seqlens,
+        # The per-sequence lengths actually addressed -- how an operator is told to read a prefix
+        # of its operand.  Under context parallelism they carry the whole query movement:
+        # ``seqused_q`` is this rank's chunk and ``seqused_k`` its reach into the gathered keys, so
+        # the selection is scored at this rank's chunk against the blocks it may read.  Every
+        # operator this selector can pick takes the pair -- the bf16 V2 indexer at ``legacy=True``,
+        # the quantized pair otherwise, and the sparse variant of the same kernel -- and at
+        # ``cp_size = 1`` each equals the corresponding boundary difference, so passing them is a
+        # no-op there rather than a second code path.
+        seqused_q=attention_masks.kernel.q.seqused,
+        seqused_k=compressed.seqused,
         cmp_residual_k=compressed.residual,
         layout_q=_LAYOUT,
         layout_k=_LAYOUT,
@@ -359,7 +369,7 @@ class _LightningIndexerTND(torch.autograd.Function):
         # this is the row's ``seqlen``.  Scaling ``p`` is exactly scaling ``dI``: SLIKG's
         # ``dI = Z * Y - p`` is affine in ``p``, so ``dI(p/S) = dI(p)/S`` and the kernel's
         # own ``dq``/``dk``/``dw`` come out normalised with no rescaling afterwards.
-        attn_softmax_l1_norm = attn_softmax_l1_norm / idx_q.shape[0]
+        attn_softmax_l1_norm = attn_softmax_l1_norm / idx_k.shape[0]
         options = _kernel_options(ctx.attention_masks, ctx.ratio)
         slig_metadata = torch.ops.cann_ops_transformer.sparse_lightning_indexer_kl_loss_grad_metadata(
             **_kernel_geometry(idx_q.shape[1], idx_q.shape[2], ctx.topk),

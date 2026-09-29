@@ -261,6 +261,12 @@ class Selector(Module):
             padded row is ``-1`` in the indices and ``-inf`` in the student logits, so
             that the distillation's softmax drops it without looking at the indices.
         """
+        if attention_masks.ref is None:
+            raise ValueError(
+                "the reference selector reads the metadata's precomputed selection masks, which a "
+                "sharded forward does not build and a fully fused stack never needs.  This path is "
+                "the torch-native one: run it unsharded, or run the fused selector."
+            )
         visible_LN, newest_L1, newest_valid_L1 = attention_masks.ref.selection_masks[self.compress_ratio]
 
         with torch.no_grad():
@@ -455,10 +461,12 @@ class HierarchicalIndexer(Module):
                 "A Reindex Mode indexer rescores the shared index keys, which no preceding Full Mode layer produced."
             )
 
-        # The index query is rotated at the token's own position.
+        # The index query is rotated at the token's own position, which the metadata carries: the
+        # positions beside the input describe the keys, and under CP the queries are a permuted
+        # copy of those rows, so the two are not the same list of positions.
         idx_q = self.rope(
             self.wq_b(qr).unflatten(-1, (self.num_index_heads, self.index_head_dim)),
-            positions=positions,
+            positions=attention_masks.positions_q,
         )
         # Scaled by the index softmax scale and the head count, as in the reference: the
         # per-head scores are averaged rather than summed.

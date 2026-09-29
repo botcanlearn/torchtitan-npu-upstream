@@ -155,9 +155,15 @@ def test_hook_builds_metadata_and_forwards_nothing_extra():
     """
 
     class _HookOwner:
-        # The hook dispatches to the model's own metadata builder, so attach the real
-        # construction methods and the ratio table its selection-mask precompute reads.
+        # The hook dispatches to the model's own metadata builder, so attach the real construction
+        # methods, the frame builders it reaches for on ``self``, and the ratio table its
+        # selection-mask precompute reads.  ``needs_reference`` is stated because a stand-in has no
+        # config to read it from, and True is the conservative answer.
         compress_ratios = (2,)
+        _frame = staticmethod(DeepSeekV41Model._frame)
+        _row_frames = DeepSeekV41Model._row_frames
+        _reference = DeepSeekV41Model._reference
+        needs_reference = True
         build_attention_masks = DeepSeekV41Model.build_attention_masks
         get_attention_masks = DeepSeekV41Model.get_attention_masks
 
@@ -195,7 +201,12 @@ def test_the_metadata_carries_no_validity_marks():
     """
 
     class _HookOwner:
+        # As above: the hook is a method, so the builders it calls on ``self`` come with it.
         compress_ratios = (2,)
+        _frame = staticmethod(DeepSeekV41Model._frame)
+        _row_frames = DeepSeekV41Model._row_frames
+        _reference = DeepSeekV41Model._reference
+        needs_reference = True
         build_attention_masks = DeepSeekV41Model.build_attention_masks
         get_attention_masks = DeepSeekV41Model.get_attention_masks
 

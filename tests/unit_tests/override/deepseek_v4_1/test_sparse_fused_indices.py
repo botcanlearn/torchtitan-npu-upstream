@@ -24,8 +24,18 @@ def _metadata(bounds: list[int], *, compress_ratios: tuple[int, ...] = (1, 2)):
     positions = torch.cat([torch.arange(end - begin) for begin, end in pairwise(bounds)]).unsqueeze(0)
 
     class _ModelOwner:
-        # ``get_attention_masks`` reads only the ratio table off the instance.
-        pass
+        """A stand-in for the model, as ``get_attention_masks`` sees it.
+
+        The hook is a method, so it reaches for the frame builders on ``self``; they are taken from
+        the model class rather than restated here, so a change to the frame algebra cannot leave the
+        two disagreeing.  ``needs_reference`` is stated because a stand-in has no config to read it
+        from, and True is the conservative answer: the reference half is built.
+        """
+
+        _frame = staticmethod(DeepSeekV41Model._frame)
+        _row_frames = DeepSeekV41Model._row_frames
+        _reference = DeepSeekV41Model._reference
+        needs_reference = True
 
     owner = _ModelOwner()
     owner.compress_ratios = compress_ratios

@@ -28,6 +28,16 @@ def _kernel_options(attention_masks, ratio, window_size):
         cu_seqlens_q=attention_masks.kernel.q.cu_seqlens,
         cu_seqlens_ori_kv=attention_masks.kernel.swa_k.cu_seqlens,
         cu_seqlens_cmp_kv=None if compressed is None else compressed.cu_seqlens,
+        # The per-sequence lengths actually addressed -- how an operator is told to read a prefix
+        # of its operand.  Under context parallelism they carry the whole query movement:
+        # ``seqused_q`` is this rank's chunk and ``seqused_ori_kv`` its reach, so the sliding
+        # window and the compressed causal limit are anchored at ``seqused_ori_kv - seqused_q``,
+        # this rank's chunk offset inside the document.  At ``cp_size = 1`` each of them equals the
+        # corresponding boundary difference, so passing them is a no-op there rather than a second
+        # code path.
+        seqused_q=attention_masks.kernel.q.seqused,
+        seqused_ori_kv=attention_masks.kernel.swa_k.seqused,
+        seqused_cmp_kv=None if compressed is None else compressed.seqused,
         cmp_residual_kv=None if compressed is None else compressed.residual,
         cmp_ratio=max(ratio, 1),
         ori_mask_mode=4,
@@ -155,9 +165,6 @@ class _SparseMLA(torch.autograd.Function):
             cmp_sparse_indices=topk_indices,
             sinks=sinks,
             metadata=smla_grad_metadata,
-            seqused_q=None,
-            seqused_ori_kv=None,
-            seqused_cmp_kv=None,
             ori_topk_length=None,
             cmp_topk_length=None,
             softmax_scale=ctx.softmax_scale,
