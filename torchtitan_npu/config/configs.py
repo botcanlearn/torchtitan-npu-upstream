@@ -14,7 +14,7 @@ from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfi
 from torchtitan.config import TrainingConfig as _BaseTrainingConfig
 from torchtitan.tools.profiler import Profiler as _BaseProfiler
 
-QuantizationRecipe = Literal["all_mxfp8", "mix", "all_block_fp8"]
+QuantizationRecipe = Literal["all_mxfp8", "all_hif8", "mix", "all_block_fp8"]
 LIQuantization = Literal["mxfp4", "mxfp8", "fp8", "hif8"]
 KVNormQuantization = Literal["mxfp8"]
 
@@ -155,6 +155,13 @@ class QuantizationExtensionConfig:
     dst_type_max: float = 0.0
     enable_fsdp_prequantize: bool = False
     kv_norm_quantization: KVNormQuantizationConfig = field(default_factory=KVNormQuantizationConfig)
+    enable_hif8_save_quant_codes: bool = False
+    """Keep HiF8's quantized operands and result across the
+    selective-AC boundary instead of re-deriving them in the backward. Off
+    by default (bit-identical to not patching the save list at all)."""
+    save_block_ops_level: int = 0
+    """Add attention/mHC/MoE-routing NPU ops to the selective-AC MUST_SAVE
+    list (1-3, cumulative; recipe-independent). Off (0) by default."""
 
     def validate(self) -> None:
         if self.li_quantization not in (None, "mxfp4", "mxfp8", "fp8", "hif8"):

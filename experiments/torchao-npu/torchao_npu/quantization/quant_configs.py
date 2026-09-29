@@ -108,7 +108,16 @@ class FP8QuantizeConfig(FakeQuantizeConfigBase):
 
 @dataclass
 class HiF8QuantizeConfig(FakeQuantizeConfigBase):
-    """HiFloat8 dynamic quantization configuration."""
+    """HiFloat8 dynamic quantization configuration.
+
+    Serves two call sites:
+
+    - Lightning Indexer Q/K quantization (:mod:`torchao_npu.ops.li_ops`).
+    - Dense/MoE weight+activation matmul quantization
+      (:mod:`torchao_npu.ops.hif8_ops`, current/constant tensor scaling: the
+      scale is recomputed fresh via ``npu_dynamic_quant`` on every call, no
+      persisted per-parameter state).
+    """
 
     elem_dtype: object = torch_npu.hifloat8
     dst_type_max: float = 0.0

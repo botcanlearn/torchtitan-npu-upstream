@@ -141,11 +141,13 @@ bash examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh \
 | 参数 | 选项 | 用途 |
 | --- | --- | --- |
 | `enable-quantized-training` | `--enable-quantized-training` / `--no-enable-quantized-training` | 启用或关闭低精度训练，默认关闭。 |
-| `recipe` | `all_mxfp8`、`mix`、`all_block_fp8` | 选择全 MXFP8、混合 MXFP8/Block FP8 或全 Block FP8。 |
+| `recipe` | `all_mxfp8`、`mix`、`all_block_fp8`、`all_hif8` | 选择全 MXFP8、混合 MXFP8/Block FP8、全 Block FP8 或全 HiF8。 |
 | `enable-mxfp4-qat` | `--enable-mxfp4-qat` / `--no-enable-mxfp4-qat` | 为 routed expert 启用或关闭 MXFP4 QAT 约束，默认关闭。 |
 | `li-quantization` | `fp8`、`mxfp8`、`mxfp4`、`hif8` | 选择 DeepSeek-V4 LI Q/K 的量化类型，默认不启用。 |
 | `kv-norm-quantization.format` | `mxfp8` | 启用 DeepSeek-V4 KV Cache 的 MXFP8 量化。 |
 | `enable-fsdp-prequantize` | `--enable-fsdp-prequantize` / `--no-enable-fsdp-prequantize` | 在 FSDP all-gather 前预量化 Block FP8 权重，减少通信量，默认关闭。 |
+| `enable-hif8-save-quant-codes` | `--enable-hif8-save-quant-codes` / `--no-enable-hif8-save-quant-codes` | 把 HiF8 量化矩乘算子（`npu_quantize`/`npu_dynamic_quant`/`npu_grouped_matmul`/`npu_quant_matmul`）结果保留在 selective activation checkpointing 保存边界内，backward 不再重新推导；仅在 `recipe=all_hif8` 时生效，默认关闭。 |
+| `save-block-ops-level` | `0`-`3`（默认 `0`） | 把 attention / mHC / MoE-routing 相关 NPU 自定义算子加入 selective activation checkpointing 的 MUST_SAVE 列表，用显存换取 backward 更少重复计算。 |
 
 ### DeepSeek-V4.1 TorchAO-NPU 低精度训练
 

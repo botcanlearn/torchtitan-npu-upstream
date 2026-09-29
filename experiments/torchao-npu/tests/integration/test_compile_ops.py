@@ -24,9 +24,11 @@ import torch_npu  # noqa: F401
 from torchao_npu.ops.block_mx_ops import (
     to_block_mx_then_mm,
 )
+from torchao_npu.ops.hif8_ops import to_hif8_then_bmm, to_hif8_then_mm
 from torchao_npu.ops.mx_ops import to_mx_then_mm
 from torchao_npu.quantization.quant_configs import (
     BlockMXQuantizeConfig,
+    HiF8QuantizeConfig,
     MXQuantizeConfig,
 )
 
@@ -151,3 +153,63 @@ def test_block_mx_with_mxfp4_compile(m, k, n):
 
     model = BlockMXMMModel(config_a, config_b).npu()
     _compile_and_assert_output(model, a, b, expected_shape=(m, n))
+
+
+# ============================================================================
+# HiF8 quantized matmul (to_hif8_then_mm / to_hif8_then_bmm)
+# ============================================================================
+
+
+class HiF8MMModel(torch.nn.Module):
+    def __init__(self, config_a, config_b):
+        super().__init__()
+        self.config_a = config_a
+        self.config_b = config_b
+
+    def forward(self, a, b):
+        return to_hif8_then_mm(a, b, self.config_a, self.config_b)
+
+
+@pytest.mark.parametrize(
+    "m, k, n",
+    [
+        (2048, 4096, 2048),
+        (4096, 2048, 4096),
+    ],
+)
+def test_hif8_matmul_compile(m, k, n):
+    """``to_hif8_then_mm`` works under torch.compile."""
+    torch.manual_seed(42)
+    a = torch.randn(m, k, device="npu", dtype=torch.bfloat16)
+    b = torch.randn(k, n, device="npu", dtype=torch.bfloat16)
+    config = HiF8QuantizeConfig()
+
+    model = HiF8MMModel(config, config).npu()
+    _compile_and_assert_output(model, a, b, expected_shape=(m, n))
+
+
+class HiF8BMMModel(torch.nn.Module):
+    def __init__(self, config_a, config_b):
+        super().__init__()
+        self.config_a = config_a
+        self.config_b = config_b
+
+    def forward(self, a, b):
+        return to_hif8_then_bmm(a, b, self.config_a, self.config_b)
+
+
+def test_hif8_bmm_compile_with_transposed_activation():
+    """``to_hif8_then_bmm`` works under ``torch.compile`` when the activation is
+    a non-contiguous permutation view -- the ``BatchedLinear`` layout that
+    ``quantize_hifloat8``'s transpose-avoidance path (descending-stride
+    permute, no ``is_contiguous()`` guard) targets.
+    """
+    torch.manual_seed(42)
+    T, H, K, N = 512, 8, 512, 512
+    base = torch.randn(T, H, K, device="npu", dtype=torch.bfloat16)
+    a = base.transpose(0, 1)  # non-contiguous view: [H, T, K]
+    b = torch.randn(H, K, N, device="npu", dtype=torch.bfloat16)
+    config = HiF8QuantizeConfig()
+
+    model = HiF8BMMModel(config, config).npu()
+    _compile_and_assert_output(model, a, b, expected_shape=(H, T, N))

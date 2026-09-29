@@ -18,6 +18,7 @@ from torchao.quantization.transform_module import register_quantize_module_handl
 from torchao_npu.quantization.filters import ParameterFilterFn, _is_parameter, _is_parameter_with_wrapped_data
 from torchao_npu.quantization.quant_configs import (
     BlockMXQuantizeConfig,
+    HiF8QuantizeConfig,
     MXQuantizeConfig,
 )
 from torchao_npu.quantization.transform import (
@@ -51,8 +52,10 @@ class ParamSwapConfig(QATConfig):
     (:class:`~torchao.quantization.qat.fake_quantize_config.Float8FakeQuantizeConfig`),
     NPU MX block-wise
     (:class:`~torchao_npu.quantization.quant_configs.MXQuantizeConfig`),
-    and NPU Block MX
-    (:class:`~torchao_npu.quantization.quant_configs.BlockMXQuantizeConfig`).
+    NPU Block MX
+    (:class:`~torchao_npu.quantization.quant_configs.BlockMXQuantizeConfig`),
+    and NPU HiF8 per-tensor
+    (:class:`~torchao_npu.quantization.quant_configs.HiF8QuantizeConfig`).
     """
 
     def __init__(
@@ -72,19 +75,21 @@ class ParamSwapConfig(QATConfig):
         if self.activation_config is not None and type(self.activation_config) not in (
             Float8FakeQuantizeConfig,
             MXQuantizeConfig,
+            HiF8QuantizeConfig,
         ):
             raise ValueError(
-                "Only `Float8FakeQuantizeConfig` or `MXQuantizeConfig` "
+                "Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `HiF8QuantizeConfig` "
                 "is supported for `activation_config` in ParamSwapConfig yet."
             )
         if self.weight_config is not None and type(self.weight_config) not in (
             Float8FakeQuantizeConfig,
             MXQuantizeConfig,
             BlockMXQuantizeConfig,
+            HiF8QuantizeConfig,
         ):
             raise ValueError(
-                "Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `BlockMXQuantizeConfig` "
-                "is supported for `weight_config` in ParamSwapConfig yet."
+                "Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, `BlockMXQuantizeConfig`, or "
+                "`HiF8QuantizeConfig` is supported for `weight_config` in ParamSwapConfig yet."
             )
 
         super().__post_init__()

@@ -10,5 +10,6 @@ public surface via ``__all__``:
 
 - :mod:`torchao_npu.ops.block_mx_ops` — Block MX matmul ops
 - :mod:`torchao_npu.ops.float8_ops` — FP8 row-wise fake quantization
+- :mod:`torchao_npu.ops.hif8_ops` — Per-tensor HiF8 matmul ops (current/constant tensor scaling)
 - :mod:`torchao_npu.ops.mx_ops` — MX (FP8/FP4) matmul and (de)quantization ops
 """

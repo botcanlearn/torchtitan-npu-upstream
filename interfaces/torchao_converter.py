@@ -502,7 +502,7 @@ _MODEL_TYPE_BY_MODEL_NAME: dict[str, _ModelType] = {
 }
 
 
-_SUPPORTED_RECIPES = ("all_mxfp8", "mix", "all_block_fp8")
+_SUPPORTED_RECIPES = ("all_mxfp8", "all_hif8", "mix", "all_block_fp8")
 
 
 def _model_type_for_spec(model_spec: ModelSpec) -> _ModelType:
@@ -656,6 +656,155 @@ def _block_fp8_param_swap(
     )
 
 
+# extension.quantization.enable-hif8-save-quant-codes ops added to the
+# selective-AC save list.
+_QUANT_CODE_SAVE_OPS = (
+    "npu.npu_quantize.default",
+    "npu.npu_dynamic_quant.default",
+    "npu.npu_grouped_matmul.default",
+    "npu.npu_quant_matmul.default",
+)
+
+_AC_QUANT_CODES_PATCHED = [False]
+
+
+def _save_quant_codes_under_selective_ac(enable: bool) -> None:
+    """extension.quantization.enable-hif8-save-quant-codes: keep the quantized
+    matmul's operands and result across the selective-AC boundary instead of
+    re-deriving them in the backward.
+
+    Must be called at model-setup time, before parallelization wraps the
+    blocks: torchtitan reads ``_get_default_save_ops`` when it installs
+    activation checkpointing.
+    """
+    if not enable or _AC_QUANT_CODES_PATCHED[0]:
+        return
+    try:
+        from torchtitan.distributed import activation_checkpoint as ac
+    except ImportError:
+        return
+    _AC_QUANT_CODES_PATCHED[0] = True
+    orig = ac._get_default_save_ops
+
+    def _get_default_save_ops():
+        ops = orig()
+        added, missing = [], []
+        for path in _QUANT_CODE_SAVE_OPS:
+            obj = torch.ops
+            try:
+                for part in path.split("."):
+                    obj = getattr(obj, part)
+            except (AttributeError, RuntimeError):
+                missing.append(path)
+                continue
+            ops.add(obj)
+            added.append(path)
+        logger.info(
+            "enable_hif8_save_quant_codes: added %s to the selective-AC save list%s",
+            ", ".join(added) or "nothing",
+            f" (not registered: {', '.join(missing)})" if missing else "",
+        )
+        return ops
+
+    ac._get_default_save_ops = _get_default_save_ops
+
+
+_AC_BLOCK_OPS_PATCHED = [False]
+
+# extension.quantization.save-block-ops-level levels -> the transformer-block ops
+# added to the selective-AC save list, grouped by the module they belong to
+# and ordered by critical-path ms per saved GiB (best first).
+_BLOCK_SAVE_OPS = (
+    # 1: attention
+    (1, "cann_ops_transformer.sparse_flash_mla.default"),
+    (1, "cann_ops_transformer.lightning_indexer.default"),
+    # 2: mHC
+    (2, "npu.npu_mhc_pre.default"),
+    (2, "cann_ops_transformer.mhc_post.default"),
+    (2, "npu.npu_mhc_sinkhorn.default"),
+    # 3: MoE routing
+    (3, "npu.npu_moe_token_permute.default"),
+    (3, "torchtitan_npu.npu_moe_re_routing.default"),
+    (3, "torchtitan_npu.npu_moe_token_unpermute.default"),
+)
+
+
+def _resolve_torch_op(path: str):
+    """``torch.ops`` lookup by dotted path, or None if not registered yet."""
+    obj = torch.ops
+    try:
+        for part in path.split("."):
+            obj = getattr(obj, part)
+    except (AttributeError, RuntimeError):
+        return None
+    return obj
+
+
+def _save_block_ops_under_selective_ac(level: int) -> None:
+    """extension.quantization.save-block-ops-level: keep the attention / mHC /
+    MoE-routing results across the selective-AC boundary instead of
+    re-deriving them in the backward.
+
+    torchtitan's ``_get_default_save_ops()`` doesn't know about custom NPU
+    ops, so the min-cut partitioner always recomputes them. ``_BLOCK_SAVE_OPS``
+    orders them best-first by profiled win, an upper bound rather than a
+    guarantee -- a recomputed kernel off the critical path may already be
+    overlapped.
+
+    NOT bit-exact (forward and recompute don't compile to the same fused
+    kernel), so this needs a loss A/B before being trusted.
+
+    Resolution is deferred to call time (inside the returned closure, not
+    at patch time) because some ops register only once model modules have
+    imported ``cann_ops_transformer``.
+    """
+    if level <= 0 or _AC_BLOCK_OPS_PATCHED[0]:
+        return
+    try:
+        from torchtitan.distributed import activation_checkpoint as ac
+    except ImportError:
+        return
+    wanted = tuple(path for lvl, path in _BLOCK_SAVE_OPS if lvl <= level)
+    if not wanted:
+        return
+    _AC_BLOCK_OPS_PATCHED[0] = True
+    orig = ac._get_default_save_ops
+
+    def _get_default_save_ops():
+        ops = orig()
+        added, missing = [], []
+        for path in wanted:
+            op = _resolve_torch_op(path)
+            if op is None:
+                # Not registered in this build/config (e.g. the lightning
+                # indexer is off for this model). A miss is a lost
+                # optimization, never a correctness problem.
+                missing.append(path)
+            else:
+                ops.add(op)
+                added.append(path)
+        logger.info(
+            "save_block_ops_level=%d: added %s to the selective-AC save list%s",
+            level,
+            ", ".join(added) or "nothing",
+            f" (not registered: {', '.join(missing)})" if missing else "",
+        )
+        return ops
+
+    ac._get_default_save_ops = _get_default_save_ops
+
+
+def _hif8_param_swap(save_quant_codes: bool) -> ParamSwapConfig:
+    # Current/constant tensor scaling only: every quantize call recomputes
+    # its scale via npu_dynamic_quant, no persisted per-parameter state.
+    hif8_config = HiF8QuantizeConfig()
+    _save_quant_codes_under_selective_ac(save_quant_codes)
+    return ParamSwapConfig(
+        weight_config=hif8_config,
+        activation_config=hif8_config,
+    )
+
+
 def _quantization_converter(
     base_config: AOBaseConfig | None,
     filter_fn: ConfigFilterFn | None = None,
@@ -685,6 +834,7 @@ def _recipe_converters(
     li_quantization: LIQuantization | None = None,
     li_kernel_config: LightningIndexerKernelConfig | None = None,
     kv_norm_quantization: KVNormQuantizationConfig | None = None,
+    enable_hif8_save_quant_codes: bool = False,
 ) -> list[QuantizationConverter.Config]:
     converters: list[QuantizationConverter.Config]
     try:
@@ -697,6 +847,15 @@ def _recipe_converters(
         converters = [
             _quantization_converter(
                 _mxfp8_param_swap(),
+                any_config_filter(dense_filter, filters["routed_expert"]),
+                model_compile_enabled=model_compile_enabled,
+            )
+        ]
+
+    elif recipe == "all_hif8":
+        converters = [
+            _quantization_converter(
+                _hif8_param_swap(enable_hif8_save_quant_codes),
                 any_config_filter(dense_filter, filters["routed_expert"]),
                 model_compile_enabled=model_compile_enabled,
             )
@@ -827,6 +986,11 @@ def apply_quantization_converter(
 
     if model_spec is None:
         raise ValueError("TorchAO-NPU quantization requires model_spec to be configured")
+    # Recipe-independent, so it is installed here rather than in
+    # _hif8_param_swap: these are block ops, not quantized ops, and MXFP8 wants
+    # them saved just as much as HiF8 does. Off by default -- at level 0
+    # nothing is patched and the partition is the one we ship today.
+    _save_block_ops_under_selective_ac(quantization_config.save_block_ops_level)
     if not quantization_config.enable_quantized_training:
         return model_spec
     quantization_config.validate()
@@ -848,6 +1012,7 @@ def apply_quantization_converter(
         li_quantization=quantization_config.li_quantization,
         li_kernel_config=li_kernel_config,
         kv_norm_quantization=quantization_config.kv_norm_quantization,
+        enable_hif8_save_quant_codes=quantization_config.enable_hif8_save_quant_codes,
     )
     validate_converter_order(converters)
 

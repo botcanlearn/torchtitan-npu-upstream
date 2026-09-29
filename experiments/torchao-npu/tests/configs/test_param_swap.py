@@ -9,11 +9,14 @@ from torchao.quantization import Float8DynamicActivationFloat8WeightConfig
 from torchao.quantization.granularity import PerRow
 from torchao.quantization.qat import IntxFakeQuantizeConfig, QATStep
 from torchao.quantization.qat.fake_quantize_config import Float8FakeQuantizeConfig
+from torchao.quantization.quant_api import quantize_
 from torchao_npu.configs import ParamSwapConfig
 from torchao_npu.quantization.quant_configs import (
     BlockMXQuantizeConfig,
+    HiF8QuantizeConfig,
     MXQuantizeConfig,
 )
+from torchao_npu.wrapper_tensors import HiF8TrainingWeightWrapperTensor
 
 
 def test_prepare_registers_swap_handlers_without_explicit_wrapper_import():
@@ -109,26 +112,26 @@ def test_config_infer_from_base_config(base_config, expected_weight_config, expe
 
 
 def test_config_rejects_invalid_weight_config():
-    """Invalid (non-FP8, non-NPU-MX) weight configs should be rejected."""
+    """Invalid (non-FP8, non-NPU-MX, non-HiF8) weight configs should be rejected."""
     intx_config = IntxFakeQuantizeConfig(torch.int8, "per_channel")
     with pytest.raises(
         ValueError,
         match=(
-            r"^Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `BlockMXQuantizeConfig` "
-            r"is supported for `weight_config` in ParamSwapConfig yet\.$"
+            r"^Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, `BlockMXQuantizeConfig`, or "
+            r"`HiF8QuantizeConfig` is supported for `weight_config` in ParamSwapConfig yet\.$"
         ),
     ):
         ParamSwapConfig(weight_config=intx_config, step="prepare")
 
 
 def test_config_rejects_invalid_activation_config():
-    """Invalid (non-FP8, non-NPU-MX) activation configs should be rejected."""
+    """Invalid (non-FP8, non-NPU-MX, non-HiF8) activation configs should be rejected."""
     weight_config = Float8FakeQuantizeConfig(dtype=torch.float8_e4m3fn, granularity=PerRow())
     activation_config = IntxFakeQuantizeConfig(torch.int8, "per_channel")
     with pytest.raises(
         ValueError,
         match=(
-            r"^Only `Float8FakeQuantizeConfig` or `MXQuantizeConfig` is supported for "
+            r"^Only `Float8FakeQuantizeConfig`, `MXQuantizeConfig`, or `HiF8QuantizeConfig` is supported for "
             r"`activation_config` in ParamSwapConfig yet\.$"
         ),
     ):
@@ -200,6 +203,44 @@ def test_config_accepts_block_weight_with_mx_activation():
     )
     assert qat_config.weight_config is weight_config
     assert qat_config.activation_config is act_config
+
+
+def test_param_swap_accepts_hif8_for_weight_and_activation():
+    """HiF8QuantizeConfig should be accepted for both weight and activation."""
+    weight_config = HiF8QuantizeConfig()
+    activation_config = HiF8QuantizeConfig()
+
+    config = ParamSwapConfig(
+        weight_config=weight_config,
+        activation_config=activation_config,
+        step=QATStep.PREPARE,
+    )
+
+    assert config.weight_config is weight_config
+    assert config.activation_config is activation_config
+    assert config.step == QATStep.PREPARE
+
+
+def test_hif8_config_rejects_non_hif8_dtype():
+    with pytest.raises(ValueError, match=r"HiF8QuantizeConfig requires torch_npu\.hifloat8"):
+        HiF8QuantizeConfig(elem_dtype=torch.float8_e4m3fn)
+
+
+def test_quantize_prepares_hif8_parameter_wrapper():
+    config = HiF8QuantizeConfig()
+    module = torch.nn.Linear(64, 128)
+    quantize_config = ParamSwapConfig(
+        weight_config=config,
+        activation_config=config,
+        step=QATStep.PREPARE,
+    )
+
+    quantize_(module, quantize_config)
+
+    assert isinstance(module.weight, torch.nn.Parameter)
+    assert isinstance(module.weight, HiF8TrainingWeightWrapperTensor)
+    assert module.weight.weight_config is config
+    assert module.weight.activation_config is config
 
 
 # =========================================================================
