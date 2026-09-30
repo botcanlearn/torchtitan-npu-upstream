@@ -144,9 +144,10 @@ def _build_graph() -> tuple[fx.GraphModule, dict[str, fx.Node]]:
     return fx.GraphModule(torch.nn.Module(), graph), nodes
 
 
-def test_dsv4_mhc_cross_layer_remat() -> None:
+def test_dsv4_mhc_layer_boundaries_and_moe_save() -> None:
     gm, nodes = _build_graph()
-
+    inputs = tuple(torch.full((2, 2), 0.1) for _ in range(3))
+    expected = gm(*inputs)
     config = SimpleNamespace(
         compile=SimpleNamespace(memory_policy="dsv4-mhc"),
         parallelism=SimpleNamespace(
@@ -154,39 +155,24 @@ def test_dsv4_mhc_cross_layer_remat() -> None:
             pipeline_parallel_degree=1,
         ),
     )
-
-    assert "dsv4-mhc" in MEMORY_POLICY_REGISTRY
     gm = tag_with_memory_policy_pass(gm, config=config)
 
-    # MHC 节点策略
     for layer_id in (0, 4):
-        assert nodes[f"wo_b{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_SAVE
+        assert nodes[f"wo_b{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_RECOMPUTE
         assert nodes[f"moe{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_SAVE
         assert nodes[f"pre{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_RECOMPUTE
-        assert nodes[f"post{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_RECOMPUTE
-
-    # layer3 -> layer4 是跨四层边界
-    assert nodes["out3"].meta["recompute"] == CheckpointPolicy.MUST_SAVE
-    assert nodes["out0"].meta["recompute"] == CheckpointPolicy.MUST_RECOMPUTE
+        assert nodes[f"post{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_SAVE
+    for layer_id in range(7):
+        assert nodes[f"out{layer_id}"].meta["recompute"] == CheckpointPolicy.MUST_SAVE
 
     gm = selective_activation_remat_pass(gm)
     names = {node.name for node in gm.graph.nodes}
-
-    # pre/post 应该重计算
     for layer_id in (0, 4):
         assert f"pre{layer_id}_recomputed" in names
-        assert f"post{layer_id}_recomputed" in names
-
-    # wo_b、moe 和跨层边界不应该重计算
-    for name in ("wo_b0", "wo_b4", "moe0", "moe4", "out3"):
-        assert f"{name}_recomputed" not in names
-
-    # backward 必须使用重计算副本
-    for layer_id in (0, 4):
-        assert f"pre{layer_id}_recomputed" in {node.name for node in nodes[f"bwd_pre{layer_id}"].all_input_nodes}
-        assert f"post{layer_id}_recomputed" in {node.name for node in nodes[f"bwd_post{layer_id}"].all_input_nodes}
-
-    # post 重计算直接依赖已保存的 moe 输出
-    post4_recomputed = next(node for node in gm.graph.nodes if node.name == "post4_recomputed")
-    assert nodes["moe4"] in post4_recomputed.all_input_nodes
-    assert "moe4_recomputed" not in {node.name for node in post4_recomputed.all_input_nodes}
+        assert f"post{layer_id}_recomputed" not in names
+        assert nodes[f"post{layer_id}"] in nodes[f"bwd_post{layer_id}"].all_input_nodes
+        assert f"pre{layer_id}_recomputed" in {
+            node.name for node in nodes[f"bwd_pre{layer_id}"].all_input_nodes
+        }
+    gm.graph.lint()
+    torch.testing.assert_close(gm(*inputs), expected, rtol=0, atol=0)
