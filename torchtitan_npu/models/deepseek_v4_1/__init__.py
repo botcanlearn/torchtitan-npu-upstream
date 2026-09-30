@@ -961,16 +961,15 @@ def _attach_engram(config, engram):
 
 deepseek_v4_1_configs = {
     "deepseek_v4_1_flash": _deepseek_v4_1_flash,
+    "deepseek_v4_1_flash_text": partial(_deepseek_v4_1_flash, vision=False),
     "deepseek_v4_1_flash_40layers_16experts_vision": partial(
         _deepseek_v4_1_flash,
         num_experts=16,
-        max_seq_len=4096,
     ),
     "deepseek_v4_1_flash_40layers_16experts_text": partial(
         _deepseek_v4_1_flash,
         num_experts=16,
         vision=False,
-        max_seq_len=4096,
     ),
     "deepseek_v4_1_debugmodel": _debugmodel,
     "deepseek_v4_1_debugmodel_text": partial(_debugmodel, vision=False),

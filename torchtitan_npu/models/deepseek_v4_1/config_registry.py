@@ -261,6 +261,10 @@ def deepseek_v4_1_flash() -> TrainerEx.Config:
     return _make_trainer_config("deepseek_v4_1_flash")
 
 
+def deepseek_v4_1_flash_text() -> TrainerEx.Config:
+    return _make_trainer_config("deepseek_v4_1_flash_text")
+
+
 def deepseek_v4_1_flash_40layers_16experts_multimodal() -> TrainerEx.Config:
     return _make_trainer_config("deepseek_v4_1_flash_40layers_16experts_vision")
 
