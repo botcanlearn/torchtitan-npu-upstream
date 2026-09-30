@@ -12,6 +12,7 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint, DefaultDeviceType
 from torchtitan.config import Configurable, OverrideConfig, TrainingConfig, apply_overrides
+from torchtitan.components.optimizer import ParamGroupConfig
 
 from torchtitan_npu.extensions.components.optimizer import HostSparseOptimizersContainer
 from torchtitan_npu.models.deepseek_v4_1.engram.host import HostEngramTable
@@ -152,10 +153,10 @@ def test_mxfp8_override_refreshes_derived_storage(monkeypatch):
     actual.backward(torch.arange(actual.numel()).reshape_as(actual).bfloat16() / 128)
     untouched_storage = storage[1].clone()
     untouched_scale = scale[1].clone()
-    optimizer = torch.optim.SparseAdam([table.weight], lr=0.05)
-    container = object.__new__(HostSparseOptimizersContainer)
-    container.model_parts = [table]
-    container.optimizers = [optimizer]
+    container = HostSparseOptimizersContainer.Config(
+        implementation="for-loop",
+        param_groups=[ParamGroupConfig(pattern=".*", optimizer_name="SparseAdam", optimizer_kwargs={"lr": 0.05})],
+    ).build(model_parts=[table])
     container.step()
     assert table.pending_sparse_grad() is None
     expected_storage, expected_scale = mxfp8._quantize_mxfp8_rows(table.weight)

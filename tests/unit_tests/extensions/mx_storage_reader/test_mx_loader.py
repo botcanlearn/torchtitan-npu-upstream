@@ -168,6 +168,9 @@ def test_only_v4_selects_mx_reader(reader_module, monkeypatch, tmp_path, weight_
     # symbols at module load time.
     monkeypatch.setitem(sys.modules, "_mx_test_components.lora", SimpleNamespace(
         _PEFT_MODULE_SUFFIXES=(),
+        MODULE_PATHS=(),
+        PEFT_PREFIX="base_model.model.",
+        pack_expert_factor=lambda tensor, factor: tensor,
         DEEPSEEK_V4_LORA_TARGETS=(),
         DeepSeekV4LoRAConverter=SimpleNamespace(Config=object),
         LoRAOptions=object,

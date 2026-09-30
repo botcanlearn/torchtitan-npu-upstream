@@ -5,10 +5,12 @@
 
 
 from dataclasses import dataclass
+from functools import partial
 import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.models.common import Linear, decoder_sharding, moe
 from torchtitan.protocols import sharding
 from torchtitan_npu.models import deepseek_v4 as dsv4
@@ -21,6 +23,17 @@ def preserve_rng():
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         yield
+
+
+@pytest.fixture(params=[False, True], ids=["eager", "selective-ac"])
+def forward_with_checkpoint(request, monkeypatch):
+    if not request.param:
+        return lambda module, *args, **kwargs: module(*args, **kwargs)
+    from torch.utils.checkpoint import DefaultDeviceType, checkpoint, create_selective_checkpoint_contexts
+
+    monkeypatch.setattr(DefaultDeviceType, "get_device_type", lambda: "cpu")
+    context_fn = partial(create_selective_checkpoint_contexts, list(SelectiveAC.Config().build().get_save_ops()))
+    return partial(checkpoint, use_reentrant=False, context_fn=context_fn)
 
 
 def _assert_gradients_match(actual, expected, variables, *, rtol=1e-5, atol=1e-6):
@@ -56,7 +69,7 @@ def _build_cpu_grouped_lora_module() -> _CpuGroupedLoRAExperts:
     config = _CpuGroupedLoRAExperts.Config(
         dim=4, hidden_dim=6, num_experts=2, rank=2, alpha=4.0, chunk_rows=2,
         param_init=dict.fromkeys(
-            ("w1_EFD", "w2_EDF", "w3_EFD", "w13_lora_a", "w13_lora_b", "w2_lora_a", "w2_lora_b"), torch.nn.init.zeros_
+            ("w1_EFD", "w2_EDF", "w3_EFD", "w13_lora_a", "w1_lora_b", "w3_lora_b", "w2_lora_a", "w2_lora_b"), torch.nn.init.zeros_
         ),
     )
     module = config.build()
@@ -77,8 +90,8 @@ def _per_expert_lora_reference(module, inputs, counts, scores, limit):
         end = start + count
         x = inputs[start:end].bfloat16()
         w13_hidden = x @ module.w13_lora_a[expert].bfloat16().T
-        gate_delta = w13_hidden @ module.w13_lora_b[expert, :, 0].bfloat16().T
-        up_delta = w13_hidden @ module.w13_lora_b[expert, :, 1].bfloat16().T
+        gate_delta = w13_hidden @ module.w1_lora_b[expert].bfloat16().T
+        up_delta = w13_hidden @ module.w3_lora_b[expert].bfloat16().T
         gate = x @ module.w1_EFD[expert].bfloat16().T
         gate = gate + scale * gate_delta
         up = x @ module.w3_EFD[expert].bfloat16().T
@@ -96,6 +109,17 @@ def _per_expert_lora_reference(module, inputs, counts, scores, limit):
     return torch.cat(expected_parts)
 
 
+def test_indexer_scores_and_gradients_with_checkpoint(forward_with_checkpoint):
+    query = torch.randn(1, 4, 2, 3, requires_grad=True)
+    key = torch.randn(1, 2, 3, requires_grad=True)
+    weight = torch.randn(1, 4, 2, requires_grad=True)
+    mask = torch.ones(1, 1, 4, 2, dtype=torch.bool)
+    _, actual = forward_with_checkpoint(dsv4.compressor.Indexer.select, query, key, weight, mask, 2)
+    expected = (torch.einsum("bshd,btd->bsht", query, key).relu() * weight.unsqueeze(-1)).sum(dim=2)
+    torch.testing.assert_close(actual, expected)
+    _assert_gradients_match(actual, expected, (query, key, weight))
+
+
 def test_replicated_base_keeps_both_lora_factors_replicated():
     replicated = decoder_sharding.dense_param_placement(tp=spmd.R)
     base = sharding.ShardingConfig(state_shardings={"weight": replicated})
@@ -106,7 +130,7 @@ def test_replicated_base_keeps_both_lora_factors_replicated():
     assert lora_b is not None and lora_b.state_shardings["weight"] == replicated
 
 
-def test_chunked_dense_lora_matches_independent_formula_and_backpropagates():
+def test_chunked_dense_lora_matches_independent_formula_and_backpropagates(forward_with_checkpoint):
     cls = lora.linear_lora_class(Linear)
     assert cls is lora.linear_lora_class(Linear)
     module = cls.Config(in_features=5, out_features=7, bias=False, rank=3, alpha=6.0, chunk_rows=2).build()
@@ -116,7 +140,7 @@ def test_chunked_dense_lora_matches_independent_formula_and_backpropagates():
         module.lora_b.weight.normal_(std=0.1)
 
     inputs = torch.randn(2, 3, 5, requires_grad=True)
-    actual = module(inputs)
+    actual = forward_with_checkpoint(module, inputs)
     expected = F.linear(inputs, module.weight) + 2.0 * F.linear(
         F.linear(inputs, module.lora_a.weight), module.lora_b.weight
     )
@@ -126,7 +150,7 @@ def test_chunked_dense_lora_matches_independent_formula_and_backpropagates():
     assert not module.weight.requires_grad
 
 
-def test_batched_lora_matches_shared_a_per_head_b_and_backpropagates():
+def test_batched_lora_matches_shared_a_per_head_b_and_backpropagates(forward_with_checkpoint):
     cls = lora.linear_lora_class(BatchedLinear)
     assert cls is lora.linear_lora_class(BatchedLinear)
     module = cls.Config(
@@ -140,7 +164,7 @@ def test_batched_lora_matches_shared_a_per_head_b_and_backpropagates():
         module.lora_b.weight.normal_(std=0.1)
 
     inputs = torch.randn(2, 3, 3, 5, requires_grad=True)
-    actual = module(inputs)
+    actual = forward_with_checkpoint(module, inputs)
     base_weight = module.weight.view(3, 4, 5)
     adapter_b = module.lora_b.weight.view(3, 4, 2)
     expected = torch.einsum("...hd,hod->...ho", inputs, base_weight)
@@ -163,7 +187,7 @@ def test_grouped_lora_output_and_gradients_match_per_expert_reference(limit):
 
     actual = module(inputs, counts, routed_scores_R=scores)
     expected = _per_expert_lora_reference(module, inputs, counts, scores, limit)
-    variables = (inputs, scores, module.w13_lora_a, module.w13_lora_b, module.w2_lora_a, module.w2_lora_b)
+    variables = (inputs, scores, module.w13_lora_a, module.w1_lora_b, module.w3_lora_b, module.w2_lora_a, module.w2_lora_b)
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-3)
     _assert_gradients_match(actual, expected, variables, rtol=2e-2, atol=2e-3)
@@ -214,3 +238,16 @@ def test_dense_lora_zero_init_preserves_output_and_updates_only_adapter(freeze_l
             assert torch.equal(target.lora_a.weight, adapter_a_before)
     if not freeze_lora_a:
         assert not torch.equal(target.lora_a.weight, adapter_a_before)
+
+
+def test_grouped_legacy_weights_load_into_split_gate_up():
+    module = _build_cpu_grouped_lora_module()
+    original = {name: value.clone() for name, value in module.state_dict().items()}
+    legacy = dict(original)
+    legacy["w13_lora_b"] = torch.stack((legacy.pop("w1_lora_b"), legacy.pop("w3_lora_b")), dim=2)
+    restored = _build_cpu_grouped_lora_module()
+
+    restored.load_state_dict(legacy, strict=True)
+
+    for name, value in restored.state_dict().items():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)

@@ -212,21 +212,14 @@ def test_recipe_converters_reject_unknown_model_type(converter_module):
     [("deepseek_v4", "v4"), ("deepseek_v4_1", "v41")],
 )
 def test_apply_quantization_converter_passes_model_type(converter_module, monkeypatch, model_name, expected_model_type):
+    from torchtitan_npu.config.configs import QuantizationExtensionConfig
+
     @dataclass(frozen=True)
     class FakeModelSpec:
         name: str
         model: object
 
-    quantization_config = SimpleNamespace(
-        enable_quantized_training=True,
-        enable_sparse_attention_quantization=False,
-        recipe="mix",
-        enable_mxfp4_qat=False,
-        dst_type_max=0.0,
-        enable_fsdp_prequantize=False,
-        li_quantization=None,
-        validate=lambda: None,
-    )
+    quantization_config = QuantizationExtensionConfig(enable_quantized_training=True, recipe="mix")
     calls = []
     monkeypatch.setattr(converter_module, "_recipe_converters", lambda *args, **kwargs: calls.append(kwargs) or [])
     monkeypatch.setattr(converter_module, "validate_converter_order", lambda converters: None)
@@ -351,11 +344,41 @@ def test_v41_recipe_couples_source_compressor_and_sparse_attention(converter_mod
         assert isinstance(attention_quant, QuantV41SparseAttentionConfig) is enabled
 
 
+def _source_compressor_layer(spec, ratio):
+    return next(
+        i for i, layer in enumerate(spec.model.layers)
+        if layer.attention.compressor.is_source and layer.attention.compressor.compress_ratio == ratio
+    )
+
+
+def _build_cpu_compressor(config):
+    module = config.build()
+    module.init_states(buffer_device=torch.device("cpu"))
+    return module.to(dtype=torch.bfloat16)
+
+
+def _capture_compressor_encoding(monkeypatch, width):
+    captured = []
+
+    def encode(cache, rows, slots, **kwargs):
+        captured.append(rows.detach().clone())
+        assert kwargs["quant_group_size"] == 16
+        assert kwargs["quant_mode"] == "mxfp4_bf16"
+        cache[:, : width // 2] = 0x21
+        scales = torch.full((rows.shape[0], width // 16), 0.5, dtype=torch.bfloat16)
+        cache[:, width // 2 : width // 2 + 2 * (width // 16)] = scales.view(torch.uint8)
+
+    monkeypatch.setattr(torch.ops.custom, "kv_compress_epilog_v2", SimpleNamespace(default=encode), raising=False)
+    return captured
+
+
 @pytest.mark.parametrize("ratio", [1, 2], ids=["full-resolution", "compressed"])
 def test_converted_v41_compressor_quantizes_post_rope_and_preserves_gradients(converter_module, monkeypatch, ratio):
     from torchtitan_npu.config.configs import QuantizationExtensionConfig
     from torchtitan_npu.models.deepseek_v4_1 import model_registry
 
+    # The CPU oracle replaces the custom kernel below; no NPU extension is loaded.
+    monkeypatch.setitem(sys.modules, "custom_ops", ModuleType("custom_ops"))
     reference_spec = model_registry("deepseek_v4_1_debugmodel")
     converted = converter_module.apply_quantization_converter(
         model_registry("deepseek_v4_1_debugmodel"),
@@ -366,32 +389,14 @@ def test_converted_v41_compressor_quantizes_post_rope_and_preserves_gradients(co
         ),
         model_compile_enabled=False,
     )
-    layer_id = next(
-        i
-        for i, layer in enumerate(reference_spec.model.layers)
-        if layer.attention.compressor.is_source and layer.attention.compressor.compress_ratio == ratio
-    )
+    layer_id = _source_compressor_layer(reference_spec, ratio)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(17)
-        reference = reference_spec.model.layers[layer_id].attention.compressor.build()
-        reference.init_states(buffer_device=torch.device("cpu"))
-        reference.to(dtype=torch.bfloat16)
-        quantized = converted.model.layers[layer_id].attention.compressor.build()
-        quantized.init_states(buffer_device=torch.device("cpu"))
-        quantized.to(dtype=torch.bfloat16)
+        reference = _build_cpu_compressor(reference_spec.model.layers[layer_id].attention.compressor)
+        quantized = _build_cpu_compressor(converted.model.layers[layer_id].attention.compressor)
     quantized.load_state_dict(reference.state_dict())
-    captured = []
     d = reference_spec.model.layers[layer_id].attention.compressor.wkv.out_features
-
-    def encode(cache, rows, slots, **kwargs):
-        captured.append(rows.detach().clone())
-        assert kwargs["quant_group_size"] == 16
-        assert kwargs["quant_mode"] == "mxfp4_bf16"
-        cache[:, : d // 2] = 0x21
-        scales = torch.full((rows.shape[0], d // 16), 0.5, dtype=torch.bfloat16)
-        cache[:, d // 2 : d // 2 + 2 * (d // 16)] = scales.view(torch.uint8)
-
-    monkeypatch.setattr(torch.ops.custom.kv_compress_epilog_v2, "default", encode)
+    captured = _capture_compressor_encoding(monkeypatch, d)
     dim = reference_spec.model.dim
     x_ref = torch.linspace(-1, 1, 4 * dim, dtype=torch.bfloat16).reshape(1, 4, dim).requires_grad_()
     x_quant = x_ref.detach().clone().requires_grad_()

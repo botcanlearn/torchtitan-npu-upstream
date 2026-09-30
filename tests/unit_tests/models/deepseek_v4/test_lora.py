@@ -94,22 +94,15 @@ def test_converter_accepts_unquantized_linear_despite_class_name():
 
     config = _build_model_config()
     config.layers[0].attention.wq_a = derive(config.layers[0].attention.wq_a, UnquantizedLinear.Config)
-    converted = lora.DeepSeekV4LoRAConverter.Config(rank=2, rank_experts=2, target_modules=["attention.wq_a"]).build().convert(config)
+    converted = (
+        lora.DeepSeekV4LoRAConverter.Config(rank=2, rank_experts=2, target_modules=["attention.wq_a"])
+        .build()
+        .convert(config)
+    )
     projection = converted.layers[0].attention.wq_a.build()
     projection.init_states()
     inputs = torch.ones(2, 32)
     torch.testing.assert_close(projection(inputs), F.linear(inputs, projection.weight))
-
-
-def test_converter_rejects_upstream_quantization_config():
-    pytest.importorskip("torchao")
-    from torchtitan.components.quantization.float8 import Float8Linear
-    from torchtitan.config import derive
-
-    config = _build_model_config()
-    config.layers[0].attention.wq_a = derive(config.layers[0].attention.wq_a, Float8Linear.Config)
-    with pytest.raises(NotImplementedError, match="unquantized base"):
-        lora.DeepSeekV4LoRAConverter.Config().build().convert(config)
 
 
 def test_strict_matching_rejects_unmatched_targets():
@@ -142,7 +135,8 @@ def test_explicit_empty_targets_with_routed_experts_disabled_insert_no_adapters(
 @pytest.mark.parametrize("num_mtp_layers", [0, 1], ids=["without-mtp", "with-mtp"])
 def test_default_targets_follow_mtp_configuration(include_mtp, num_mtp_layers):
     specification = dsv4.model_registry(
-        "debugmodel", num_mtp_layers=num_mtp_layers,
+        "debugmodel",
+        num_mtp_layers=num_mtp_layers,
         converters=[lora.DeepSeekV4LoRAConverter.Config(rank=2, rank_experts=2, include_mtp=include_mtp)],
     )
     config = specification.model
@@ -158,6 +152,7 @@ def test_converter_freezes_base_without_example_wrapper(monkeypatch, parallelize
         for parameter in model.parameters():
             parameter.requires_grad_(True)
         return model
+
     monkeypatch.setattr(dsv4_parallelize, "parallelize_deepseekv3", parallelize)
     spec = dsv4.model_registry("debugmodel", converters=[lora.DeepSeekV4LoRAConverter.Config(rank=2, rank_experts=2)])
     with torch.device("meta"):
@@ -169,10 +164,13 @@ def test_converter_freezes_base_without_example_wrapper(monkeypatch, parallelize
     assert all(parameter.requires_grad == ("lora_" in name) for name, parameter in parameters.items())
 
 
-@pytest.mark.parametrize("factory,flavor", [
-    ("deepseek_v4_flash", "deepseek_v4_flash"),
-    ("deepseek_v4_debugmodel", "debugmodel"),
-])
+@pytest.mark.parametrize(
+    "factory,flavor",
+    [
+        ("deepseek_v4_flash", "deepseek_v4_flash"),
+        ("deepseek_v4_debugmodel", "debugmodel"),
+    ],
+)
 def test_standard_recipe_selects_lora_training_components(factory, flavor):
     from torchtitan_npu.models.deepseek_v4 import config_registry
     from torchtitan_npu.models.deepseek_v4.peft import DeepSeekV4PEFTCheckpointManager
@@ -195,7 +193,8 @@ def test_registry_model_forward_backward_freezes_base_and_differentiates_adapter
     # CPU UT bypasses distributed placement; EP/FSDP runs in the NPU integration case.
     monkeypatch.setattr(dsv4_parallelize, "parallelize_deepseekv3", lambda model, **kwargs: model)
     spec = dsv4.model_registry(
-        "debugmodel", converters=[lora.DeepSeekV4LoRAConverter.Config(rank=8, rank_experts=8)],
+        "debugmodel",
+        converters=[lora.DeepSeekV4LoRAConverter.Config(rank=8, rank_experts=8)],
     )
     with torch.device("cpu"):
         model = spec.model.build()
@@ -203,7 +202,9 @@ def test_registry_model_forward_backward_freezes_base_and_differentiates_adapter
     model = spec.parallelize_fn(model, **parallelize_kwargs)
     inputs = torch.arange(128).reshape(1, 128)
     inputs, _, kwargs = model.build_attention_masks(
-        inputs, inputs, {"positions": torch.arange(128).reshape(1, 128)},
+        inputs,
+        inputs,
+        {"positions": torch.arange(128).reshape(1, 128)},
     )
     output = model(inputs, **kwargs)
     assert torch.isfinite(output).all()
@@ -214,20 +215,54 @@ def test_registry_model_forward_backward_freezes_base_and_differentiates_adapter
     assert all(value.grad is None for name, value in model.named_parameters() if "lora_" not in name)
 
 
-def test_lora_recipe_rejects_quantization_enabled_after_recipe_selection():
-    from torchtitan_npu.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
-
-    config = deepseek_v4_debugmodel(converters=[lora.DeepSeekV4LoRAConverter.Config()])
-    config.extension.quantization.enable_quantized_training = True
-    with pytest.raises(NotImplementedError, match="unquantized base"):
-        config.model_spec.model.update_from_config(config=config)
-
-
 @pytest.mark.parametrize("use_lora", [False, True])
-def test_shared_parallelization_and_optimizer_hook_preserve_training_mode(monkeypatch, use_lora, parallelize_kwargs):
+@pytest.mark.parametrize("selective_ac", ["full", "selective", "custom"])
+def test_shared_parallelization_and_optimizer_hook_preserve_training_mode(
+    monkeypatch, use_lora, selective_ac, parallelize_kwargs
+):
     from unittest.mock import Mock
+    from torchtitan.distributed.activation_checkpoint import SelectiveAC
+    from torch.utils.checkpoint import DefaultDeviceType
 
-    monkeypatch.setattr(dsv4_parallelize, "parallelize_deepseekv3", lambda model, **kwargs: model)
+    monkeypatch.setattr(DefaultDeviceType, "get_device_type", lambda: "cpu")
+
+    class CustomSelectiveAC(SelectiveAC):
+        @dataclass(kw_only=True, slots=True)
+        class Config(SelectiveAC.Config):
+            custom_field: str = "preserved"
+
+    original_ac = parallelize_kwargs["ac_config"]
+    if selective_ac != "full":
+        cls = CustomSelectiveAC if selective_ac == "custom" else SelectiveAC
+        original_ac = cls.Config(preserve_rng_state=False)
+    parallelize_kwargs = {**parallelize_kwargs, "ac_config": original_ac}
+
+    def parallelize(model, **kwargs):
+        ac = kwargs["ac_config"]
+        assert ac is original_ac
+        if selective_ac != "full":
+            from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts
+            from functools import partial
+
+            q = torch.randn(1, 4, 2, 3, requires_grad=True)
+            k = torch.randn(1, 2, 3, requires_grad=True)
+            w = torch.randn(1, 4, 2, requires_grad=True)
+            mask = torch.ones(1, 1, 4, 2, dtype=torch.bool)
+            context = partial(create_selective_checkpoint_contexts, list(ac.build().get_save_ops()))
+            _, actual = checkpoint(
+                dsv4.compressor.Indexer.select, q, k, w, mask, 2, use_reentrant=False, context_fn=context
+            )
+            expected = (torch.einsum("bshd,btd->bsht", q, k).relu() * w.unsqueeze(-1)).sum(2)
+            torch.testing.assert_close(actual, expected)
+            for result, reference in zip(
+                torch.autograd.grad(actual.sum(), (q, k, w)),
+                torch.autograd.grad(expected.sum(), (q, k, w)),
+                strict=True,
+            ):
+                torch.testing.assert_close(result, reference)
+        return model
+
+    monkeypatch.setattr(dsv4_parallelize, "parallelize_deepseekv3", parallelize)
     register_hook = Mock()
     monkeypatch.setattr(dsv4, "register_moe_load_balancing_hook", register_hook)
     converters = [lora.DeepSeekV4LoRAConverter.Config(rank=2, rank_experts=2)] if use_lora else []

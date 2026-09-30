@@ -219,3 +219,21 @@ def test_peft_rejects_partially_unmapped_adapters(adapter):
     }
     with pytest.raises(ValueError, match="Unsupported.*attention.indexer.wq_b"):
         adapter.to_peft(tensors)
+
+
+@pytest.mark.parametrize("rank", [1, 3])
+def test_split_expert_b_exports_same_peft_weights_as_interleaved(adapter, rank):
+    prefix = "layers.0.moe.routed_experts.inner_experts."
+    gate = torch.arange(NUM_EXPERTS * 16 * rank).reshape(NUM_EXPERTS, 16, rank).float()
+    up = -gate - 1
+    legacy = {prefix + "w13_lora_b": torch.stack((gate, up), dim=2)}
+    split = {prefix + "w1_lora_b": gate, prefix + "w3_lora_b": up}
+
+    exported = adapter.to_peft(split)
+    expected = adapter.to_peft(legacy)
+
+    assert exported.keys() == expected.keys()
+    for key in expected:
+        torch.testing.assert_close(exported[key], expected[key], rtol=0, atol=0)
+    with pytest.raises(ValueError, match="both gate and up"):
+        adapter.to_peft({prefix + "w1_lora_b": gate})

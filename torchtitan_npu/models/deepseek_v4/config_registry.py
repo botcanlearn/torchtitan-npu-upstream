@@ -3,6 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import re
 from collections.abc import Callable
 from dataclasses import fields
 from importlib import import_module
@@ -48,10 +49,16 @@ from . import (
     memory_policy,  # noqa: F401
     model_registry,
 )
-from .lora import DeepSeekV4LoRAConverter
+from .lora import DEEPSEEK_V4_LORA_TARGETS, DeepSeekV4LoRAConverter
 from .model import DeepSeekV4Model, GraphTrainerDeepSeekV4Model
 from .mtp import MTPChunkedLossWrapper
 from .parallelize import parallelize_graph_trainer_deepseek_v4
+
+
+def _lora_muon_pattern(compute_sharding_by_fqn):
+    # AC/compile wrappers can insert prefixes before layer-local parameter names.
+    suffixes = {fqn.split(".", 2)[-1] for fqn in compute_sharding_by_fqn if "lora_" in fqn}
+    return "|".join(re.escape(suffix) for suffix in sorted(suffixes))
 
 
 def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
@@ -145,6 +152,14 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
             for projection in mtp_projections:
                 shardings[f"{prefix}.{projection}.weight"] = owned
             shardings[f"{prefix}.hc_head.hc_fn"] = owned
+        for base_key, layout in tuple(shardings.items()):
+            if base_key.endswith(".weight"):
+                owner = base_key.removesuffix(".weight")
+                if owner.removeprefix(f"{prefix}.") in DEEPSEEK_V4_LORA_TARGETS:
+                    shardings[f"{owner}.lora_a.weight"] = owned
+                    shardings[f"{owner}.lora_b.weight"] = layout
+        for projection in ("w13_lora_a", "w1_lora_b", "w3_lora_b", "w2_lora_a", "w2_lora_b"):
+            shardings[f"{prefix}.moe.routed_experts.inner_experts.{projection}"] = expert_sharding
         return shardings
 
     main_layer_shardings = tuple(
@@ -192,6 +207,7 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
     bucket_configs += bucket_configs_for_layers("mtp_layers", mtp_layer_shardings)
     # hc_head is global rather than layer-scoped, so it needs its own bucket.
     bucket_configs += (BucketConfig(name="hc_head", patterns=("hc_head.hc_fn",)),)
+    lora_pattern = _lora_muon_pattern(compute_sharding_by_fqn)
     muon_pattern = (
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_projections)})\.weight|"
@@ -203,8 +219,7 @@ def _dsv4_muon_profile(model_spec: ModelSpec) -> MuonOptimizerProfile:
         r"moe\.router\.gate\.weight|"
         rf"(?:{'|'.join(hc_pre_modules)})\.hc_fn|"
         rf"(?:{'|'.join(mtp_projections)})\.weight|"
-        r"hc_head\.hc_fn"
-        r")$"
+        r"hc_head\.hc_fn" + (f"|{lora_pattern}" if lora_pattern else "") + r")$"
     )
     return MuonOptimizerProfile(
         muon_pattern=muon_pattern,

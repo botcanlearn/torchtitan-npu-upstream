@@ -127,6 +127,25 @@ runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到�
 调度器本身不设独立单元测试：其正确性（设备不重叠、失败/超时释放、并发打包、
 golden loss 等价）由集成测试自身的 canary 运行直接验证。
 
+### LoRA training and resume
+
+The default `models` suite includes `dsv4_lora_ep2_fsdp2` for training and PEFT export. The distributed DCP resume case, `dsv4_lora_resume_ep2_fsdp2`, runs separately in `deepseek_v4_checkpoint` (two NPUs each). The resume case compares optimizer state exactly before the first resumed update and checks resumed loss/gradient norm. The block-FP8 case requires `torchao==0.17.0` and the optional `experiments/torchao-npu` package (install with `pip install ./experiments/torchao-npu` from the repository root); it runs real forward/backward/optimizer updates with a quantized frozen base and trainable floating-point adapters. Quantization unit tests follow the repository convention and skip when the optional package is unavailable; explicitly running this NPU case requires the package.
+
+On Ascend 950 devices with the CANN 9.2.0 release runtime (2026-09-09 packages) and block-FP8 support, run the registered quantized case through the same runner:
+
+```bash
+python -m tests.integration_tests.run_tests ./test_reports/lora-fp8 \
+  --test_suite deepseek_v4_quantized --test_name dsv4_lora_block_fp8_ep2_fsdp2 --ngpu 2
+```
+
+The A3 CI `models` suite runs floating-point LoRA training and PEFT export. Distributed DCP resume stays in the dedicated checkpoint suite because the A3 CI runtime fails to load `libscatter_aicpu_kernel.so` during checkpoint planning. Run resume on a runtime that supports this distributed checkpoint path:
+
+```bash
+python -m tests.integration_tests.run_tests ./test_reports/lora-resume \
+  --test_suite deepseek_v4_checkpoint --test_name dsv4_lora_resume_ep2_fsdp2 --ngpu 2
+```
+
+The quantized suite requires the block-FP8 hardware/runtime.
 
 ## Engram HF 专项验证（手动）
 

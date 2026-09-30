@@ -277,7 +277,7 @@ class Indexer(Module):
             index_scores: ``[B, L, S // ratio]`` masked indexer scores.
         """
         index_score = torch.einsum("bshd,btd->bsht", idx_q.float(), idx_k.float())
-        index_score = index_score.relu_() * idx_w.float().unsqueeze(-1)
+        index_score = index_score.relu() * idx_w.float().unsqueeze(-1)
         index_score = index_score.sum(dim=2)
 
         k = min(topk, idx_k.shape[1])

@@ -117,6 +117,12 @@ class DeepSeekV4PEFTCheckpointManager(NPUCheckpointManager):
             state_dict = {key: value for key, value in state_dict.items() if "lora_" not in key}
         elif not from_hf:
             saved_keys = dcp.FileSystemReader(checkpoint_id).read_metadata().state_dict_metadata.keys()
+            if any(key.endswith(".w13_lora_b") for key in saved_keys):
+                raise ValueError(
+                    "Cannot resume an interleaved w13_lora_b DCP with split Muon parameters. "
+                    "Export/merge the adapter with the checkpoint's original version and start a new run; "
+                    "the former AdamW state cannot be restored as Muon momentum."
+                )
             model_state = self.states[MODEL].state_dict()
             model_buffer_keys = self._model_buffer_keys()
             has_base = all(

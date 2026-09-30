@@ -48,6 +48,16 @@ def _make_checkpoint_fixture(tmp_path, save_training_state, checkpoint_format, w
 
     def build_model():
         model = Model()
+        if wrapper_scope == "block-fp8":
+            pytest.importorskip("torchao_npu")
+            from interfaces.torchao_converter import _block_fp8_param_swap
+            from torchao_npu.wrapper_tensors.block_mx_wrapper_tensor import BlockMXTrainingWeightWrapperTensor
+
+            policy = _block_fp8_param_swap()
+            model.base = torch.nn.Parameter(
+                BlockMXTrainingWeightWrapperTensor(model.base.detach(), policy.weight_config, policy.activation_config),
+                requires_grad=False,
+            )
         return checkpoint_wrapper(model) if wrapper_scope == "model" else model
 
     class StepState:
@@ -83,6 +93,15 @@ def _make_checkpoint_fixture(tmp_path, save_training_state, checkpoint_format, w
     return build_model, manager
 
 
+def _floating_base_state(model):
+    # Pretrained base weights are plain tensors, even when training uses wrappers.
+    return {
+        key: value.to_tensor() if hasattr(value, "to_tensor") else value
+        for key, value in model.state_dict().items()
+        if "lora_" not in key
+    }
+
+
 def _check_periodic_dcp_round_trip(
     tmp_path, save_training_state, checkpoint_format, wrapper_scope, trainable_base=False
 ):
@@ -92,7 +111,7 @@ def _check_periodic_dcp_round_trip(
     original = build_model()
     source = manager(original, 9)
     dcp.save(
-        {key: value for key, value in original.state_dict().items() if "lora_" not in key},
+        _floating_base_state(original),
         checkpoint_id=source.initial_load_path,
     )
     with torch.no_grad():
@@ -124,17 +143,30 @@ def _check_periodic_dcp_round_trip(
         for parameter in restored.parameters():
             parameter.zero_()
     target = manager(restored, 0)
-    initial_adapters = {key: value.clone() for key, value in restored.state_dict().items() if "lora_" in key}
-    target.dcp_load(restored.state_dict(), target.initial_load_path)
-    for key, value in initial_adapters.items():
-        torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
-    target.dcp_load(target._flattened_model_states_sd(target.states), checkpoint)
+    _load_base_then_adapter(target, restored, checkpoint)
+    assert type(restored.get_parameter("base")) is type(original.get_parameter("base"))
 
     for key, tensor in original.state_dict().items():
         expected = (
             torch.zeros_like(tensor) if key == "moe.expert_bias_E" and checkpoint_format == "legacy_adapter" else tensor
         )
         assert torch.equal(expected, restored.state_dict()[key]), key
+    _check_restored_training_state((original, restored), (source, target), save_training_state, checkpoint_format)
+
+
+def _load_base_then_adapter(target, restored, checkpoint):
+    initial_adapters = {key: value.clone() for key, value in restored.state_dict().items() if "lora_" in key}
+    target.dcp_load(restored.state_dict(), target.initial_load_path)
+    for key, value in initial_adapters.items():
+        torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
+    with torch.no_grad():
+        restored.get_parameter("base").zero_()
+    target.dcp_load(target._flattened_model_states_sd(target.states), checkpoint)
+
+
+def _check_restored_training_state(models, managers, save_training_state, checkpoint_format):
+    original, restored = models
+    source, target = managers
     restores_training_state = save_training_state or checkpoint_format == "full_model"
     assert target.states["train_state"].step == (9 if restores_training_state else 0)
     restored_optimizer = target.states["optimizer"].state_dict()["state"]
@@ -158,6 +190,7 @@ def _check_periodic_dcp_round_trip(
     [
         (False, "adapter_buffers", "plain"),
         (True, "adapter_buffers", "plain"),
+        (True, "adapter_buffers", "block-fp8"),
         (False, "legacy_adapter", "plain"),
         (True, "legacy_adapter", "plain"),
         (False, "full_model", "plain"),
@@ -382,3 +415,13 @@ def test_adapter_state_selection_keeps_trainable_state_and_routing_buffers():
         state, {"optimizer"}, model_buffer_keys={"expert_bias_E"}, model_trainable_keys={"unfrozen"},
     )
     assert set(selected) == {"lora_a", "expert_bias_E", "optimizer", "unfrozen"}
+
+
+def test_resume_rejects_legacy_interleaved_expert_optimizer(tmp_path):
+    checkpoint = tmp_path / "legacy"
+    dcp.save({"layers.0.moe.routed_experts.inner_experts.w13_lora_b": torch.ones(2, 3, 2, 2)}, checkpoint_id=checkpoint)
+    manager = object.__new__(peft.DeepSeekV4PEFTCheckpointManager)
+    manager.initial_load_path = None
+
+    with pytest.raises(ValueError, match="former AdamW state"):
+        manager.dcp_load({}, str(checkpoint))

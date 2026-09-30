@@ -26,6 +26,7 @@ from tests.integration_tests import OverrideDefinitions  # noqa: TC001
 from tests.integration_tests.deepseek_v3_2 import build_deepseek_v3_2_test_list
 from tests.integration_tests.deepseek_v4 import (
     build_deepseek_v4_checkpoint_resume_test_list,
+    build_deepseek_v4_quantized_test_list,
     build_deepseek_v4_test_list,
 )
 from tests.integration_tests.ema import assert_ema_checkpoint_written, build_ema_test_list
@@ -62,6 +63,7 @@ _TEST_SUITES_FUNCTION = {
     "deepseek_v3_2": build_deepseek_v3_2_test_list,
     "deepseek_v4": build_deepseek_v4_test_list,
     "deepseek_v4_checkpoint": build_deepseek_v4_checkpoint_resume_test_list,
+    "deepseek_v4_quantized": build_deepseek_v4_quantized_test_list,
     "ema": build_ema_test_list,
     "deepseek_v4_1_engram_hf": build_engram_hf_test_list,
     "qwen3_5": build_qwen3_5_test_list,

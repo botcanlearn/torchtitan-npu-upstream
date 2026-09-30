@@ -30,6 +30,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 
 ---
 - [Sep. 2026]: 🚀 **基于torchao_npu的DeepSeek-V4模型HiFloat8（HiF8）current-tensor scaling训练支持**。
+- [Sep. 2026]: 🚀 **[DeepSeek-V4 LoRA 微调支持](docs/feature_guides/deepseek_v4_lora.md)**。
 - [Aug. 2026]: 🚀 **master分支完成override插件机制解耦重构。**
 - [Aug. 2026]: 🚀 **基于torchao_npu的DeepSeek-V4模型原生FP8训练/QAT训练支持**。
 - [May. 2026]: 🚀 **[DeepSeek-V4-Pro 模型续训练支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseekv4/README.md)**：基于纯FSDP + 大EP极简切分，使能AutoFuse特性，达成训练入图。
