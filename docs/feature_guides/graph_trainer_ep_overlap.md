@@ -246,6 +246,8 @@ bash examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3_graphtrainer.sh \
 
 上游 `validate_ep_overlap_config` 约束：`chunk_dim=seq` 仅在 `module_fqn=layers.*.moe` 时可用——序列切分要求完整 K/V 上下文，因此只对 MoE block 根成立。
 
+本仓 `ep_chunk_concretization` 补丁对 `strategy=graph` 新增运行时约束：所选 `batch` 或 `seq` 输入维长度必须不小于 2 且为偶数。Graph chunking 会将该维固定拆成两个等长 chunk；若长度为 1 或奇数，trace 输入准备阶段会直接抛出 `ValueError`，避免生成不等长 chunk 后再进入符号 shape 推导。`strategy=eager` 不经过该输入标记流程，不受此项补丁校验影响。
+
 若需把 EP overlap 固化为某个配置的默认值，在 `config_registry.py` 的对应工厂中对 `config.compile.ep_overlap` 赋 `EpOverlapConfig(...)`。
 
 ## DSV4 整网实跑验证（2026-09-16）
