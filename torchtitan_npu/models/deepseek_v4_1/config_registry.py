@@ -7,11 +7,13 @@ import copy
 from dataclasses import dataclass
 from typing import cast
 
+import torch
 from torch.distributed.tensor import Shard
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import ParamGroupConfig, default_adamw
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import derive
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -29,6 +31,7 @@ from torchtitan_npu.extensions.trainer import TrainerEx
 from torchtitan_npu.models.common.muon import make_owned_layout
 
 from . import model_registry
+from .indexer import Selector
 from .model import DeepSeekV41Model, DeepSeekV41MultimodalModel, compression_alignment
 
 
@@ -71,6 +74,40 @@ class DeepSeekV41Trainer(GradientClippingTrainer, TrainerEx):
                     group for group in self.optimizer.param_groups if not isinstance(group, EngramTableParamGroupConfig)
                 ]
             TrainerEx.Config.__post_init__(self)
+
+    def __init__(self, config):
+        super().__init__(config)
+        self._indexer_selectors = [
+            module
+            for part in self.model_parts
+            for module in part.modules()
+            if isinstance(module, Selector) and module.consumes_indexer_teacher
+        ]
+
+    def train_step(self, data_iterator):
+        if not self._indexer_selectors:
+            return super().train_step(data_iterator)
+        self._num_step_queries = 0
+        self._indexer_denominator_ready = False
+
+        def counted_batches():
+            for inputs, labels in data_iterator:
+                # Count before CP sharding; LI also trains unsupervised input positions.
+                self._num_step_queries += inputs["input"].numel()
+                yield inputs, labels
+
+        return super().train_step(counted_batches())
+
+    def forward_backward_step(self, *args, **kwargs):
+        if self._indexer_selectors and not self._indexer_denominator_ready:
+            # The parent prefetches every accumulation microbatch before the first forward.
+            denominator = torch.tensor(self._num_step_queries, device=self.device, dtype=torch.float32)
+            if self.parallel_dims.dp_enabled:
+                denominator = dist_utils.dist_sum_tensor(denominator, self.parallel_dims.get_mesh("batch"))
+            for selector in self._indexer_selectors:
+                selector.num_global_queries = denominator
+            self._indexer_denominator_ready = True
+        return super().forward_backward_step(*args, **kwargs)
 
     def clip_grad_norm(self, parameters, max_norm, **kwargs):
         if isinstance(self.optimizers, HostSparseOptimizersContainer):

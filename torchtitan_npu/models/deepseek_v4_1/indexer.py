@@ -55,7 +55,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -143,6 +143,7 @@ class Selector(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        consumes_indexer_teacher: ClassVar[bool] = False
         mode: IndexerMode
         compress_ratio: int
         num_index_heads: int
@@ -158,6 +159,8 @@ class Selector(Module):
 
     def __init__(self, config: Config):
         super().__init__()
+        self.consumes_indexer_teacher = config.consumes_indexer_teacher
+        self.num_global_queries: torch.Tensor | None = None
         self.mode = config.mode
         self.compress_ratio = config.compress_ratio
         self.num_index_heads = config.num_index_heads

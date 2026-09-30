@@ -177,6 +177,7 @@ class _LightningIndexerTND(torch.autograd.Function):
         is_source,
         legacy,
         candidate,
+        num_global_queries,
     ):
         # These arrive with the batch axis already squeezed off by the caller: an
         # autograd.Function's backward must return one gradient per input *in the shape it
@@ -322,7 +323,7 @@ class _LightningIndexerTND(torch.autograd.Function):
         # The shape is the selection's own, ``[T, 1, K]`` -- SLIKG requires the teacher to
         # match ``sparse_indices`` exactly.
         topk_scores = topk_indices.new_empty(topk_indices.shape, dtype=torch.float32, requires_grad=True)
-        ctx.save_for_backward(idx_q, idx_k, idx_w, topk_indices)
+        ctx.save_for_backward(idx_q, idx_k, idx_w, topk_indices, num_global_queries)
         ctx.topk, ctx.ratio = topk, ratio
         # The mask is a dataclass, so ``save_for_backward`` cannot take it; it is a
         # context attribute instead.  That is not extra retention: it holds the same
@@ -353,23 +354,13 @@ class _LightningIndexerTND(torch.autograd.Function):
             # No teacher reached this edge, so no operand has a gradient either.  The count
             # is the same one the labelled tail below enumerates: one entry per forward
             # input, in the same order.
-            return (None,) * 11
-        # Nothing but the operands is saved.  The options and the geometry are read back
-        # off ``ctx.attention_masks`` and the saved tensors -- the same source the forward
-        # used, which is what keeps the two kernel calls from drifting apart -- and the
-        # SLIKG metadata is built from them here.
-        idx_q, idx_k, idx_w, topk_indices = ctx.saved_tensors
-        # The KL objective is a mean over query tokens, and the trainer's
-        # ``global_valid_tokens`` division cannot reach it: the teacher never passes
-        # through the loss function, it is injected straight into SLIKG on this edge.  So
-        # the token normalisation is applied here, to the only quantity that trains the
-        # indexer.
-        #
-        # ``idx_q`` is the TND query and its leading axis is the packed token count, so
-        # this is the row's ``seqlen``.  Scaling ``p`` is exactly scaling ``dI``: SLIKG's
-        # ``dI = Z * Y - p`` is affine in ``p``, so ``dI(p/S) = dI(p)/S`` and the kernel's
-        # own ``dq``/``dk``/``dw`` come out normalised with no rescaling afterwards.
-        attn_softmax_l1_norm = attn_softmax_l1_norm / idx_k.shape[0]
+            return (None,) * 12
+        idx_q, idx_k, idx_w, topk_indices, num_global_queries = ctx.saved_tensors
+        if num_global_queries is None:
+            raise RuntimeError("Set Selector.num_global_queries before training the indexer")
+        # SMLAG injects raw teacher weights outside the main loss's normalization.
+        # Scaling p scales SLIKG's Z * softmax(I) - p by the same factor.
+        attn_softmax_l1_norm = attn_softmax_l1_norm / num_global_queries
         options = _kernel_options(ctx.attention_masks, ctx.ratio)
         slig_metadata = torch.ops.cann_ops_transformer.sparse_lightning_indexer_kl_loss_grad_metadata(
             **_kernel_geometry(idx_q.shape[1], idx_q.shape[2], ctx.topk),
@@ -389,7 +380,7 @@ class _LightningIndexerTND(torch.autograd.Function):
         #
         # One gradient per forward input, in order: (idx_q, idx_k, idx_w, topk, ratio,
         # attention_masks, candidate_topk_blocks, candidate_block_size, is_source, legacy,
-        # candidate).  The count is spelled out rather than padded because a padded count
+        # candidate, num_global_queries).  The count is spelled out rather than padded because a padded count
         # drifts silently in one direction only -- PyTorch ignores extra trailing entries
         # and raises only when the list is short -- so the mismatch would surface as a
         # confusing "expected N, got M" from the engine at some later refactor instead of
@@ -406,6 +397,7 @@ class _LightningIndexerTND(torch.autograd.Function):
             None,  # is_source
             None,  # legacy
             None,  # candidate
+            None,  # num_global_queries
         )
 
 
@@ -487,6 +479,7 @@ class AscSelector(Selector):
             is_source,
             self.legacy,
             candidates_BL1C,
+            self.num_global_queries,
         )
         # Two layout translations and nothing else: ``_LightningIndexerTND`` already
         # emitted the selection sorted, in the kernels' ``[T, 1, K]`` layout, and the model

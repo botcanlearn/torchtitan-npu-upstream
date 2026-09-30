@@ -398,6 +398,9 @@ def _tiny_model(monkeypatch, *, fused: bool, pools: bool = True, legacy: bool = 
             )
     with torch.random.fork_rng(devices=[]):
         model = build_cpu_model(config)
+    for module in model.modules():
+        if isinstance(module, AscSelector):
+            module.num_global_queries = torch.tensor(float(_TOKENS.numel()))
     return model
 
 
@@ -471,28 +474,9 @@ def test_fused_selection_matches_the_reference_selector(monkeypatch):
         assert fused_t == eager_t, t
 
 
-def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
-    """The indexer's objective is a mean over tokens, and the loss cannot apply it.
-
-    The teacher is injected straight into SLIKG on ``topk_scores``' gradient, so the
-    trainer's ``global_valid_tokens`` division never touches it; the port divides by the
-    row's token count itself -- the query's TND leading axis, i.e. the packed ``seqlen``.
-
-    One index source owns one selection and drives one SLIKG call, and the teacher that
-    layer writes is its own ``p`` divided by the token count.  Which sources those are comes
-    from the layer table rather than from the run, and the run is checked against it.  Each
-    teacher must then be an integer multiple of ``constant / seqlen``, and its multiplier bounded by
-    the layers that emitted a teacher at all -- a bound the run measures for itself, so it does not
-    encode how the layer table splits contributions across sources.  The constant is made larger
-    than the token count, so a teacher that never got divided exceeds that bound outright.
-
-    The ``-1`` padding slots are the exception, and must be read around here: SMLAG leaves
-    them non-zero (the kernel computes a marginal for a slot the selection never reached),
-    so the port zeroes them on the way out -- SLIKG's ``ReduceSumVf`` sums every slot, and
-    only both sides agreeing on the zero keeps a padded slot out of ``dI = Z * Y - p``.
-    A padded slot therefore says nothing about the division, and the slots that do are the
-    unpadded ones.
-    """
+@pytest.mark.parametrize("num_global_queries", [128, 512], ids=["one-row", "four-rows"])
+def test_teacher_uses_global_query_count(monkeypatch, num_global_queries):
+    """All compression ratios share the step denominator; invalid candidates stay zero."""
     seen = {"calls": 0, "teacher": [], "padding": [], "tokens": [], "emitters": 0}
     constant = 1024.0
 
@@ -534,6 +518,9 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
 
     monkeypatch.setattr(torch.ops.cann_ops_transformer, "sparse_flash_mla_grad", fake_smlag)
     model = _tiny_model(monkeypatch, fused=True)
+    for module in model.modules():
+        if isinstance(module, AscSelector):
+            module.num_global_queries = torch.tensor(float(num_global_queries))
     for parameter in model.parameters():
         parameter.data = parameter.data.to(torch.bfloat16)
     with torch.autocast("cpu", dtype=torch.bfloat16):
@@ -551,7 +538,7 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
     for teacher, padding in zip(seen["teacher"], seen["padding"], strict=True):
         tokens = seen["tokens"][0]
         assert tokens == _TOKENS.shape[1], (tokens, _TOKENS.shape[1])
-        assert constant > tokens, "the expected value below only bites while the divider is smaller"
+        assert constant > num_global_queries
         # The ``-1`` slots are SMLAG's junk zeroed out on the way here; the unpadded ones
         # are what the division acts on.
         torch.testing.assert_close(
@@ -561,16 +548,10 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
             atol=0,
         )
         value = teacher.masked_select(~padding).max().item()
-        # SLIKG's teacher is ``constant`` scaled by the layer's own weight, which cancels:
-        # what is left is an integer multiple of ``constant / seqlen``, here 1024/128 = 8,
-        # so the multiplier is 4 or 6.  An undivided teacher would be 512 times larger,
-        # well outside anything the tables allow.  Note what this does *not* catch: the
-        # frame has a single length, so a divisor that was uniformly wrong by an integer
-        # factor would still be an integer multiple and still fit the bound.  Only a second
-        # packed length could tell ``seqlen`` from a wrong factor of it.
-        contributors = value * tokens / constant
+        # Shared index sources accumulate one normalized teacher per contributing layer.
+        contributors = value * num_global_queries / constant
         assert abs(contributors - round(contributors)) < 1e-6, (
-            f"the teacher is not an integer multiple of constant/seqlen ({constant}/{tokens}): got {value}"
+            f"teacher is not a multiple of constant/num_global_queries ({constant}/{num_global_queries}): {value}"
         )
         # No source can carry more contributions than there are layers emitting a teacher, and the
         # split across sources is the layer table's business -- a per-call count of SLIKG calls, or
@@ -579,7 +560,7 @@ def test_the_teacher_reaching_slikg_is_normalised_by_seqlen(monkeypatch):
             f"the teacher implies {round(contributors)} contributors but only {seen['emitters']} "
             f"layers emitted one, so the seqlen division ({tokens}) is missing"
         )
-        expected = torch.full_like(teacher, constant * round(contributors) / tokens).masked_fill(padding, 0.0)
+        expected = torch.full_like(teacher, constant * round(contributors) / num_global_queries).masked_fill(padding, 0.0)
         torch.testing.assert_close(teacher, expected)
 
 
@@ -1121,3 +1102,37 @@ def test_the_legacy_switch_routes_every_source_to_the_unquantized_kernel(monkeyp
     sources = _teacher_sources(registry.V41_FULL_INDEX_SOURCE_LAYERS)
     assert seen["legacy"] == len(sources), (seen, sources)
     assert seen["qli"] == 0 and seen["qsli"] == 0, seen
+
+
+def test_global_query_scaling_matches_explicit_distillation_gradient(monkeypatch):
+    selector = _tiny_model(monkeypatch, fused=True, pools=False).layers["2"].attention.indexer.selector
+    generator = torch.Generator().manual_seed(42)
+    q = torch.rand(1, 8, selector.num_index_heads, selector.index_head_dim, generator=generator, requires_grad=True)
+    k = torch.rand(1, 4, selector.index_head_dim, generator=generator, requires_grad=True)
+    w = torch.rand(1, 8, selector.num_index_heads, generator=generator, requires_grad=True)
+    selector.num_global_queries = torch.tensor(32.0)
+    indices, scores, _ = selector(q, k, w, _metadata([0, 8], compress_ratios=(2,)), candidates_BL1C=None)
+    teacher = (indices >= 0).float() * 0.25
+    # A later forward's denominator must not change this graph's backward.
+    selector.num_global_queries = torch.tensor(64.0)
+    scores.backward(teacher)
+
+    qr, kr, wr = [x.detach().clone().requires_grad_() for x in (q, k, w)]
+    selected = kr.squeeze(0)[indices.squeeze(0).clamp_min(0)].unsqueeze(0)
+    logits = (torch.einsum("blhd,blkd->blhk", qr, selected).relu() * wr.unsqueeze(-1)).sum(dim=2)
+    logits = logits.masked_fill(indices < 0, -1e9)
+    loss = -(teacher * logits.log_softmax(dim=-1)).sum() / 32
+    expected = torch.autograd.grad(loss, (qr, kr, wr))
+    for actual, reference in zip((q.grad, k.grad, w.grad), expected, strict=True):
+        torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-5)
+
+
+def test_indexer_backward_requires_global_query_count(monkeypatch):
+    selector = _tiny_model(monkeypatch, fused=True, pools=False).layers["2"].attention.indexer.selector
+    selector.num_global_queries = None
+    q = torch.ones(1, 8, selector.num_index_heads, selector.index_head_dim, requires_grad=True)
+    k = torch.ones(1, 4, selector.index_head_dim, requires_grad=True)
+    w = torch.ones(1, 8, selector.num_index_heads, requires_grad=True)
+    _, scores, _ = selector(q, k, w, _metadata([0, 8], compress_ratios=(2,)), candidates_BL1C=None)
+    with pytest.raises(RuntimeError, match="Set Selector.num_global_queries"):
+        scores.backward(torch.ones_like(scores))
