@@ -29,6 +29,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 # 最新消息
 
 ---
+- [Sep. 2026]: 🚀 **DeepSeek-V4.1-Flash 模型 1M 长序列训练支持**。
 - [Sep. 2026]: 🚀 **[DeepSeek-V4.1-Flash 模型CPT/SFT支持](https://gitcode.com/cann/cann-recipes-train/blob/master/llm_pretrain/deepseek_v4_1/README.md)**：基于 TorchTitan-NPU + TorchAO-NPU，在 **Ascend950 64 卡**集群完成全参模型低精度训练复现。
 - [Sep. 2026]: 🚀 **基于torchao_npu的DeepSeek-V4模型HiFloat8（HiF8）current-tensor scaling训练支持**。
 - [Sep. 2026]: 🚀 **[DeepSeek-V4 LoRA 微调支持](docs/feature_guides/deepseek_v4_lora.md)**。
