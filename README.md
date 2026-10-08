@@ -48,7 +48,7 @@ SIG 例会：[sig-framework-adapter](https://meeting.osinfra.cn/cann?sig=sig-fra
 
 ---
 
-当前季度的规划见 `torchtitan-npu` [Roadmap](https://gitcode.com/cann/torchtitan-npu/issues/68)。欢迎访问。
+当前季度的规划见 `torchtitan-npu` [Roadmap](https://gitcode.com/cann/torchtitan-npu/issues/133)，欢迎访问。
 
 # 安装
 
@@ -99,7 +99,7 @@ pip install -e .
       <td>✅</td>
     </tr>
     <tr>
-      <td><a href="docs/MTP.md">MTP</a></td>
+      <td><a href="docs/feature_guides/mtp.md">MTP</a></td>
       <td>✅</td>
       <td>✅</td>
     </tr>
