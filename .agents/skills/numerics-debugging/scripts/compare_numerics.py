@@ -252,6 +252,8 @@ def _rel_diff(a_str: str, b_str: str) -> float | None:
     # and breaks the downstream intensity gradient.
     if math.isnan(a) or math.isnan(b):
         return None
+    if math.isinf(a) or math.isinf(b):
+        return 0.0 if a == b else 1.0
     denom = max(abs(a), abs(b), 1e-30)
     return abs(a - b) / denom
 
