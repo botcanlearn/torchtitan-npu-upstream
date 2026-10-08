@@ -104,7 +104,9 @@ python -m tests.integration_tests.run_tests \
 Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、TensorBoard 与
 `exit_code.txt` 仅在 `/mnt/share/ci_tests/<北京时间>_run-<run-id>_attempt-<n>/`
 保存。GitHub 仅收到 PASS/FAIL、退出码和末尾 20 行精简日志，调度机记录
-`upload-metrics.json`。
+ `upload-metrics.json`。如果训练因超时或异常终止、Runner 的
+`run.log` 未刷新，执行机改从 Rank 0 的 `structured_logs` 提取最后 20
+条事件生成 `tail_20.log`，确保失败的 Actions 日志包含实际训练上下文。
 
 为验证 CI 触发、执行与回传通路，**该 Actions 固定 `COMPILE_ENABLE=0`
 (Eager, 5 steps)**。原 Examples Shell 与独立 Runner 默认仍为

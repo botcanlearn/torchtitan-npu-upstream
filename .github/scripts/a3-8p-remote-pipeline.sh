@@ -52,8 +52,11 @@ echo "RESULT_DIR: $dest"
 echo "RESULT_SHA: $sha"
 echo "RESULT_EXIT_CODE: $rc"
 echo "RESULT_FULL_LOG_BYTES: $(stat -c %s "$dest/run.log")"
+# Normalize on the execution host; a terminated Python runner may leave
+# run.log empty, but rank-0 structured logs are still available.
+python3 .github/scripts/a3-8p-log-tail.py "$dest" >"$dest/tail_20.log" 2>"$dest/tail_error.log" ||     printf 'Log-tail extraction failed; check execution-host tail_error.log\n' >"$dest/tail_20.log"
 echo "RESULT_LAST_20_LINES_BEGIN"
-tail -n 20 "$dest/run.log" | cut -c 1-180
+cat "$dest/tail_20.log"
 echo "RESULT_LAST_20_LINES_END"
 exit "$rc"
 REMOTE

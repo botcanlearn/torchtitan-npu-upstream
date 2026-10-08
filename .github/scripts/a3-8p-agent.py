@@ -158,13 +158,22 @@ def task_log_dir(run):
 
 def extract_last_20(path):
     # The dispatcher only receives the short SSH result, never full training logs.
-    body = path.read_text(encoding="utf-8", errors="replace")
-    head = "RESULT_LAST_20_LINES_BEGIN\n"
-    end = "\nRESULT_LAST_20_LINES_END"
-    if head not in body or end not in body:
-        return tail_lines(path)
-    lines = body.split(head, 1)[1].split(end, 1)[0].splitlines()
-    return [line[:180] for line in lines[-20:]]
+    # Locate exact marker lines, even when the remote source has no output.
+    # Splitting on "\nRESULT_LAST_20_LINES_END" used to include the END marker
+    # as a fake log line if the source was empty.
+    inside = False
+    lines = collections.deque(maxlen=20)
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for raw in stream:
+            line = raw.rstrip("\r\n")
+            if line == "RESULT_LAST_20_LINES_BEGIN":
+                inside = True
+                lines.clear()
+            elif line == "RESULT_LAST_20_LINES_END" and inside:
+                return list(lines) or ["No remote log lines returned"]
+            elif inside:
+                lines.append(line[:180])
+    return tail_lines(path)
 
 
 def execute(run):
