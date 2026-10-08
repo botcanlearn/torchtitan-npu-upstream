@@ -79,24 +79,37 @@ def git_token():
 
 
 def fetch_jobs(gh):
-    data, sent, _ = gh.request(
-        "GET",
-        f"/actions/workflows/{WORKFLOW}/runs?event=workflow_dispatch&status=in_progress&per_page=30",
-    )
     jobs = []
-    for run in data.get("workflow_runs", []):
-        if (
-            run.get("name") == "A3-8p-CI"
-            and run.get("event") == "workflow_dispatch"
-            and run.get("status") == "in_progress"
-            and run.get("head_branch") in ("master", "test/a3-8p-deepseek-v4-example-e2e")
-            and run.get("actor", {}).get("login") == OWNER
-            and run.get("path") == ".github/workflows/a3-8p-ci.yml"
-            and isinstance(run.get("id"), int)
-            and re.fullmatch("[0-9a-f]{40}", run.get("head_sha", ""))
-        ):
+    sent_total = 0
+    for event in ("workflow_dispatch", "pull_request"):
+        data, sent, _ = gh.request(
+            "GET",
+            f"/actions/workflows/{WORKFLOW}/runs?event={event}&status=in_progress&per_page=30",
+        )
+        sent_total += sent
+        for run in data.get("workflow_runs", []):
+            if not (
+                run.get("name") == "A3-8p-CI"
+                and run.get("event") == event
+                and run.get("status") == "in_progress"
+                and run.get("head_branch") in ("master", "test/a3-8p-deepseek-v4-example-e2e")
+                and run.get("actor", {}).get("login") == OWNER
+                and run.get("path") == ".github/workflows/a3-8p-ci.yml"
+                and isinstance(run.get("id"), int)
+                and re.fullmatch("[0-9a-f]{40}", run.get("head_sha", ""))
+            ):
+                continue
+            if event == "pull_request":
+                prs = run.get("pull_requests") or []
+                if not any(
+                    pr.get("number") == 26
+                    and pr.get("base", {}).get("ref") == "master"
+                    and pr.get("head", {}).get("repo", {}).get("full_name") == REPO
+                    for pr in prs
+                ):
+                    continue
             jobs.append(run)
-    return jobs, sent
+    return jobs, sent_total
 
 
 def read_state():
@@ -142,6 +155,18 @@ def task_log_dir(run):
     return LOG_DIR / "runs" / f"{stamp}_run-{run_id}_attempt-{attempt}"
 
 
+
+def extract_last_20(path):
+    # The dispatcher only receives the short SSH result, never full training logs.
+    body = path.read_text(encoding="utf-8", errors="replace")
+    head = "RESULT_LAST_20_LINES_BEGIN\n"
+    end = "\nRESULT_LAST_20_LINES_END"
+    if head not in body or end not in body:
+        return tail_lines(path)
+    lines = body.split(head, 1)[1].split(end, 1)[0].splitlines()
+    return [line[:180] for line in lines[-20:]]
+
+
 def execute(run):
     key = f"{run['id']}:{run.get('run_attempt', 1)}"
     path = task_log_dir(run) / "pipeline.log"
@@ -163,7 +188,7 @@ def execute(run):
         "pipeline": "dsv4-flash-8p",
         "status": "PASS" if rc == 0 else "FAIL",
         "exit_code": rc,
-        "last_20_lines": tail_lines(path),
+        "last_20_lines": extract_last_20(path),
     }
     return key, result, path
 
@@ -174,6 +199,7 @@ def comment_body(result):
 
 
 def publish(gh, result):
+    result["upload_bytes_before_result_post"] = gh.total_uploaded
     body = comment_body(result)
     _, sent, body_bytes = gh.request(
         "POST", f"/commits/{result['sha']}/comments", {"body": body}
@@ -260,12 +286,8 @@ def main():
                                                       backupCount=3),
                                   logging.StreamHandler()])
     if args.smoke:
-        test_run = {"id": 0, "run_attempt": 1, "head_sha": "0" * 40}
-        raise RuntimeError("Smoke mode is disabled for expensive 8P runs")
-        _, result, path = execute(test_run)
-        print(json.dumps({"status": result["status"], "exit_code": result["exit_code"],
-                          "log": str(path), "lines": len(result["last_20_lines"])}, indent=2))
-        raise SystemExit(result["exit_code"])
+        logging.info("8P smoke test intentionally disabled")
+        return
     gh = GitHub(git_token())
     logging.info("A3-8p-CI agent started interval=%ss (fixed pipeline only)", POLL_SECONDS)
     while True:

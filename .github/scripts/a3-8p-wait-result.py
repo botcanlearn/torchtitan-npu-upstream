@@ -59,6 +59,8 @@ def main():
                 for line in report["last_20_lines"][-20:]:
                     print(line)
                 print("====== End remote log ======", flush=True)
+                print(f"Dispatcher uploaded before result POST: {report.get('upload_bytes_before_result_post', 'unknown')} application bytes")
+                print("Final POST size is additionally recorded in dispatcher upload-metrics.json")
                 return 0 if report["status"] == "PASS" and report["exit_code"] == 0 else 1
         except Exception as exc:
             print(f"GitHub read retry: {type(exc).__name__}", flush=True)
