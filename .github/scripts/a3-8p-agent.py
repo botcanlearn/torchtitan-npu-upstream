@@ -82,7 +82,7 @@ def git_token():
 def fetch_jobs(gh):
     jobs = []
     sent_total = 0
-    for event in ("workflow_dispatch", "pull_request"):
+    for event in ("workflow_dispatch",):
         data, sent, _ = gh.request(
             "GET",
             f"/actions/workflows/{WORKFLOW}/runs?event={event}&status=in_progress&per_page=30",
@@ -93,7 +93,7 @@ def fetch_jobs(gh):
                 run.get("name") == "A3-8p-CI"
                 and run.get("event") == event
                 and run.get("status") == "in_progress"
-                and run.get("head_branch") in ("master", "test/a3-8p-deepseek-v4-example-e2e")
+                and run.get("head_branch") == "master"
                 and run.get("actor", {}).get("login") == OWNER
                 and run.get("path") == ".github/workflows/a3-8p-ci.yml"
                 and isinstance(run.get("id"), int)
