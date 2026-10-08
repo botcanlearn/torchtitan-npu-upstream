@@ -1,0 +1,25 @@
+name: A3-2p-CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a3-2p-ci
+  cancel-in-progress: false
+
+jobs:
+  a3-2p-validation:
+    if: github.actor == 'depeng1994' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Wait for internal A3-2p CI result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          A3_CI_TIMEOUT_SECONDS: "1000"
+        run: python3 .github/scripts/a3-2p-wait-result.py
