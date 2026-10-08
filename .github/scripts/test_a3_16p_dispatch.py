@@ -28,7 +28,7 @@ class MultinodeTests(TestCase):
                     'STEPS=5', 'ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7',
                     'NODE_IPS=192.168.0.30,192.168.0.107'):
             self.assertIn(key, env)
-        cmd = dispatch.node_command('/mnt/share/ci_tests/example')
+        cmd = dispatch.node_command('/mnt/share/ci_tests/example/node0')
         self.assertIn('run_16p_multinode_tests launch',cmd)
         self.assertIn('timeout --signal=TERM',cmd)
         self.assertIn('exit_code.txt',cmd)

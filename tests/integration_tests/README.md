@@ -224,5 +224,7 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
   全部成功退出后，只在主机执行 `... verify <output>`，断言 TensorBoard
   `loss_metrics/global_avg_loss` 正好包含 1–5 步的有限值、无重复步号。
 - 每台执行机分别保留自己的源码、日志、训练输出及退出码于
-  `/mnt/share/ci_tests/<北京时间>_run-<ID>_16p/`。当前属于手工验证阶段，
+  `/mnt/share/ci_tests/<北京时间>_run-<ID>_16p/node0/` 或 `node1/`。
+两机的 `/mnt/share` 是同一 NFS 共享卷，因此必须隔离各自的子目录。
+当前属于手工验证阶段，
   **不能把代码已部署视作 16P 训练通过**。成功后再接入正式 16P Actions。

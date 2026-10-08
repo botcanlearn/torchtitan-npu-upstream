@@ -83,44 +83,46 @@ def check_remote(host: str) -> None:
     print(f"[PREFLIGHT] {host}: NPU 0-7 idle", flush=True)
 
 
-def stage(host: str, dest: str, archive: Path, sha: str) -> None:
-    ssh(host, f"mkdir {shlex.quote(dest)}")
+def stage(host: str, node_dir: str, archive: Path, sha: str) -> None:
+    # /mnt/share is a shared NFS mount on the second node. Each node MUST use
+    # a distinct subdirectory to prevent archive/log/output clobbering.
+    ssh(host, f"mkdir -p {shlex.quote(str(Path(node_dir).parent))} && mkdir {shlex.quote(node_dir)}")
     subprocess.run(
-        ["scp", "-q", str(archive), f"{host}:{dest}/source.tar.gz"],
+        ["scp", "-q", str(archive), f"{host}:{node_dir}/source.tar.gz"],
         timeout=180, check=True,
     )
     cmd = (
-        f"cd {shlex.quote(dest)} && mkdir repo && "
+        f"cd {shlex.quote(node_dir)} && mkdir repo && "
         "tar -xzf source.tar.gz -C repo && "
         f"printf '%s\\n' {shlex.quote(sha)} > source_sha.txt && "
         "bash -n repo/examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh && "
         "python3 -m py_compile repo/tests/integration_tests/run_16p_multinode_tests.py"
     )
     ssh(host, cmd)
-    print(f"[STAGED] {host}:{dest} sha={sha}", flush=True)
+    print(f"[STAGED] {host}:{node_dir} sha={sha}", flush=True)
 
 
-def node_command(dest: str) -> str:
+def node_command(node_dir: str) -> str:
     return (
-        f"cd {shlex.quote(dest)}/repo && "
+        f"cd {shlex.quote(node_dir)}/repo && "
         f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
         f"export PYTHONPATH=\"$PWD:${{PYTHONPATH:-}}\" && "
-        f"export {remote_env(dest).replace(' ', ' ')} && "
+        f"export {remote_env(node_dir).replace(' ', ' ')} && "
         f"timeout --signal=TERM --kill-after=30s {TIMEOUT}s "
-        f"python3 -u -m {TRAINER} launch {shlex.quote(dest + '/output')} "
-        f">{shlex.quote(dest + '/run.log')} 2>&1; "
+        f"python3 -u -m {TRAINER} launch {shlex.quote(node_dir + '/output')} "
+        f">{shlex.quote(node_dir + '/run.log')} 2>&1; "
         "rc=$?; "
-        f"echo \"$rc\" > {shlex.quote(dest + '/exit_code.txt')}; "
+        f"echo \"$rc\" > {shlex.quote(node_dir + '/exit_code.txt')}; "
         "exit \"$rc\""
     )
 
 
 def run_nodes(dest: str) -> dict[str, int]:
     workers = {}
-    for host in HOSTS:
+    for idx, host in enumerate(HOSTS):
         workers[host] = subprocess.Popen([
             "ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=25",
-            host, "bash -lc " + shlex.quote(node_command(dest)),
+            host, "bash -lc " + shlex.quote(node_command(f"{dest}/node{idx}")),
         ])
     results: dict[str, int] = {}
     try:
@@ -135,6 +137,7 @@ def run_nodes(dest: str) -> dict[str, int]:
 
 
 def check_results(dest: str) -> None:
+    dest = f"{dest}/node0"
     cmd = (
         f"cd {shlex.quote(dest)}/repo; "
         f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
@@ -181,8 +184,8 @@ def main() -> int:
                 tar.stdout.close()
                 if gzip.wait() or tar.wait():
                     raise RuntimeError("git archive failed")
-            for host in HOSTS:
-                stage(host, dest, archive, sha)
+            for idx, host in enumerate(HOSTS):
+                stage(host, f"{dest}/node{idx}", archive, sha)
     if args.stage_only:
         print(f"[STAGE_ONLY] {dest}", flush=True)
         return 0
