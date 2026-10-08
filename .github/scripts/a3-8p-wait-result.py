@@ -55,7 +55,10 @@ def main():
             if report:
                 print(f"\n====== Remote pipeline: {report['status']} ======", flush=True)
                 print(f"Remote exit code: {report['exit_code']}")
-                print("\n====== Remote log (last 20 lines) ======")
+                log_label = ("first 20 tps/elapsed_time_per_step lines"
+                             if report["status"] == "PASS"
+                             else "failure diagnostics / tail (max 20 lines)")
+                print(f"\n====== Remote log ({log_label}) ======")
                 for line in report["last_20_lines"][-20:]:
                     print(line)
                 print("====== End remote log ======", flush=True)

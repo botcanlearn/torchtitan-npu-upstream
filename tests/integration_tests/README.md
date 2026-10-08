@@ -103,8 +103,10 @@ python -m tests.integration_tests.run_tests \
 **A3-8p-CI** 使用独立手工触发的 GitHub Actions。调度机通过 SSH 将精确
 Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、TensorBoard 与
 `exit_code.txt` 仅在 `/mnt/share/ci_tests/<北京时间>_run-<run-id>_attempt-<n>/`
-保存。GitHub 仅收到 PASS/FAIL、退出码和末尾 20 行精简日志，调度机记录
- `upload-metrics.json`。如果训练因超时或异常终止、Runner 的
+保存。GitHub 仅收到 PASS/FAIL、退出码及精选日志（成功时筛选含
+`tps:` / `elapsed_time_per_step` 的前 20 行；失败或超时时默认取最后 20 行，
+如末尾已被清理日志覆盖，则优先保留异常文件名/行号/代码片段及最后几行，总计不超过 20 行），
+调度机记录 `upload-metrics.json`。如果训练因超时或异常终止、Runner 的
 `run.log` 未刷新，执行机改从 Rank 0 的 `structured_logs` 提取最后 20
 条事件生成 `tail_20.log`，确保失败的 Actions 日志包含实际训练上下文。
 

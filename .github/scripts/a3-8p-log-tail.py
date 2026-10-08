@@ -9,7 +9,14 @@ import sys
 
 MAX_LINES = 20
 MAX_CHARS = 180
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ANSI = re.compile(r"(?:\x1b|\\u001b)\[[0-9;]*[A-Za-z]")
+FAILURE = re.compile(
+    r"\b(?:SyntaxError|IndentationError|TabError|NameError|AttributeError|"
+    r"TypeError|ValueError|RuntimeError|ImportError|ModuleNotFoundError|"
+    r"AssertionError|OSError|FileNotFoundError|KeyError|IndexError|"
+    r"MemoryError|TimeoutError|InductorError|CalledProcessError):"
+    r"|(?:fatal error|error):"
+)
 
 
 def clean(line):
@@ -21,6 +28,73 @@ def read_tail(path):
         return []
     with path.open(encoding="utf-8", errors="replace") as stream:
         return [clean(line) for line in collections.deque(stream, maxlen=MAX_LINES)]
+
+
+def read_success_metrics(path):
+    """Read the FIRST 20 matching lines, in original log order."""
+    if not path.is_file():
+        return []
+    matches = []
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for raw in stream:
+            # The runner may render colors as literal \u001b sequences.
+            line = ANSI.sub("", raw).rstrip("\r\n")
+            if "tps:" not in line and "elapsed_time_per_step" not in line:
+                continue
+            rank = re.search(r"\[rank\d+\]", line)
+            timestamp = re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[,.]\d+", line)
+            payload = line.partition(" - INFO - ")[2]
+            if payload and rank and timestamp:
+                line = f"{rank.group()} {timestamp.group()} {payload}"
+            matches.append(clean(line))
+            if len(matches) == MAX_LINES:
+                break
+    return matches
+
+
+def read_failure_lines(path):
+    """Preserve a causal error traceback even if teardown logs push it off tail."""
+    if not path.is_file():
+        return [], False
+    tail = collections.deque(maxlen=MAX_LINES)
+    preceding = collections.deque(maxlen=9)
+    diagnostic = []
+    follow = 0
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for raw in stream:
+            line = clean(raw)
+            tail.append(line)
+            if FAILURE.search(line):
+                diagnostic = [*preceding, line]
+                follow = 2
+            elif follow:
+                diagnostic.append(line)
+                follow -= 1
+            preceding.append(line)
+    if not diagnostic:
+        return list(tail), False
+
+    recent_tail = list(tail)
+    error_lines = [line for line in diagnostic if FAILURE.search(line)]
+    file_lines = [
+        line for line in diagnostic
+        if re.search(r'File ["\'].+?["\'], line \d+', line)
+        or re.search(r'\.py:\d+', line)
+    ]
+    if (
+        all(line in recent_tail for line in error_lines)
+        and all(line in recent_tail for line in file_lines)
+    ):
+        return recent_tail, True
+
+    # Show the error's File/line/source/caret plus recent teardown context.
+    # Keep 10 diagnostic lines + 8 recent lines + 2 labels = 20 maximum.
+    return (
+        ["Failure context (from earlier in run.log):"]
+        + diagnostic[-10:]
+        + ["Recent log tail:"]
+        + recent_tail[-8:]
+    ), True
 
 
 def structured_tail(root):
@@ -55,11 +129,15 @@ def structured_tail(root):
     return ["Log source: Rank 0 structured training events"] + list(events)
 
 
-def select_tail(root):
-    stdout = read_tail(root / "run.log")
-    # Runner buffers child stdout until the test finishes. On SIGTERM/timeout
-    # run.log may be completely empty, while the structured rank logs survive.
-    if len(stdout) >= 5:
+def select_lines(root, exit_code):
+    if exit_code == 0:
+        return read_success_metrics(root / "run.log") or [
+            "No tps:/elapsed_time_per_step metrics in successful run.log"
+        ]
+    stdout, has_error = read_failure_lines(root / "run.log")
+    # Error tracebacks take priority over rank-0 training events, even when
+    # only a few stdout lines were flushed before the child exited.
+    if has_error or len(stdout) >= 5:
         return stdout
     fallback = structured_tail(root)
     if fallback:
@@ -68,5 +146,11 @@ def select_tail(root):
 
 
 if __name__ == "__main__":
-    for line in select_tail(Path(sys.argv[1]))[-MAX_LINES:]:
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: a3-8p-log-tail.py <run-dir> <exit-code>")
+    try:
+        exit_code = int(sys.argv[2])
+    except ValueError as exc:
+        raise SystemExit(f"Invalid exit code: {sys.argv[2]!r}") from exc
+    for line in select_lines(Path(sys.argv[1]), exit_code):
         print(line)

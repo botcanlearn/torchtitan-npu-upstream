@@ -52,9 +52,11 @@ echo "RESULT_DIR: $dest"
 echo "RESULT_SHA: $sha"
 echo "RESULT_EXIT_CODE: $rc"
 echo "RESULT_FULL_LOG_BYTES: $(stat -c %s "$dest/run.log")"
-# Normalize on the execution host; a terminated Python runner may leave
-# run.log empty, but rank-0 structured logs are still available.
-python3 .github/scripts/a3-8p-log-tail.py "$dest" >"$dest/tail_20.log" 2>"$dest/tail_error.log" ||     printf 'Log-tail extraction failed; check execution-host tail_error.log\n' >"$dest/tail_20.log"
+# PASS: first 20 tps/elapsed_time_per_step lines; FAIL/timeout:
+# up to 20 lines: last lines, or causal traceback + tail when necessary.
+# Fall back to rank-0 events if stdout was not flushed.
+python3 .github/scripts/a3-8p-log-tail.py "$dest" "$rc" >"$dest/tail_20.log" 2>"$dest/tail_error.log" || \
+    printf 'Log selection failed; check execution-host tail_error.log\n' >"$dest/tail_20.log"
 echo "RESULT_LAST_20_LINES_BEGIN"
 cat "$dest/tail_20.log"
 echo "RESULT_LAST_20_LINES_END"
