@@ -2,9 +2,6 @@ name: A3-8p-CI
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [master]
-    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
@@ -15,7 +12,7 @@ concurrency:
 
 jobs:
   a3-8p-validation:
-    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && (github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
