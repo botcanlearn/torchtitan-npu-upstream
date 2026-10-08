@@ -206,3 +206,23 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 输出目录使用新目录。该用例为 V4.1 debug text、四卡 EP4/FSDP4、eager、seq512、GBS4，启用 Engram MXFP8 override，关闭普通模型 FP8 和 optimizer CPU offload。使用仓内 C4 数据及自动生成的微型 HF fixture，不需要正式模型权重。
 
 先训练两步并保存同一模型的原生 DCP 和 FP32 HF 权重，再各自通过真实 CheckpointManager 初始化模型，使用相同的新优化器和数据种子训练三步。每个 rank 校验加载后的 Engram 参数及 MXFP8 缓存/scale 有效行字节，随后对比 TensorBoard loss/grad_norm。失败会使测试返回非零，成功输出 `HF_ROUNDTRIP PASS`。不读取固定 golden，不验证优化器状态续训，也不覆盖正式整包非 Engram 量化权重的导入。
+
+
+## A3 16P DeepSeek-V4 Flash（两机 Eager，独立验证）
+
+- 在调度机启动：
+  `python3 .github/scripts/a3-16p-dispatch.py --preflight` 检查两机所选卡是否空闲；
+  `python3 .github/scripts/a3-16p-dispatch.py --run-id manual` 才真正下发并训练。
+  如暂时占卡，可 `--run-id manual --stage-only` 仅部署，然后用
+  `--run-dir /mnt/share/ci_tests/<对应目录>` 执行已部署代码。
+- 两机固定 `a3-3-docker-relay`（192.168.0.30，rank 0–7）及
+  `a3-4-docker-relay`（192.168.0.107，rank 8–15）。本地 `NGPU=8`、
+  `NNODES=2`、`EP=16`、`DP_SHARD=16`、`GBS=128`；模块和模型配置
+  与 8P 一致，默认 Inductor，调度机明确 `COMPILE_ENABLE=0`。
+- 示例脚本：`examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh`。
+  两机分别运行 `python -m tests.integration_tests.run_16p_multinode_tests launch <output>`，
+  全部成功退出后，只在主机执行 `... verify <output>`，断言 TensorBoard
+  `loss_metrics/global_avg_loss` 正好包含 1–5 步的有限值、无重复步号。
+- 每台执行机分别保留自己的源码、日志、训练输出及退出码于
+  `/mnt/share/ci_tests/<北京时间>_run-<ID>_16p/`。当前属于手工验证阶段，
+  **不能把代码已部署视作 16P 训练通过**。成功后再接入正式 16P Actions。

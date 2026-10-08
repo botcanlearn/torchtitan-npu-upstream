@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Licensed under the BSD-style license in the repository root.
+"""Dispatch a DeepSeek-V4 A3 16P test: 8 NPUs on each of two SSH hosts.
+
+Usage:
+    python3 .github/scripts/a3-16p-dispatch.py --preflight
+    python3 .github/scripts/a3-16p-dispatch.py --run-id 12345678
+
+No training logs are copied back: each node owns the archive, run.log, output,
+exit_code.txt. The dispatcher reports only result, bounded log and byte count.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from zoneinfo import ZoneInfo
+
+HOSTS = ("a3-3-docker-relay", "a3-4-docker-relay")
+IPS = ("192.168.0.30", "192.168.0.107")
+ASCEND_ENV = "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh"
+ASSETS = "/mnt/share/models/DeepSeek-V4-Flash-bf16"
+TRAINER = "tests.integration_tests.run_16p_multinode_tests"
+TIMEOUT = 2700
+
+
+def ssh(host: str, command: str, *, capture: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", host, command],
+        text=True, capture_output=capture, timeout=90, check=True,
+    )
+
+
+def remote_env(dest: str) -> str:
+    env = {
+        "ASCEND_SET_ENV_PATH": ASCEND_ENV,
+        "HF_ASSETS_PATH": ASSETS,
+        "CKPT_SAVE_LOAD_PATH": f"{dest}/checkpoints",
+        "MODULE": "torchtitan_npu.models.deepseek_v4",
+        "CONFIG": "deepseek_v4_flash_43layers_16experts",
+        "NODE_IPS": ",".join(IPS),
+        "Network_Interface": "enp23s0f3",
+        "MASTER_PORT": "6316",
+        "HCCL_IF_BASE_PORT": "30160",
+        "NGPU": "8",
+        "NNODES": "2",
+        "STEPS": "5",
+        "COMPILE_ENABLE": "0",
+        "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+        "TORCHINDUCTOR_NPU_BACKEND": "ascendc",
+        "PYTHONUNBUFFERED": "1",
+    }
+    return " ".join(f"{key}={shlex.quote(val)}" for key, val in env.items())
+
+
+def check_remote(host: str) -> None:
+    # Check actual physical NPU usage (may belong to another Docker container);
+    # checking only local 'ps' is insufficient on shared NPU hosts.
+    command = (
+        f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1; "
+        f"test -d {shlex.quote(ASSETS)}; "
+        "ip -o -4 addr show dev enp23s0f3 | grep -q 'inet '; "
+        "npu-smi info"
+    )
+    result = ssh(host, f"bash -lc {shlex.quote(command)}").stdout
+    proc_lines = result.split("Process id in container")[-1]
+    matches = [
+        line for line in proc_lines.splitlines()
+        if re.search(r"\|\s*[0-3]\s+[01]\s*\|\s*\d+\s*\|", line)
+    ]
+    if matches:
+        raise RuntimeError(
+            f"{host}: selected NPUs 0-7 are occupied by existing workload. "
+            f"Examples: {matches[:2]}"
+        )
+    print(f"[PREFLIGHT] {host}: NPU 0-7 idle", flush=True)
+
+
+def stage(host: str, dest: str, archive: Path, sha: str) -> None:
+    ssh(host, f"mkdir {shlex.quote(dest)}")
+    subprocess.run(
+        ["scp", "-q", str(archive), f"{host}:{dest}/source.tar.gz"],
+        timeout=180, check=True,
+    )
+    cmd = (
+        f"cd {shlex.quote(dest)} && mkdir repo && "
+        "tar -xzf source.tar.gz -C repo && "
+        f"printf '%s\\n' {shlex.quote(sha)} > source_sha.txt && "
+        "bash -n repo/examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh && "
+        "python3 -m py_compile repo/tests/integration_tests/run_16p_multinode_tests.py"
+    )
+    ssh(host, cmd)
+    print(f"[STAGED] {host}:{dest} sha={sha}", flush=True)
+
+
+def node_command(dest: str) -> str:
+    return (
+        f"cd {shlex.quote(dest)}/repo && "
+        f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
+        f"export PYTHONPATH=\"$PWD:${{PYTHONPATH:-}}\" && "
+        f"export {remote_env(dest).replace(' ', ' ')} && "
+        f"timeout --signal=TERM --kill-after=30s {TIMEOUT}s "
+        f"python3 -u -m {TRAINER} launch {shlex.quote(dest + '/output')} "
+        f">{shlex.quote(dest + '/run.log')} 2>&1; "
+        "rc=$?; "
+        f"echo \"$rc\" > {shlex.quote(dest + '/exit_code.txt')}; "
+        "exit \"$rc\""
+    )
+
+
+def run_nodes(dest: str) -> dict[str, int]:
+    workers = {}
+    for host in HOSTS:
+        workers[host] = subprocess.Popen([
+            "ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=25",
+            host, "bash -lc " + shlex.quote(node_command(dest)),
+        ])
+    results: dict[str, int] = {}
+    try:
+        for host, proc in workers.items():
+            results[host] = proc.wait(timeout=TIMEOUT + 120)
+    except (KeyboardInterrupt, subprocess.TimeoutExpired):
+        for proc in workers.values():
+            proc.terminate()
+        raise
+    print(f"[NODE_EXITS] {results}", flush=True)
+    return results
+
+
+def check_results(dest: str) -> None:
+    cmd = (
+        f"cd {shlex.quote(dest)}/repo; "
+        f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
+        f"PYTHONPATH=\"$PWD:${{PYTHONPATH:-}}\" STEPS=5 "
+        f"python3 -u -m {TRAINER} verify {shlex.quote(dest + '/output')}"
+    )
+    result = ssh(HOSTS[0], "bash -lc " + shlex.quote(cmd))
+    print(result.stdout, flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preflight", action="store_true", help="Check both hosts' physical NPU availability")
+    parser.add_argument("--stage-only", action="store_true", help="Distribute the exact source SHA, without using NPUs")
+    parser.add_argument("--run-id", help="GitHub Actions run ID, or 'manual' for a developer run")
+    parser.add_argument("--run-dir", help="Reuse an existing staged /mnt/share/ci_tests/ path")
+    args = parser.parse_args()
+    if args.preflight:
+        for host in HOSTS:
+            check_remote(host)
+        return 0
+    if not args.run_id and not args.run_dir:
+        parser.error("--run-id or --run-dir is required")
+    if args.run_dir and args.stage_only:
+        parser.error("--run-dir and --stage-only are mutually exclusive")
+    if args.run_id and not re.fullmatch(r"\d+|manual", args.run_id):
+        parser.error("--run-id must be numeric or manual")
+
+    if args.run_dir:
+        dest = args.run_dir
+        if not re.fullmatch(r"/mnt/share/ci_tests/[A-Za-z0-9_-]+", dest):
+            parser.error("invalid --run-dir")
+    else:
+        now = dt.datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d_%H-%M-%S")
+        dest = f"/mnt/share/ci_tests/{now}_run-{args.run_id}_16p"
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        with tempfile.TemporaryDirectory(prefix="a3_16p_ci_") as tmp:
+            archive = Path(tmp) / "source.tar.gz"
+            # Streaming tarball creation avoids keeping model repo in memory.
+            with archive.open("wb") as out:
+                tar = subprocess.Popen(["git", "archive", sha], stdout=subprocess.PIPE)
+                gzip = subprocess.Popen(["gzip", "-1"], stdin=tar.stdout, stdout=out)
+                assert tar.stdout is not None
+                tar.stdout.close()
+                if gzip.wait() or tar.wait():
+                    raise RuntimeError("git archive failed")
+            for host in HOSTS:
+                stage(host, dest, archive, sha)
+    if args.stage_only:
+        print(f"[STAGE_ONLY] {dest}", flush=True)
+        return 0
+    for host in HOSTS:
+        check_remote(host)
+    statuses = run_nodes(dest)
+    if any(value != 0 for value in statuses.values()):
+        print(f"[16P_FAIL] nodes={statuses} logs retained at {dest}", flush=True)
+        return 1
+    check_results(dest)
+    print(f"[16P_PASS] sha={sha} result-dir={dest}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
