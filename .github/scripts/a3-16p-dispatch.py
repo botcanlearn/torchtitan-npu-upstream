@@ -14,6 +14,7 @@ exit_code.txt. The dispatcher reports only result, bounded log and byte count.
 from __future__ import annotations
 
 import argparse
+import json
 import datetime as dt
 from pathlib import Path
 import re
@@ -137,15 +138,46 @@ def run_nodes(dest: str) -> dict[str, int]:
 
 
 def check_results(dest: str) -> None:
-    dest = f"{dest}/node0"
+    node_dir = f"{dest}/node0"
     cmd = (
-        f"cd {shlex.quote(dest)}/repo; "
+        f"cd {shlex.quote(node_dir)}/repo; "
         f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
         f"PYTHONPATH=\"$PWD:${{PYTHONPATH:-}}\" STEPS=5 "
-        f"python3 -u -m {TRAINER} verify {shlex.quote(dest + '/output')}"
+        f"python3 -u -m {TRAINER} verify {shlex.quote(node_dir + '/output')} "
+        f">{shlex.quote(node_dir + '/verify.log')} 2>&1; "
+        "rc=$?; "
+        f"if [ \"$rc\" != 0 ]; then cat {shlex.quote(node_dir + '/verify.log')} >> {shlex.quote(node_dir + '/run.log')}; fi; "
+        f"tail -n 4 {shlex.quote(node_dir + '/verify.log')}; exit \"$rc\""
     )
     result = ssh(HOSTS[0], "bash -lc " + shlex.quote(cmd))
     print(result.stdout, flush=True)
+
+
+def print_result(dest: str, statuses: dict[str, int], verification_ok: bool) -> None:
+    passed = verification_ok and all(rc == 0 for rc in statuses.values())
+    failed_host = next((host for host in HOSTS if statuses.get(host) != 0), HOSTS[0])
+    index = HOSTS.index(failed_host)
+    node_dir = f"{dest}/node{index}"
+    rc = statuses.get(failed_host, 125)
+    if rc == 0 and not passed:
+        rc = 1  # Master TensorBoard verification error.
+    log_command = (
+        f"python3 {shlex.quote(node_dir + '/repo/.github/scripts/a3-8p-log-tail.py')} "
+        f"{shlex.quote(node_dir)} {rc}"
+    )
+    try:
+        tail = ssh(failed_host, log_command).stdout.splitlines()[-20:]
+    except Exception as exc:
+        tail = [f"Log selection failed: {type(exc).__name__}"]
+    result = {
+        "status": "PASS" if passed else "FAIL",
+        "node_exit_codes": statuses,
+        "last_20_lines": tail,
+        "result_dir": dest,
+    }
+    payload = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    print(f"[16P_RESULT] {payload}", flush=True)
+    print(f"[16P_UPLOAD_BYTES_ESTIMATE] {len(payload.encode('utf-8'))}", flush=True)
 
 
 def main() -> int:
@@ -192,12 +224,15 @@ def main() -> int:
     for host in HOSTS:
         check_remote(host)
     statuses = run_nodes(dest)
-    if any(value != 0 for value in statuses.values()):
-        print(f"[16P_FAIL] nodes={statuses} logs retained at {dest}", flush=True)
-        return 1
-    check_results(dest)
-    print(f"[16P_PASS] sha={sha} result-dir={dest}", flush=True)
-    return 0
+    verified = False
+    if all(rc == 0 for rc in statuses.values()):
+        try:
+            check_results(dest)
+            verified = True
+        except subprocess.CalledProcessError as exc:
+            print(f"[16P_VERIFY_FAIL] verification rc={exc.returncode}", flush=True)
+    print_result(dest, statuses, verified)
+    return 0 if verified else 1
 
 
 if __name__ == "__main__":

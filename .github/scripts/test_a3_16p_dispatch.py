@@ -1,5 +1,8 @@
 """CPU-only checks for A3 16P distributed command construction and test oracle."""
-import argparse
+import contextlib
+import io
+import json
+import subprocess
 import importlib.util
 import os
 from pathlib import Path
@@ -32,6 +35,9 @@ class MultinodeTests(TestCase):
         self.assertIn('run_16p_multinode_tests launch',cmd)
         self.assertIn('timeout --signal=TERM',cmd)
         self.assertIn('exit_code.txt',cmd)
+        self.assertEqual(
+            subprocess.run(['bash','-n','-c',cmd],capture_output=True).returncode, 0
+        )
         self.assertEqual(len(dispatch.HOSTS),2)
         self.assertEqual(len(dispatch.IPS),2)
 
@@ -46,6 +52,27 @@ class MultinodeTests(TestCase):
         with patch.object(runner,'extract_losses_from_tensorboard',return_value={1:12.,2:11.,4:9.}):
             with self.assertRaisesRegex(RuntimeError,'expected steps'):
                 runner.verify(out,5)
+
+    def test_bounded_result_protocol(self):
+        full = "\n".join(f"line {i}" for i in range(31))
+        with patch.object(dispatch, 'ssh', return_value=subprocess.CompletedProcess(
+            [], 0, full, ''
+        )):
+            for statuses, verified, status in [
+                ({dispatch.HOSTS[0]: 0, dispatch.HOSTS[1]: 0}, True, 'PASS'),
+                ({dispatch.HOSTS[0]: 0, dispatch.HOSTS[1]: 1}, False, 'FAIL'),
+            ]:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    dispatch.print_result('/mnt/share/ci_tests/test', statuses, verified)
+                line = next(x for x in output.getvalue().splitlines()
+                            if x.startswith('[16P_RESULT] '))
+                parsed = json.loads(line.removeprefix('[16P_RESULT] '))
+                self.assertEqual(parsed['status'], status)
+                self.assertEqual(len(parsed['last_20_lines']), 20)
+                self.assertEqual(parsed['last_20_lines'][0], 'line 11')
+                self.assertEqual(parsed['last_20_lines'][-1], 'line 30')
+                self.assertIn('[16P_UPLOAD_BYTES_ESTIMATE]', output.getvalue())
 
     def test_bad_config_rejected_before_launch(self):
         with patch.dict(os.environ,{'NODE_IPS':'192.168.0.30','HF_ASSETS_PATH':'/tmp','NGPU':'8','STEPS':'5'}):

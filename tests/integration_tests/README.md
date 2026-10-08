@@ -228,3 +228,10 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 两机的 `/mnt/share` 是同一 NFS 共享卷，因此必须隔离各自的子目录。
 当前属于手工验证阶段，
   **不能把代码已部署视作 16P 训练通过**。成功后再接入正式 16P Actions。
+
+
+**2026-10-09 手工预验证**：双机源码快照分发成功；两机各 8 个 CPU/Gloo
+Rank 真实完成 world=16 的 AllReduce，期望总和 136（两机退出码 0）；
+16P Shell 的模拟启动核对了 EP16、DP Shard16、GBS128、5 steps 和 Eager。
+**NPU 训练尚被共享资源占用阻塞**：A3-3 的选定 8 卡及 A3-4 的选定 8 卡均有在先任务，
+已由物理 npu-smi info 检查确认，未终止任何在先任务。
