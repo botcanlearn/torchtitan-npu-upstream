@@ -11,7 +11,7 @@ import urllib.request
 REPO = "depeng1994/torchtitan-npu"
 RUN_ID = int(os.environ["GITHUB_RUN_ID"])
 ATTEMPT = int(os.environ["GITHUB_RUN_ATTEMPT"])
-SHA = os.environ["GITHUB_SHA"]
+SHA = os.environ.get("A3_8P_SOURCE_SHA") or os.environ["GITHUB_SHA"]
 TOKEN = os.environ["GH_TOKEN"]
 EXPECTED_AUTHOR = "depeng1994"
 MARKER = f"A3-8p-CI-RESULT {RUN_ID}:{ATTEMPT}"

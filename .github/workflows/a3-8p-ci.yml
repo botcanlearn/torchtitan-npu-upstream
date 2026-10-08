@@ -24,5 +24,6 @@ jobs:
       - name: Wait for internal A3 8P DeepSeek-V4 integration result
         env:
           GH_TOKEN: ${{ github.token }}
+          A3_8P_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           A3_8P_CI_TIMEOUT_SECONDS: "7400"
         run: python3 .github/scripts/a3-8p-wait-result.py

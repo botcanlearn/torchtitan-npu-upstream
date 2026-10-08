@@ -104,7 +104,7 @@ def fetch_jobs(gh):
                 if not any(
                     pr.get("number") == 26
                     and pr.get("base", {}).get("ref") == "master"
-                    and pr.get("head", {}).get("repo", {}).get("full_name") == REPO
+                    and pr.get("head", {}).get("repo", {}).get("url", "").endswith("/repos/" + REPO)
                     for pr in prs
                 ):
                     continue
