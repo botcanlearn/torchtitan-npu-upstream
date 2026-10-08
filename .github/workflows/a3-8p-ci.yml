@@ -1,0 +1,25 @@
+name: A3-8p-CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a3-8p-ci
+  cancel-in-progress: false
+
+jobs:
+  a3-8p-validation:
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Wait for internal A3 8P DeepSeek-V4 integration result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          A3_8P_CI_TIMEOUT_SECONDS: "7400"
+        run: python3 .github/scripts/a3-8p-wait-result.py
