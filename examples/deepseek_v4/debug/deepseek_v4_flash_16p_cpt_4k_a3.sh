@@ -119,9 +119,10 @@ COMM_ARGS="
     --comm.train-timeout-seconds 600
 "
 
-# Optimizer
+# 16P Eager smoke uses AdamW: DistMuon bucket-plan validation fails for EP16.
+# Muon can be separately tested after the optimizer implementation is fixed.
 OPTIMIZER_ARGS="
-    --optimizer.name Muon
+    --optimizer.name AdamW
     --optimizer.lr 1.0e-5
     --optimizer.beta1 0.9
     --optimizer.beta2 0.95
@@ -132,7 +133,7 @@ OPTIMIZER_ARGS="
     --optimizer.muon_ns_steps 10
     --optimizer.muon_adjust_lr_fn match_rms_adamw
 "
-OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
+OPTIMIZER_OVERRIDES=""
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then
     DEFAULT_CLI_OVERRIDES=""

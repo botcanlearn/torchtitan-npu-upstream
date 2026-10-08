@@ -235,3 +235,5 @@ Rank 真实完成 world=16 的 AllReduce，期望总和 136（两机退出码 0�
 16P Shell 的模拟启动核对了 EP16、DP Shard16、GBS128、5 steps 和 Eager。
 **NPU 训练尚被共享资源占用阻塞**：A3-3 的选定 8 卡及 A3-4 的选定 8 卡均有在先任务，
 已由物理 npu-smi info 检查确认，未终止任何在先任务。
+
+16P optimizer note: 原始 Muon/DistMuon 在 EP16 下初始化时报错 optimizer bucket plans differ across ranks。16P Eager 冒烟使用普通 AdamW，禁用 state-swap 覆盖；并不代表 Muon 路线已通过。
