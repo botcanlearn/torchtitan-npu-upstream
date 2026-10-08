@@ -9,6 +9,7 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -81,7 +82,7 @@ def git_token():
 def fetch_jobs(gh):
     jobs = []
     sent_total = 0
-    for event in ("workflow_dispatch",):
+    for event in ("workflow_dispatch", "pull_request"):
         data, sent, _ = gh.request(
             "GET",
             f"/actions/workflows/{WORKFLOW}/runs?event={event}&status=in_progress&per_page=30",
@@ -92,7 +93,7 @@ def fetch_jobs(gh):
                 run.get("name") == "A3-8p-CI"
                 and run.get("event") == event
                 and run.get("status") == "in_progress"
-                and run.get("head_branch") == "master"
+                and run.get("head_branch") in ("master", "test/a3-8p-deepseek-v4-example-e2e")
                 and run.get("actor", {}).get("login") == OWNER
                 and run.get("path") == ".github/workflows/a3-8p-ci.yml"
                 and isinstance(run.get("id"), int)
@@ -180,7 +181,13 @@ def execute(run):
     key = f"{run['id']}:{run.get('run_attempt', 1)}"
     path = task_log_dir(run) / "pipeline.log"
     path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["bash", str(PIPELINES["dsv4-flash-8p"]), str(run["id"]), str(run.get("run_attempt", 1)), run["head_sha"], path.parent.name]
+    # Pin dispatch code to this run. Editing/deploying the shared script
+    # while Bash is still reading it can corrupt an otherwise successful job.
+    snapshot_tmp = path.parent / "remote-pipeline.sh.tmp"
+    snapshot = path.parent / "remote-pipeline.sh"
+    shutil.copyfile(PIPELINES["dsv4-flash-8p"], snapshot_tmp)
+    snapshot_tmp.replace(snapshot)
+    cmd = ["bash", str(snapshot), str(run["id"]), str(run.get("run_attempt", 1)), run["head_sha"], path.parent.name]
     with path.open("w", encoding="utf-8") as f:
         try:
             rc = subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=7500).returncode

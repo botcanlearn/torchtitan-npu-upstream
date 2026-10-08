@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +52,39 @@ class LogTailTests(unittest.TestCase):
             self.assertEqual(tail[0], "stdout-11")
             self.assertEqual(tail[-1], "stdout-30")
             self.assertEqual(len(tail), 20)
+
+    def test_dispatcher_pins_pipeline_script_during_execution(self):
+        with tempfile.TemporaryDirectory() as dirname:
+            base = Path(dirname)
+            source = base / "live-pipeline.sh"
+            source.write_text("echo original\n")
+            captured = {}
+
+            def fake_subprocess_run(cmd, **kwargs):
+                pinned = Path(cmd[1])
+                captured["cmd"] = cmd
+                self.assertNotEqual(pinned, source)
+                self.assertEqual(pinned.read_text(), "echo original\n")
+                source.write_text("echo modified\n")
+                self.assertEqual(pinned.read_text(), "echo original\n")
+                return subprocess.CompletedProcess(cmd, 0)
+
+            run = {
+                "id": 42,
+                "run_attempt": 1,
+                "head_sha": "e" * 40,
+                "created_at": "2026-10-08T13:07:51Z",
+            }
+            with patch.object(AGENT, "LOG_DIR", base / "logs"), \
+                 patch.dict(AGENT.PIPELINES, {"dsv4-flash-8p": source}), \
+                 patch.object(AGENT.subprocess, "run", side_effect=fake_subprocess_run):
+                _, result, logfile = AGENT.execute(run)
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["exit_code"], 0)
+            self.assertEqual(
+                (logfile.parent / "remote-pipeline.sh").read_text(),
+                "echo original\n",
+            )
 
     def test_dispatcher_never_includes_end_marker(self):
         with tempfile.TemporaryDirectory() as dirname:
