@@ -99,6 +99,34 @@ python -m tests.integration_tests.run_tests \
 
 直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
 
+## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
+
+`run_multinode_tests.py` 直接通过现有 integration runner 执行
+[`deepseek_v4_flash_8p_cpt_4k_a3.sh`](../../examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh)。
+当前用例是**单节点 8 张 A3 NPU**，不是跨节点训练；复用现有 NPU 池、子进程超时清理和 TensorBoard step 检查，
+不在 Python 中复制模型、EP/FSDP、编译、算子和优化器配置。
+
+在已准备好 CANN、torch_npu、TorchTitan 与有效 tokenizer 资产、并获得完整 8P 资源的环境中执行：
+
+```bash
+HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
+STEPS=5 \
+python -m tests.integration_tests.run_multinode_tests ./test_reports/dsv4_flash_a3_8p
+```
+
+`HF_ASSETS_PATH` 必须指向存在的目录。Runner 默认 `STEPS=5`，允许通过环境变量覆盖；
+示例 Shell 单独执行时仍默认 100 steps。测试用例通过 `OverrideDefinitions.env_vars` 传递
+`STEPS`、`HF_ASSETS_PATH`、模型 Config 和 `USE_GOLDEN=0`，其余 Shell 参数保持示例默认值。
+`DATASET_PATH` 等已有 Shell 环境变量也可以由执行环境传入。输出目录必须为空。
+
+测试追加的 CLI 仅用于启用 TensorBoard 和逐步记录。成功条件为训练进程正常退出，
+且 `loss_metrics/global_avg_loss` 包含恰好 1 到 `STEPS` 的全部步号、没有重复步或非有限值。
+本用例不比较 Golden loss，也不证明修改 `STEPS` 后与默认 100-step 配置的数值等价。
+
+当前 `.gitcode` 默认 PreSmoke A3 Job 和 `.ci/integration_test.sh` 使用 4P，
+**不会自动执行这个独立 8P 入口**。要加入 CI，必须为它分配 8P 资源并显式运行上述命令；
+不得将 8P 用例混入现有 4P 默认 suite 造成资源跳过。
+
 ## 并行调度
 
 runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到固定的 NPU 池上，
