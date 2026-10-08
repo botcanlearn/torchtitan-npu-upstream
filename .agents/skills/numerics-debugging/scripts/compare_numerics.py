@@ -465,6 +465,8 @@ def match_entries(
         an AC-recomputed op surfacing as bare ``feed_forward/op_7_mul``
         in eager but ``layers.2.feed_forward/op_3_mul`` in traced).
 
+    Automatic passes only pair entries within the same forward/backward phase.
+
     Pass 1 — Exact key match. Catches the bulk of forward ops where
         both runs dispatch the same op in the same module-relative
         order. Most-specific match; runs first to claim the
@@ -519,11 +521,11 @@ def match_entries(
         index: dict[object, list[OpEntry]] = {}
         for e in traced:
             if id(e) not in traced_used:
-                index.setdefault(key_fn(e), []).append(e)
+                index.setdefault((e.phase, key_fn(e)), []).append(e)
         for i, e_entry in enumerate(eager):
             if eager_results[i] is not None:
                 continue
-            for c in index.get(key_fn(e_entry), []):
+            for c in index.get((e_entry.phase, key_fn(e_entry)), []):
                 if id(c) not in traced_used:
                     traced_used.add(id(c))
                     diffs = _compute_diffs(e_entry, c)
