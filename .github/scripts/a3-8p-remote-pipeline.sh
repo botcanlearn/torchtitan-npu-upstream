@@ -38,8 +38,13 @@ export CKPT_SAVE_LOAD_PATH="$dest/checkpoints"
 export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 export TORCHINDUCTOR_NPU_BACKEND=ascendc
 export STEPS=5
+# Fast functional Actions smoke: no Inductor; the standalone example still
+# defaults to Inductor, selectable with COMPILE_ENABLE=1 outside this job.
+export COMPILE_ENABLE=0
+export PYTHONUNBUFFERED=1
+echo "8P CI mode: eager (COMPILE_ENABLE=$COMPILE_ENABLE); STEPS=$STEPS"
 echo "$(date -Iseconds)" > "$dest/start_time.txt"
-timeout --signal=TERM --kill-after=30s 6900s python3 -m tests.integration_tests.run_multinode_tests "$dest/output" >"$dest/run.log" 2>&1
+timeout --signal=TERM --kill-after=30s 6900s python3 -u -m tests.integration_tests.run_multinode_tests "$dest/output" >"$dest/run.log" 2>&1
 rc=$?
 printf '%s\n' "$rc" >"$dest/exit_code.txt"
 echo "$(date -Iseconds)" > "$dest/end_time.txt"

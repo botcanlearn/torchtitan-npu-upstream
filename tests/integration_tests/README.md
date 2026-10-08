@@ -99,6 +99,19 @@ python -m tests.integration_tests.run_tests \
 
 直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
 
+
+**A3-8p-CI** 使用独立手工触发的 GitHub Actions。调度机通过 SSH 将精确
+Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、TensorBoard 与
+`exit_code.txt` 仅在 `/mnt/share/ci_tests/<北京时间>_run-<run-id>_attempt-<n>/`
+保存。GitHub 仅收到 PASS/FAIL、退出码和末尾 20 行精简日志，调度机记录
+`upload-metrics.json`。
+
+为验证 CI 触发、执行与回传通路，**该 Actions 固定 `COMPILE_ENABLE=0`
+(Eager, 5 steps)**。原 Examples Shell 与独立 Runner 默认仍为
+`COMPILE_ENABLE=1` (Inductor)。Inductor 的完整性能和训练稳定性
+**不在本 Actions 的通过范围内**；可在执行机单独以
+`COMPILE_ENABLE=1 STEPS=5` 运行原入口。
+
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
 
 `run_multinode_tests.py` 直接通过现有 integration runner 执行

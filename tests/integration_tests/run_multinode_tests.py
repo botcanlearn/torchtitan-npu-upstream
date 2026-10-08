@@ -34,6 +34,10 @@ def main() -> None:
     if any(args.output_dir.iterdir()):
         parser.error("output_dir must be empty")
 
+    compile_enable = os.environ.get("COMPILE_ENABLE", "1")
+    if compile_enable not in ("0", "1"):
+        parser.error("COMPILE_ENABLE must be 0 (eager) or 1 (Inductor)")
+
     test = OverrideDefinitions(
         test_name="dsv4_flash_a3_8p_example",
         test_descr="DeepSeek-V4 Flash A3 8P example E2E",
@@ -46,6 +50,7 @@ def main() -> None:
             "CONFIG": "deepseek_v4_flash_43layers_16experts",
             "HF_ASSETS_PATH": hf_assets_path,
             "STEPS": str(steps),
+            "COMPILE_ENABLE": compile_enable,
             "USE_GOLDEN": "0",
         },
         expected_steps=(tuple(range(1, steps + 1)),),

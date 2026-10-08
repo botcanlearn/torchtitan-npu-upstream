@@ -69,12 +69,13 @@ PARALLELISM_ARGS="
     --parallelism.pipeline-parallel-degree ${PP}
 "
 
-# Compile
-COMPILE_ARGS="
-    --compile.enable
-    --compile.components model
-    --compile.backend inductor
-"
+# Compile: preserve the example default; CI smoke may use COMPILE_ENABLE=0.
+COMPILE_ENABLE="${COMPILE_ENABLE:-1}"
+case "$COMPILE_ENABLE" in
+    1) COMPILE_ARGS="--compile.enable --compile.components model --compile.backend inductor" ;;
+    0) COMPILE_ARGS="--compile.no-enable" ;;
+    *) echo "COMPILE_ENABLE must be 0 or 1" >&2; exit 2 ;;
+esac
 
 # Training
 TRAINING_ARGS="
