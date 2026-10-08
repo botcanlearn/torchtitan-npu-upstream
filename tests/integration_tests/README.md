@@ -215,8 +215,8 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
   `python3 .github/scripts/a3-16p-dispatch.py --run-id manual` 才真正下发并训练。
   如暂时占卡，可 `--run-id manual --stage-only` 仅部署，然后用
   `--run-dir /mnt/share/ci_tests/<对应目录>` 执行已部署代码。
-- 两机固定 `a3-3-docker-relay`（192.168.0.30，rank 0–7）及
-  `a3-4-docker-relay`（192.168.0.107，rank 8–15）。本地 `NGPU=8`、
+- 两机固定 `a3-3-docker-relay`（192.168.0.30，rank 0–7，物理芯片 0–7）及
+  `a3-4-docker-relay`（192.168.0.107，rank 8–15，物理芯片 8–15，避让现有 8P 作业）。本地 `NGPU=8`、
   `NNODES=2`、`EP=16`、`DP_SHARD=16`、`GBS=128`；模块和模型配置
   与 8P 一致，默认 Inductor，调度机明确 `COMPILE_ENABLE=0`。
 - 示例脚本：`examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh`。

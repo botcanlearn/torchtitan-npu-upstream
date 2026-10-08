@@ -26,12 +26,12 @@ runner = load("ci_runner_16p", ROOT.parent.parent / "tests/integration_tests/run
 
 class MultinodeTests(TestCase):
     def test_topology_and_command(self):
-        env = dispatch.remote_env('/mnt/share/ci_tests/example')
+        env = dispatch.remote_env('/mnt/share/ci_tests/example', dispatch.HOSTS[0])
         for key in ('NNODES=2', 'NGPU=8', 'COMPILE_ENABLE=0',
                     'STEPS=5', 'ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7',
                     'NODE_IPS=192.168.0.30,192.168.0.107'):
             self.assertIn(key, env)
-        cmd = dispatch.node_command('/mnt/share/ci_tests/example/node0')
+        cmd = dispatch.node_command('/mnt/share/ci_tests/example/node0', dispatch.HOSTS[0])
         self.assertIn('run_16p_multinode_tests launch',cmd)
         self.assertIn('timeout --signal=TERM',cmd)
         self.assertIn('exit_code.txt',cmd)
@@ -40,6 +40,8 @@ class MultinodeTests(TestCase):
         )
         self.assertEqual(len(dispatch.HOSTS),2)
         self.assertEqual(len(dispatch.IPS),2)
+        env1 = dispatch.remote_env('/mnt/share/ci_tests/example/node1', dispatch.HOSTS[1])
+        self.assertIn('ASCEND_RT_VISIBLE_DEVICES=8,9,10,11,12,13,14,15', env1)
 
     def test_launch_and_tb_oracle(self):
         out = Path('/tmp/dsv4_16p_test')

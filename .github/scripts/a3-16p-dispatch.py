@@ -26,6 +26,12 @@ from zoneinfo import ZoneInfo
 
 HOSTS = ("a3-3-docker-relay", "a3-4-docker-relay")
 IPS = ("192.168.0.30", "192.168.0.107")
+# a3-4 NPU 0-7 are in use by an independent 8P job.
+# Select its other eight physical chips (NPU cards 4-7) without preemption.
+VISIBLE_IDS = {
+    "a3-3-docker-relay": tuple(range(8)),
+    "a3-4-docker-relay": tuple(range(8, 16)),
+}
 ASCEND_ENV = "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh"
 ASSETS = "/mnt/share/models/DeepSeek-V4-Flash-bf16"
 TRAINER = "tests.integration_tests.run_16p_multinode_tests"
@@ -39,7 +45,7 @@ def ssh(host: str, command: str, *, capture: bool = True) -> subprocess.Complete
     )
 
 
-def remote_env(dest: str) -> str:
+def remote_env(dest: str, host: str) -> str:
     env = {
         "ASCEND_SET_ENV_PATH": ASCEND_ENV,
         "HF_ASSETS_PATH": ASSETS,
@@ -54,7 +60,7 @@ def remote_env(dest: str) -> str:
         "NNODES": "2",
         "STEPS": "5",
         "COMPILE_ENABLE": "0",
-        "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+        "ASCEND_RT_VISIBLE_DEVICES": ",".join(map(str, VISIBLE_IDS[host])),
         "TORCHINDUCTOR_NPU_BACKEND": "ascendc",
         "PYTHONUNBUFFERED": "1",
     }
@@ -71,17 +77,23 @@ def check_remote(host: str) -> None:
         "npu-smi info"
     )
     result = ssh(host, f"bash -lc {shlex.quote(command)}").stdout
+    if "Process id in container" not in result:
+        raise RuntimeError(f"{host}: npu-smi returned no process table; refusing to run")
     proc_lines = result.split("Process id in container")[-1]
-    matches = [
-        line for line in proc_lines.splitlines()
-        if re.search(r"\|\s*[0-3]\s+[01]\s*\|\s*\d+\s*\|", line)
-    ]
+    # npu-smi process table uses CARD number (0..7), two dies per card.
+    # ASCEND_RT_VISIBLE_DEVICES chooses individual die IDs (0..15).
+    selected_cards = {chip // 2 for chip in VISIBLE_IDS[host]}
+    matches = []
+    for line in proc_lines.splitlines():
+        proc = re.match(r"^\|\s*(\d+)\s+(0|1)\s*\|\s*(\d+)\s*\|", line)
+        if proc and int(proc.group(1)) in selected_cards:
+            matches.append(line)
     if matches:
         raise RuntimeError(
-            f"{host}: selected NPUs 0-7 are occupied by existing workload. "
+            f"{host}: selected NPU chips {VISIBLE_IDS[host]} occupied. "
             f"Examples: {matches[:2]}"
         )
-    print(f"[PREFLIGHT] {host}: NPU 0-7 idle", flush=True)
+    print(f"[PREFLIGHT] {host}: NPU chips {VISIBLE_IDS[host]} idle", flush=True)
 
 
 def stage(host: str, node_dir: str, archive: Path, sha: str) -> None:
@@ -103,12 +115,12 @@ def stage(host: str, node_dir: str, archive: Path, sha: str) -> None:
     print(f"[STAGED] {host}:{node_dir} sha={sha}", flush=True)
 
 
-def node_command(node_dir: str) -> str:
+def node_command(node_dir: str, host: str) -> str:
     return (
         f"cd {shlex.quote(node_dir)}/repo && "
         f"source {shlex.quote(ASCEND_ENV)} >/dev/null 2>&1 && "
         f"export PYTHONPATH=\"$PWD:${{PYTHONPATH:-}}\" && "
-        f"export {remote_env(node_dir).replace(' ', ' ')} && "
+        f"export {remote_env(node_dir, host)} && "
         f"timeout --signal=TERM --kill-after=30s {TIMEOUT}s "
         f"python3 -u -m {TRAINER} launch {shlex.quote(node_dir + '/output')} "
         f">{shlex.quote(node_dir + '/run.log')} 2>&1; "
@@ -123,7 +135,7 @@ def run_nodes(dest: str) -> dict[str, int]:
     for idx, host in enumerate(HOSTS):
         workers[host] = subprocess.Popen([
             "ssh", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=25",
-            host, "bash -lc " + shlex.quote(node_command(f"{dest}/node{idx}")),
+            host, "bash -lc " + shlex.quote(node_command(f"{dest}/node{idx}", host)),
         ])
     results: dict[str, int] = {}
     try:
