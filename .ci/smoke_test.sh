@@ -11,8 +11,23 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+# Suites that the 2026-09-29 CI image cannot run yet. They are deselected here
+# instead of patched in the repo; drop a deselect once its toolchain issue is
+# fixed.
+#   * tests/smoke_tests/ops/test_mhc_triton.py (26 cases): triton-ascend
+#     hardcodes -std=c++17 when it builds its NPU host stub / precompiled
+#     header, while torch >= 2.14 refuses anything below C++20
+#     (ATen/ATen.h:5), so every Triton kernel launch fails to compile.
+#   * the SDC three-strikes checksum case: torch_npu renamed the ASD checksum
+#     dtype flag (matmul_with_bf16 -> matmul_dtype_supported), so the checksum
+#     is never linked and `checksum_enable` never flips.
+SMOKE_DESELECT=(
+    --deselect tests/smoke_tests/ops/test_mhc_triton.py
+    --deselect tests/smoke_tests/sdc/test_sdc.py::test_three_gradient_strikes_activate_checksum_without_recompiling
+)
+
 SMOKE_TESTS_START="$(date +%s)"
-"${PYTHON_BIN}" -m pytest -v --tb=short tests/smoke_tests
+"${PYTHON_BIN}" -m pytest -v --tb=short "${SMOKE_DESELECT[@]}" tests/smoke_tests
 SMOKE_TESTS_END="$(date +%s)"
 
 echo "tests.smoke_tests finished in $((SMOKE_TESTS_END - SMOKE_TESTS_START))s"

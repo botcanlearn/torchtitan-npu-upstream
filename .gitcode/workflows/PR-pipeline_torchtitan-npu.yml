@@ -130,7 +130,9 @@ stages:
         if: env.TARGET_BRANCH == 'master'
         runs-on: ['self-hosted','npu=4','smoke=301']
         container:
-          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.PreSmoke_A900_npupool }}
+          # Temporary: run the rebuilt CI image directly instead of the tag
+          # revise-img returns, so this pipeline exercises the image itself.
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu24.04_arm:cann_920_0929
       PreSmoke_A3_part2:
         name: PreSmoke_A3_part2
         steps:
@@ -171,7 +173,9 @@ stages:
         if: env.TARGET_BRANCH == 'master'
         runs-on: ['self-hosted','npu=4','smoke=301']
         container:
-          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.PreSmoke_A900_npupool }}
+          # Temporary: run the rebuilt CI image directly instead of the tag
+          # revise-img returns, so this pipeline exercises the image itself.
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu24.04_arm:cann_920_0929
     pre:
       - type: auto
     fail-fast: true
