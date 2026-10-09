@@ -174,6 +174,7 @@ recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
 **统一 Lite Actions Runner 实机回归（2026-10-09）**：
 
 - **A3 8P 已通过**：[Run 37939445270](https://github.com/depeng1994/torchtitan-npu/actions/runs/37939445270)：`nightly_all_models_test/a3_8p_tests.py`，5 steps、TensorBoard、退出码 0、GitHub Success、结束广播
+- **A3 8P 新 Inputs/Artifact 协议已通过**：[Run 37952500554](https://github.com/depeng1994/torchtitan-npu/actions/runs/37952500554)：`Prepare CI request` 与 `CI tests` 两个 Job Success；JSON 传测试路径和 `STEPS=5`、5 steps、TensorBoard、资源释放、GitHub PASS。多用例顺序执行目前仅完成离线验证。
 - **A3 16P 已通过**：[Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)：`nightly_all_models_test/a3_16p_tests.py`，双机各 8P、两节点退出码 0、5 steps、TensorBoard、GitHub Success、结束广播
 - **A5 64P 尚未实机验证**：只完成 8×8 资源规格与 `nightly_all_models_test/a5_64p_tests.py` 定义；独立 HCCL 小网 IP 和模型资产路径仍需填写验证
 
