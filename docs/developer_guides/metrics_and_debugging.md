@@ -142,7 +142,7 @@ NGPU=2 ./scripts/run_train.sh \
   --profiler.extension.profile-with-memory
 ```
 
-也可以通过原生周期参数显示拼接出相同的采集窗口：
+也可以通过原生周期参数显式拼接出相同的采集窗口：
 
 ```bash
 NGPU=2 ./scripts/run_train.sh \
