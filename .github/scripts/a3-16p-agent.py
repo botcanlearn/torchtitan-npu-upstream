@@ -82,7 +82,7 @@ def git_token():
 def fetch_jobs(gh):
     jobs = []
     sent_total = 0
-    for event in ("workflow_dispatch", "pull_request"):
+    for event in ("workflow_dispatch",):
         data, sent, _ = gh.request(
             "GET",
             f"/actions/workflows/{WORKFLOW}/runs?event={event}&status=in_progress&per_page=30",
@@ -93,7 +93,7 @@ def fetch_jobs(gh):
                 run.get("name") == "A3-16p-CI"
                 and run.get("event") == event
                 and run.get("status") == "in_progress"
-                and run.get("head_branch") in ("master", "test/a3-8p-deepseek-v4-example-e2e")
+                and run.get("head_branch") == "master"
                 and run.get("actor", {}).get("login") == OWNER
                 and run.get("path") == ".github/workflows/a3-16p-ci.yml"
                 and isinstance(run.get("id"), int)
@@ -214,8 +214,8 @@ def comment_body(result):
     return marker + "\n" + json.dumps(result, ensure_ascii=False, separators=(",", ":"))
 
 
-def publish(gh, result):
-    result["upload_bytes_before_result_post"] = gh.total_uploaded
+def publish(gh, result, task_bytes_before_post):
+    result["upload_bytes_before_result_post"] = task_bytes_before_post
     body = comment_body(result)
     _, sent, body_bytes = gh.request(
         "POST", f"/commits/{result['sha']}/comments", {"body": body}
@@ -274,7 +274,7 @@ def run_once(gh, state):
             save_state(state)
         before = gh.total_uploaded
         try:
-            _, post_body = publish(gh, result)
+            _, post_body = publish(gh, result, existing["upload_bytes"])
         except (urllib.error.URLError, ValueError) as exc:
             existing["upload_bytes"] += gh.total_uploaded - before
             existing["requests_count"] += 1

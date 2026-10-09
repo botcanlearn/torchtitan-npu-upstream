@@ -239,3 +239,5 @@ Rank 真实完成 world=16 的 AllReduce，期望总和 136（两机退出码 0�
 16P optimizer note: 原始 Muon/DistMuon 在 EP16 下初始化时报错 optimizer bucket plans differ across ranks。16P Eager 冒烟使用普通 AdamW，禁用 state-swap 覆盖；并不代表 Muon 路线已通过。
 
 2026-10-09 16P real E2E PASS: COMPILE_ENABLE=0, AdamW, --debug.moe-force-load-balance, two hosts 8 NPUs each, EP16, Steps 1-5 completed. Both nodes rc=0, TensorBoard losses: 12.28344, 11.86433, 11.20779, 10.95729, 10.68304. Logs: /mnt/share/ci_tests/2026-10-09_07-56-27_run-manual_16p/node{0,1}/. Muon bucket-validation failure is not covered by this Eager-smoke PASS.
+
+2026-10-09 16P Actions 实机闭环：GitHub Run #37864999747（Eager、AdamW、MoE force-load-balance）运行成功。双机 Run 目录 /mnt/share/ci_tests/2026-10-09_08-29-25_run-37864999747_16p/node{0,1}/；两机退出码 0，训练 5 steps，Step5 loss=10.72270、tps=587，GitHub 收到 PASS、10 行 Step/耗时指标。调度机 upload-metrics.json 记录本轮应用层估算上传字节数 2325。GitHub Action 生产入口仅提供 master 分支手动 workflow_dispatch；PR #26 自动触发仅用于此次合入前联调。
