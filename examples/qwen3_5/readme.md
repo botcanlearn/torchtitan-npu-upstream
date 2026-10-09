@@ -19,18 +19,10 @@ custom Torch/torch_npu pair:
 python -m pip install av einops pillow
 python -m pip install --no-deps \
   --index-url https://download.pytorch.org/whl/nightly/cpu \
-  torchvision==0.29.0.dev20260719+cpu
+  torchvision==0.29.0.dev20260814+cpu
 python -m pip install --no-deps -e ../torchtitan
 python -m pip install --no-deps -e .
 ```
-
-This pairing targets `torch==2.14.0.dev20260719+cpu` on Python 3.12/aarch64.
-`--no-deps` is intentional because the custom torch_npu wheel declares the
-stable `torch==2.14.0` version even though the validated runtime uses a nightly
-Torch build. Fresh environments that install `requirements.txt` instead resolve
-`torchvision==0.29.0.dev20260720`: that nightly build declares
-`torch==2.14.0.dev20260719` exactly, so plain pip resolution accepts it beside
-the pinned Torch. Both builds belong to the validated 0.29.0.dev line.
 
 ## Qwen3.5 NPU override 开关
 

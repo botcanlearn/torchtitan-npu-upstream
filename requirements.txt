@@ -3,10 +3,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 --extra-index-url https://download.pytorch.org/whl/nightly/cpu
-torch==2.14.0.dev20260719
-torchvision==0.29.0.dev20260720
+torch==2.14.0
+torchvision==0.29.0.dev20260814
 --find-links https://cann-ai.obs.cn-north-4.myhuaweicloud.com/torchtitan-npu/simple/torch-npu/index.html
-torch_npu==2.14.0.dev20260808
+torch_npu==2.14.0.dev20260918
 torchtitan==0.3.0
 attn-gym==0.0.9
 pybind11==3.0.4
@@ -18,4 +18,5 @@ triton-ascend==3.2.1
 scipy==1.13.1
 safetensors==0.8.0
 # Engram builds its token map at runtime; pin the normalizer semantics.
-tokenizers==0.22.2
+tokenizers==0.23.2
+torchao==0.17.0
