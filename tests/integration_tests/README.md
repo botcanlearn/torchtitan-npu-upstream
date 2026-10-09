@@ -135,29 +135,28 @@ tests/integration_tests/nightly_all_models_test/
 `run_a5_64p_multinode_tests.py` 与重复的 A5 规格定义已删除。
 所有 Workflow 统一调用 `.github/scripts/ci-wait-result.py`。
 
-## GitHub 选择具体 Integration Test（CI 资源通道不绑定模型）
+## GitHub Actions 传递多个用例与参数（Artifact 协议）
 
-模型仓的 `.github/workflows/a3-8p-ci.yml`、`a3-16p-ci.yml`、`a5-64p-ci.yml`
-都有 `workflow_dispatch.inputs.test_case`。运行时填写**注册的 test ID**，而不是
-Shell 命令或任意 Python 模块，例如 `dsv4_flash_a3_16p_example`。
-Workflow 用 `run-name: "${{ github.workflow }} | test=${{ inputs.test_case }}"`
-把 ID 显式写入 GitHub Run `display_title`；调度机仅解析该受信任字段，
-从相同 Commit SHA 的 `ci_registry.json` 读取模块、运行模式、资源要求和测试环境，
-并固定调用 `tests.integration_tests.ci_entrypoint`。
+A3 8P、A3 16P、A5 64P 三个 Workflow 的 `name`/`run-name` 保持固定，**不拼 test ID**。`workflow_dispatch.inputs.test_cases` 接收包含 `path`、`test_id`、`params` 的 JSON 数组，例如：
 
-**注册一个新同拓扑用例**：
+```json
+[
+  {"path": "tests/integration_tests/nightly_all_models_test/a3_8p_tests.py", "test_id": "dsv4_flash_a3_8p_example", "params": {"STEPS": "5"}}
+]
+```
 
-1. 在 `tests/integration_tests/` 增加单机测试入口，或支持 `launch` / `verify` 的多机测试模块；模型/脚本参数仍归用例负责
-2. 在 `tests/integration_tests/ci_registry.json` 增加 test ID 对应的 `module`、`mode`、`nnodes`、`ngpu`、`env_vars`、`ascend_env`、`hf_assets_path` 和 `ckpt_init_path`；三个路径必须由该环境真实提供
-3. 提交到受信任的模型仓分支，运行对应 Workflow，填入新 test ID；**无须修改 Lite Actions `pipelines.json`**
+GitHub 托管的 `prepare` Job 用 `.github/scripts/prepare-ci-request.py` 校验 Inputs，生成包含 `run_id`、`attempt`、`sha` 的 `ci-request.json`，通过官方 `actions/upload-artifact@v4` 上传。Lite Actions 调度机使用 GitHub REST Artifacts API 依据**本 Run ID**领取清单，并与模型仓**该 Commit SHA**中的 `ci_registry.json` 校验：模块路径必须严格对应、拓扑匹配、参数只允许覆盖该用例注册的 `env_vars`。调度机不接收任意 Python 模块或 Shell 命令。
 
-`ascend_env` 属于模型测试环境配置，不是调度机机器清单；
-`hf_assets_path` 和 `ckpt_init_path` 也只在模型仓注册。调度机只登记可用机器、
-大网 SSH IP、**不同的** HCCL 小网 IP、NPU 编号及物理映射。
-A5 的 HCCL 小网地址尚待确定，A5 环境三个路径当前未填写，故 64P 通道保持禁用。
+输入数组含 1～12 个测试时，同一个 Action 依次执行全部用例、每个用例独立保存日志与 TensorBoard；遇到 Failure 立即停止并向 GitHub 回传失败。添加新模型时在 `nightly_all_models_test/*_tests.py` 按 `OverrideDefinitions` 风格增加测试定义，再注册 `test_id`，不用改 Lite Actions 的 `pipelines.json`；已有同一文件多个定义时，共用 Runner 会用注册的 ID 精确选择其中一个。
 
-**兼容性提醒**：这是新协议，旧 Workflow 没有 run-name/test_case 字段时不会被新调度器接单。
-须同步部署模型仓 Workflow、GitHub Waiter 与 Lite Actions 协议，再启用新调度 Agent。
+示例触发：
+
+```bash
+gh workflow run a3-8p-ci.yml --ref refactor/unified-a3-a5-ci \
+  -f 'test_cases=[{"path":"tests/integration_tests/nightly_all_models_test/a3_8p_tests.py","test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]'
+```
+
+这是 **GitHub Actions 标准 Inputs + Artifact API** 的交接流程，内网调度机不需要接收入站 Webhook。`ci-wait-result.py` 仍只等待该 Run 的报告，不感知测试清单。
 
 ## A3 / A5 多机 Lite Actions（统一执行器）
 

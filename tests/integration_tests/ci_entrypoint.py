@@ -7,6 +7,7 @@ snippet or command supplied by GitHub workflow inputs.
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 import runpy
@@ -34,6 +35,7 @@ def main() -> None:
     if args.phase == "verify" and mode == "single":
         # run_tests already validates TensorBoard and steps in its launch phase.
         return
+    os.environ["LITE_CI_TEST_ID"] = args.test_id
     sys.argv = [module, *([args.phase] if mode == "distributed" else []), str(args.output_dir)]
     runpy.run_module(module, run_name="__main__")
 

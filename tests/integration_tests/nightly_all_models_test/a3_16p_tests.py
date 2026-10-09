@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed
+from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed, select_definition
 
 
 def build_a3_16p_test_list() -> list[OverrideDefinitions]:
@@ -28,7 +28,7 @@ def build_a3_16p_test_list() -> list[OverrideDefinitions]:
 
 
 def main() -> None:
-    run_distributed(build_a3_16p_test_list()[0], nnodes=2)
+    run_distributed(select_definition(build_a3_16p_test_list()), nnodes=2)
 
 
 if __name__ == "__main__":

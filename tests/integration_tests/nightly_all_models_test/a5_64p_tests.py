@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed
+from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed, select_definition
 
 
 def validate_parallelism(*, world_size: int = 64, tp: int = 1, pp: int = 1,
@@ -40,7 +40,7 @@ def build_a5_64p_test_list() -> list[OverrideDefinitions]:
 
 
 def main() -> None:
-    run_distributed(build_a5_64p_test_list()[0], nnodes=8, ckpt_required=True)
+    run_distributed(select_definition(build_a5_64p_test_list()), nnodes=8, ckpt_required=True)
 
 
 if __name__ == "__main__":

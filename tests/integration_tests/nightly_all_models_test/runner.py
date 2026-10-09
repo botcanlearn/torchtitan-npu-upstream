@@ -32,6 +32,17 @@ def validate_assets(parser: argparse.ArgumentParser, *, ckpt_required: bool = Fa
             parser.error(f"{key} must point to an existing directory")
 
 
+def select_definition(cases: list[OverrideDefinitions]) -> OverrideDefinitions:
+    """Select one registered definition; future files may contain many tests."""
+    selected = os.environ.get("LITE_CI_TEST_ID")
+    if not selected and len(cases) == 1:
+        return cases[0]
+    matching = [item for item in cases if item.test_name == selected]
+    if len(matching) != 1:
+        raise ValueError("requested test definition is not unique in this module")
+    return matching[0]
+
+
 def run_single(test: OverrideDefinitions) -> None:
     from tests.integration_tests.run_tests import run_tests
 

@@ -1,18 +1,19 @@
 name: A3-8p-CI-Example
 
-run-name: "${{ github.workflow }} | test=${{ inputs.test_case }}"
+run-name: "${{ github.workflow }}"
 
 on:
   workflow_dispatch:
     inputs:
-      test_case:
-        description: "Registered Integration Test ID (tests/integration_tests/ci_registry.json)"
+      test_cases:
+        description: 'JSON test list: path, test_id, params (1-12 cases)'
         type: string
         required: true
-        default: "dsv4_flash_a3_8p_example"
+        default: '[{"path":"tests/integration_tests/nightly_all_models_test/a3_8p_tests.py","test_id":"dsv4_flash_a3_8p_example","params":{}}]'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: a3-8p-ci
@@ -20,7 +21,27 @@ concurrency:
   queue: max
 
 jobs:
+  prepare:
+    name: Prepare CI request
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate workflow_dispatch inputs
+        env:
+          CI_TEST_CASES: ${{ inputs.test_cases }}
+        run: python3 .github/scripts/prepare-ci-request.py
+      - name: Upload CI request
+        uses: actions/upload-artifact@v4
+        with:
+          name: lite-ci-request-${{ github.run_attempt }}
+          path: .ci-request/ci-request.json
+          retention-days: 1
+          if-no-files-found: error
   ci:
+    needs: prepare
+    name: CI tests
     if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/refactor/unified-a3-a5-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 150
