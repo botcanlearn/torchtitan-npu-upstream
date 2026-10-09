@@ -1,7 +1,15 @@
 name: A5-64p-CI
 
+run-name: "${{ github.workflow }} | test=${{ inputs.test_case }}"
+
 on:
   workflow_dispatch:
+    inputs:
+      test_case:
+        description: "Registered Integration Test ID (tests/integration_tests/ci_registry.json)"
+        type: string
+        required: true
+        default: "dsv4_pro_a5_64p"
 
 permissions:
   contents: read

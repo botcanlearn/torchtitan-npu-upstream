@@ -116,6 +116,30 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 **不在本 Actions 的通过范围内**；可在执行机单独以
 `COMPILE_ENABLE=1 STEPS=5` 运行原入口。
 
+## GitHub 选择具体 Integration Test（CI 资源通道不绑定模型）
+
+模型仓的 `.github/workflows/a3-8p-ci.yml`、`a3-16p-ci.yml`、`a5-64p-ci.yml`
+都有 `workflow_dispatch.inputs.test_case`。运行时填写**注册的 test ID**，而不是
+Shell 命令或任意 Python 模块，例如 `dsv4_flash_a3_16p_example`。
+Workflow 用 `run-name: "${{ github.workflow }} | test=${{ inputs.test_case }}"`
+把 ID 显式写入 GitHub Run `display_title`；调度机仅解析该受信任字段，
+从相同 Commit SHA 的 `ci_registry.json` 读取模块、运行模式、资源要求和测试环境，
+并固定调用 `tests.integration_tests.ci_entrypoint`。
+
+**注册一个新同拓扑用例**：
+
+1. 在 `tests/integration_tests/` 增加单机测试入口，或支持 `launch` / `verify` 的多机测试模块；模型/脚本参数仍归用例负责
+2. 在 `tests/integration_tests/ci_registry.json` 增加 test ID 对应的 `module`、`mode`、`nnodes`、`ngpu`、`env_vars`、`ascend_env`、`hf_assets_path` 和 `ckpt_init_path`；三个路径必须由该环境真实提供
+3. 提交到受信任的模型仓分支，运行对应 Workflow，填入新 test ID；**无须修改 Lite Actions `pipelines.json`**
+
+`ascend_env` 属于模型测试环境配置，不是调度机机器清单；
+`hf_assets_path` 和 `ckpt_init_path` 也只在模型仓注册。调度机只登记可用机器、
+大网 SSH IP、**不同的** HCCL 小网 IP、NPU 编号及物理映射。
+A5 的 HCCL 小网地址尚待确定，A5 环境三个路径当前未填写，故 64P 通道保持禁用。
+
+**兼容性提醒**：这是新协议，旧 Workflow 没有 run-name/test_case 字段时不会被新调度器接单。
+须同步部署模型仓 Workflow、GitHub Waiter 与 Lite Actions 协议，再启用新调度 Agent。
+
 ## A3 / A5 多机 Lite Actions（统一执行器）
 
 GitHub Actions 仅负责触发和等待。内网 Lite Actions 的 `ci_core/ssh_runner.py`

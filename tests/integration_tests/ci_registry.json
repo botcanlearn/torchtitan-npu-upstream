@@ -1,0 +1,32 @@
+{
+  "dsv4_flash_a3_8p_example": {
+    "module": "tests.integration_tests.run_multinode_tests",
+    "mode": "single",
+    "nnodes": 1,
+    "ngpu": 8,
+    "ascend_env": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
+    "hf_assets_path": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
+    "ckpt_init_path": "/mnt/share/dsv4_ckpt_8rank",
+    "env_vars": {"COMPILE_ENABLE": "0", "TORCHINDUCTOR_NPU_BACKEND": "ascendc", "STEPS": "5"}
+  },
+  "dsv4_flash_a3_16p_example": {
+    "module": "tests.integration_tests.run_16p_multinode_tests",
+    "mode": "distributed",
+    "nnodes": 2,
+    "ngpu": 8,
+    "ascend_env": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
+    "hf_assets_path": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
+    "ckpt_init_path": "/mnt/share/dsv4_ckpt_8rank",
+    "env_vars": {"COMPILE_ENABLE": "0", "TORCHINDUCTOR_NPU_BACKEND": "ascendc", "STEPS": "5", "MASTER_PORT": "6316", "HCCL_IF_BASE_PORT": "30160"}
+  },
+  "dsv4_pro_a5_64p": {
+    "module": "tests.integration_tests.run_a5_64p_multinode_tests",
+    "mode": "distributed",
+    "nnodes": 8,
+    "ngpu": 8,
+    "ascend_env": "",
+    "hf_assets_path": "",
+    "ckpt_init_path": "",
+    "env_vars": {"STEPS": "5", "COMPILE_ENABLE": "0"}
+  }
+}
