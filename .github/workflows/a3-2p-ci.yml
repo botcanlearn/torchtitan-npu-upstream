@@ -21,5 +21,5 @@ jobs:
       - name: Wait for internal A3-2p-CI
         env:
           GH_TOKEN: ${{ github.token }}
-          A3_CI_TIMEOUT_SECONDS: "1000"
-        run: python3 .github/scripts/a3-ci-wait-result.py --case a3-smoke
+          CI_WAIT_TIMEOUT_SECONDS: "1000"
+        run: python3 .github/scripts/ci-wait-result.py --case a3-smoke

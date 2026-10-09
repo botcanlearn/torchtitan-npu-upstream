@@ -29,5 +29,5 @@ jobs:
       - name: Wait for internal A5-64p-CI
         env:
           GH_TOKEN: ${{ github.token }}
-          A3_CI_TIMEOUT_SECONDS: "14900"
-        run: python3 .github/scripts/a3-ci-wait-result.py --case a5-64p
+          CI_WAIT_TIMEOUT_SECONDS: "14900"
+        run: python3 .github/scripts/ci-wait-result.py --case a5-64p

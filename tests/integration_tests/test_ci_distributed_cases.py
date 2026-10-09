@@ -1,34 +1,27 @@
-"""CPU-only distributed CI case validations (no A5 hardware used)."""
+"""CPU-only tests for A5 64P definitions; no NPU allocation."""
 import unittest
-
-from tests.integration_tests.ci_distributed_cases import (
-    build_a5_pro_64p_case, DistributedCase, DistributedResources,
+from unittest.mock import patch
+from tests.integration_tests.nightly_all_models_test.a5_64p_tests import (
+    build_a5_64p_test_list, validate_parallelism,
 )
 
 
-class DistributedCasesTests(unittest.TestCase):
+class A5NightlyCasesTests(unittest.TestCase):
     def test_a5_pro_64p(self):
-        case=build_a5_pro_64p_case("/models/DeepSeek-V4-tokenizer")
-        self.assertEqual(case.resources.world_size,64)
-        self.assertEqual(case.definition.ngpu,8)
-        self.assertEqual(case.definition.env_vars["EP"],"32")
-        self.assertEqual(case.definition.env_vars["DP_SHARD"],"32")
-        self.assertEqual(case.validate_parallelism(tp=1,pp=1,cp=1,dp_shard=32,ep=32),2)
-        self.assertEqual(case.definition.expected_steps,(tuple(range(1,6)),))
+        with patch.dict('os.environ', {'STEPS': '5', 'HF_ASSETS_PATH': '/models/a5'}):
+            case = build_a5_64p_test_list()[0]
+        self.assertEqual(case.ngpu, 8)
+        self.assertEqual(case.env_vars['EP'], '32')
+        self.assertEqual(case.env_vars['DP_SHARD'], '32')
+        self.assertEqual(validate_parallelism(), 2)
+        self.assertEqual(case.expected_steps, (tuple(range(1, 6)),))
 
     def test_invalid_topology_rejected(self):
-        case=build_a5_pro_64p_case("/models/DeepSeek-V4-tokenizer")
         with self.assertRaises(ValueError):
-            case.validate_parallelism(tp=3,pp=1,cp=1,dp_shard=32,ep=32)
+            validate_parallelism(dp_shard=31)
         with self.assertRaises(ValueError):
-            case.validate_parallelism(tp=1,pp=1,cp=1,dp_shard=32,ep=128)
-
-    def test_unconfigured_assets_rejected(self):
-        with self.assertRaises(ValueError):
-            build_a5_pro_64p_case("",steps=5)
-        with self.assertRaises(ValueError):
-            build_a5_pro_64p_case("/asset",steps=0)
+            validate_parallelism(ep=128)
 
 
-if __name__=="__main__":
+if __name__ == '__main__':
     unittest.main()

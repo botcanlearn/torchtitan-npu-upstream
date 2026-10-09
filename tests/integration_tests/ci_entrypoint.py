@@ -7,6 +7,7 @@ snippet or command supplied by GitHub workflow inputs.
 from __future__ import annotations
 import argparse
 import json
+import re
 from pathlib import Path
 import runpy
 import sys
@@ -25,8 +26,9 @@ def main() -> None:
         parser.error("test_id not registered in the current model commit")
     profile = registry[args.test_id]
     module = profile["module"]
-    if not (isinstance(module, str) and module.startswith("tests.integration_tests.run_")
-            and module.replace(".", "").replace("_", "").isalnum()):
+    if not (isinstance(module, str) and re.fullmatch(
+            r"tests\.integration_tests\.nightly_all_models_test\.[a-z][a-z0-9_]*_tests",
+            module)):
         parser.error("invalid registered test module")
     mode = profile["mode"]
     if args.phase == "verify" and mode == "single":

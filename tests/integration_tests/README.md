@@ -116,6 +116,25 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 **不在本 Actions 的通过范围内**；可在执行机单独以
 `COMPILE_ENABLE=1 STEPS=5` 运行原入口。
 
+## Nightly All Models 用例组织（按 Actions 资源规格）
+
+只保留一个 `nightly_all_models_test/` 目录，不再为 A3-8P/A3-16P/A5-64P 建子目录：
+
+```text
+tests/integration_tests/nightly_all_models_test/
+├── __init__.py
+├── a3_8p_tests.py    # A3-8p-CI-Example: build_a3_8p_test_list()
+├── a3_16p_tests.py   # A3-16p-CI-Example: build_a3_16p_test_list()
+├── a5_64p_tests.py   # A5-64p-CI: build_a5_64p_test_list()
+└── runner.py         # 复用单机 run_tests、多机 launch/verify 适配
+```
+
+三个用例文件均按 `qwen3_5.py` 的风格返回 `list[OverrideDefinitions]`；
+`ngpu=8` 代表**每节点** NPU 数，跨节点世界规模由通道 `nnodes` 指定。
+原有独立 `run_multinode_tests.py` / `run_16p_multinode_tests.py` /
+`run_a5_64p_multinode_tests.py` 与重复的 A5 规格定义已删除。
+所有 Workflow 统一调用 `.github/scripts/ci-wait-result.py`。
+
 ## GitHub 选择具体 Integration Test（CI 资源通道不绑定模型）
 
 模型仓的 `.github/workflows/a3-8p-ci.yml`、`a3-16p-ci.yml`、`a5-64p-ci.yml`
@@ -146,7 +165,7 @@ GitHub Actions 仅负责触发和等待。内网 Lite Actions 的 `ci_core/ssh_r
 根据 `config/pools.json` 和 `config/pipelines.json` 对 **A3 8P（1×8）、A3 16P（2×8）、A5 64P（8×8）**
 使用相同的 SSH 源码分发、跨节点启动、设备锁和日志回传流程；不再使用模型仓下的 A3 双机调度脚本。
 
-A5 64P 的模型入口为 `tests.integration_tests.run_a5_64p_multinode_tests`，
+A5 64P 的模型入口为 `tests.integration_tests.nightly_all_models_test.a5_64p_tests`，
 在 8 个节点分别执行 `launch <output>`，结束后主节点执行 `verify <output>`；
 recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
 默认 EP32 / DP-shard32，8×8 下 DP-replicate2。必须先准备每机可用的
@@ -167,7 +186,7 @@ A3 16P 或 A5 64P 标记为统一 Runner 的实机成功用例。
 
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
 
-`run_multinode_tests.py` 直接通过现有 integration runner 执行
+`nightly_all_models_test/a3_8p_tests.py` 直接通过现有 integration runner 执行
 [`deepseek_v4_flash_8p_cpt_4k_a3.sh`](../../examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh)。
 当前用例是**单节点 8 张 A3 NPU**，不是跨节点训练；复用现有 NPU 池、子进程超时清理和 TensorBoard step 检查，
 不在 Python 中复制模型、EP/FSDP、编译、算子和优化器配置。
@@ -177,7 +196,7 @@ A3 16P 或 A5 64P 标记为统一 Runner 的实机成功用例。
 ```bash
 HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
 STEPS=5 \
-python -m tests.integration_tests.run_multinode_tests ./test_reports/dsv4_flash_a3_8p
+python -m tests.integration_tests.nightly_all_models_test.a3_8p_tests ./test_reports/dsv4_flash_a3_8p
 ```
 
 `HF_ASSETS_PATH` 必须指向存在的目录。Runner 默认 `STEPS=5`，允许通过环境变量覆盖；
@@ -269,7 +288,7 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
   `NNODES=2`、`EP=16`、`DP_SHARD=16`、`GBS=128`；模块和模型配置
   与 8P 一致，默认 Inductor，调度机明确 `COMPILE_ENABLE=0`。
 - 示例脚本：`examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh`。
-  两机分别运行 `python -m tests.integration_tests.run_16p_multinode_tests launch <output>`，
+  两机分别运行 `python -m tests.integration_tests.nightly_all_models_test.a3_16p_tests launch <output>`，
   全部成功退出后，只在主机执行 `... verify <output>`，断言 TensorBoard
   `loss_metrics/global_avg_loss` 正好包含 1–5 步的有限值、无重复步号。
 - 每台执行机分别保留自己的源码、日志、训练输出及退出码于

@@ -50,7 +50,7 @@ def main():
              dt.timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
     url = (f"https://api.github.com/repos/depeng1994/torchtitan-npu/commits/{sha}/comments?"
            + urllib.parse.urlencode({"per_page": 100, "since": since}))
-    deadline = time.monotonic() + int(os.environ.get("A3_CI_TIMEOUT_SECONDS", "7400"))
+    deadline = time.monotonic() + int(os.environ.get("CI_WAIT_TIMEOUT_SECONDS", "7400"))
     print(f"Waiting for {display} run={run_id}, attempt={attempt}, SHA={sha[:12]}", flush=True)
     while time.monotonic() < deadline:
         try:
