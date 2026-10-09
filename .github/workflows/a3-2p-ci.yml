@@ -1,4 +1,4 @@
-name: A3-2p-CI
+name: Dispatcher-Smoke
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Wait for internal A3-2p-CI
+      - name: Wait for dispatcher-only npu-smi probe
         env:
           GH_TOKEN: ${{ github.token }}
           CI_WAIT_TIMEOUT_SECONDS: "1000"

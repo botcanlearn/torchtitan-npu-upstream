@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 
 PIPELINES = {
-    "a3-smoke": ("A3-2p-CI", "npu-smi"),
+    "a3-smoke": ("Dispatcher-Smoke", "npu-smi"),
     "a3-8p": ("A3-8p-CI-Example", "a3-8p"),
     "a3-16p": ("A3-16p-CI-Example", "a3-16p"),
     "a5-64p": ("A5-64p-CI", "a5-64p"),

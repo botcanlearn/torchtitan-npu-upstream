@@ -8,30 +8,37 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SCRIPT=Path(__file__).resolve().parents[2]/'.github/scripts/prepare-ci-request.py'
+SCRIPT=Path(__file__).resolve().parents[3]/'.github/scripts/prepare-ci-request.py'
 spec=importlib.util.spec_from_file_location('prepare_ci_request',SCRIPT)
 prepare=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
-PATH='tests/integration_tests/nightly_all_models_test/a3_8p_tests.py'
-CASE={'path':PATH,'test_id':'dsv4_flash_a3_8p_example','params':{'STEPS':'5'}}
+CASE={'test_id':'dsv4_flash_a3_8p_example','params':{'STEPS':'5'}}
 
 class InputsArtifactTests(unittest.TestCase):
     def test_valid_multiple_cases(self):
         self.assertEqual(prepare.parse_cases(json.dumps([CASE,CASE])),[CASE,CASE])
 
-    def test_reject_unsafe_paths_params(self):
-        for value in ('../../bin/sh','tests/integration_tests/foo.py','tests/integration_tests/nightly_all_models_test/../evil.py'):
-            with self.subTest(value=value),self.assertRaises(ValueError):
-                prepare.parse_cases(json.dumps([{**CASE,'path':value}]))
+    def test_reject_unsafe_ids_params(self):
+        for test_id in ('../bin/sh','test;curl', 'Invalid-ID'):
+            with self.subTest(test_id=test_id),self.assertRaises(ValueError):
+                prepare.parse_cases(json.dumps([{**CASE,'test_id':test_id}]))
         with self.assertRaises(ValueError):
             prepare.parse_cases(json.dumps([{**CASE,'params':{'STEPS':'5\nexit 1'}}]))
+
+    def test_workflow_budget_blocks_too_many_cases(self):
+        with patch.dict(os.environ, {'CI_MAX_CASES':'2'}):
+            with self.assertRaises(ValueError):
+                prepare.parse_cases(json.dumps([CASE]*3))
+        with patch.dict(os.environ, {'CI_MAX_CASES':'1'}):
+            with self.assertRaises(ValueError):
+                prepare.parse_cases(json.dumps([CASE,CASE]))
 
     def test_artifact_identity_is_git_run_metadata(self):
         with tempfile.TemporaryDirectory() as td:
             env={'CI_TEST_CASES':json.dumps([CASE]),'GITHUB_RUN_ID':'101',
                  'GITHUB_RUN_ATTEMPT':'2','GITHUB_SHA':'a'*40}
-            with patch.dict(os.environ,env),patch('os.getcwd',return_value=td):
-                old=os.getcwd()
+            with patch.dict(os.environ,env):
+                old=Path.cwd()
                 try:
                     os.chdir(td)
                     prepare.main()
@@ -41,5 +48,7 @@ class InputsArtifactTests(unittest.TestCase):
                     self.assertEqual(value['attempt'],2)
                 finally:
                     os.chdir(old)
+            self.assertEqual(Path.cwd(),old)
+            self.assertTrue(Path('tests/unit_tests/tooling/test_ci_request.py').exists())
 
 if __name__=='__main__':unittest.main()

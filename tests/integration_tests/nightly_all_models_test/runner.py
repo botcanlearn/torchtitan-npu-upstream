@@ -32,27 +32,17 @@ def validate_assets(parser: argparse.ArgumentParser, *, ckpt_required: bool = Fa
             parser.error(f"{key} must point to an existing directory")
 
 
-def select_definition(cases: list[OverrideDefinitions]) -> OverrideDefinitions:
-    """Select one registered definition; future files may contain many tests."""
-    selected = os.environ.get("LITE_CI_TEST_ID")
-    if not selected and len(cases) == 1:
-        return cases[0]
-    matching = [item for item in cases if item.test_name == selected]
-    if len(matching) != 1:
-        raise ValueError("requested test definition is not unique in this module")
-    return matching[0]
-
-
-def run_single(test: OverrideDefinitions) -> None:
+def run_single(test: OverrideDefinitions, *, output_dir: Path | None = None) -> None:
     from tests.integration_tests.run_tests import run_tests
 
     parser = argparse.ArgumentParser(description=test.test_descr)
-    parser.add_argument("output_dir", type=Path)
-    args = parser.parse_args()
+    if output_dir is None:
+        parser.add_argument("output_dir", type=Path)
+        output_dir = parser.parse_args().output_dir
     validate_assets(parser)
     if os.environ.get("COMPILE_ENABLE", "1") not in ("0", "1"):
         parser.error("COMPILE_ENABLE must be 0 or 1")
-    output = args.output_dir
+    output = output_dir
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         parser.error("output_dir must be empty")
@@ -62,14 +52,20 @@ def run_single(test: OverrideDefinitions) -> None:
 
 
 def run_distributed(test: OverrideDefinitions, *, nnodes: int,
-                    ckpt_required: bool = False) -> None:
+                    ckpt_required: bool = False,
+                    phase: str | None = None,
+                    output_dir: Path | None = None) -> None:
     parser = argparse.ArgumentParser(description=test.test_descr)
-    parser.add_argument("mode", choices=("launch", "verify"))
-    parser.add_argument("output_dir", type=Path)
-    args = parser.parse_args()
+    if phase is None or output_dir is None:
+        parser.add_argument("mode", choices=("launch", "verify"))
+        parser.add_argument("output_dir", type=Path)
+        args = parser.parse_args()
+        phase, output_dir = args.mode, args.output_dir
+    if phase not in ("launch", "verify"):
+        parser.error("phase must be launch or verify")
     steps = required_steps()
-    run_root = args.output_dir / test.test_name / "test_run"
-    if args.mode == "verify":
+    run_root = output_dir / test.test_name / "test_run"
+    if phase == "verify":
         values = extract_losses_from_tensorboard(run_root, "tb_phase_0")
         expected = set(range(1, steps + 1))
         if set(values) != expected:
@@ -84,8 +80,8 @@ def run_distributed(test: OverrideDefinitions, *, nnodes: int,
         parser.error(f"NODE_IPS requires exactly {nnodes} nonempty IPs")
     if os.environ.get("NGPU", str(test.ngpu)) != str(test.ngpu):
         parser.error(f"NGPU must be {test.ngpu} per node")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    if any(args.output_dir.iterdir()):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any(output_dir.iterdir()):
         parser.error("output_dir must be empty")
     command = ["bash", test.train_script, "--dump_folder", str(run_root),
                *test.train_args, "--metrics.save_tb_folder=tb_phase_0"]

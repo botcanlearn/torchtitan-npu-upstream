@@ -38,8 +38,8 @@
     "hf_assets_path": "",
     "ckpt_init_path": "",
     "env_vars": {
-      "STEPS": "5",
-      "COMPILE_ENABLE": "0"
-    }
+      "STEPS": "5"
+    },
+    "ckpt_init_required": true
   }
 }

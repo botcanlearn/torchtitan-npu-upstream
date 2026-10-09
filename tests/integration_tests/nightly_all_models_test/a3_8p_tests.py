@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_single, select_definition
+from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_single
 
 
 def build_a3_8p_test_list() -> list[OverrideDefinitions]:
@@ -27,8 +27,11 @@ def build_a3_8p_test_list() -> list[OverrideDefinitions]:
     )]
 
 
+# Shared CI entrypoint imports this stable contract; the original builder remains public.
+build_test_list = build_a3_8p_test_list
+
 def main() -> None:
-    run_single(select_definition(build_a3_8p_test_list()))
+    run_single(build_a3_8p_test_list()[0])
 
 
 if __name__ == "__main__":

@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       test_cases:
-        description: 'JSON test list: path, test_id, params (1-12 cases)'
+        description: 'JSON test list: test_id, params (max 2 cases)'
         type: string
         required: true
-        default: '[{"path":"tests/integration_tests/nightly_all_models_test/a3_16p_tests.py","test_id":"dsv4_flash_a3_16p_example","params":{}}]'
+        default: '[{"test_id":"dsv4_flash_a3_16p_example","params":{}}]'
 
 permissions:
   contents: read
@@ -23,14 +23,29 @@ concurrency:
 jobs:
   prepare:
     name: Prepare CI request
-    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - name: Validate CI admission
+        env:
+          CI_ALLOWED_ACTOR: depeng1994
+          CI_REQUEST_ACTOR: ${{ github.actor }}
+          CI_REQUEST_REPOSITORY: ${{ github.repository }}
+          CI_REQUEST_REF: ${{ github.ref }}
+          CI_CHANNEL_ENABLED: "true"
+        run: |
+          test "$CI_REQUEST_ACTOR" = "$CI_ALLOWED_ACTOR" || exit 1
+          test "$CI_REQUEST_REPOSITORY" = "depeng1994/torchtitan-npu" || exit 1
+          case "$CI_REQUEST_REF" in
+            refs/heads/master|refs/heads/refactor/unified-a3-a5-ci) ;;
+            *) echo "CI branch not allowed" >&2; exit 1 ;;
+          esac
+          test "$CI_CHANNEL_ENABLED" = true || { echo "CI channel disabled" >&2; exit 1; }
       - name: Validate workflow_dispatch inputs
         env:
           CI_TEST_CASES: ${{ inputs.test_cases }}
+          CI_MAX_CASES: "2"
         run: python3 .github/scripts/prepare-ci-request.py
       - name: Upload CI request
         uses: actions/upload-artifact@v4
@@ -42,13 +57,12 @@ jobs:
   ci:
     needs: prepare
     name: CI tests
-    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/refactor/unified-a3-a5-ci')
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - name: Wait for internal A3-16p-CI-Example
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_WAIT_TIMEOUT_SECONDS: "7400"
+          CI_WAIT_TIMEOUT_SECONDS: "16800"
         run: python3 .github/scripts/ci-wait-result.py --case a3-16p

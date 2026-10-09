@@ -135,28 +135,22 @@ tests/integration_tests/nightly_all_models_test/
 `run_a5_64p_multinode_tests.py` 与重复的 A5 规格定义已删除。
 所有 Workflow 统一调用 `.github/scripts/ci-wait-result.py`。
 
-## GitHub Actions 传递多个用例与参数（Artifact 协议）
+## GitHub Actions 用例与参数（注册 ID / Artifact）
 
-A3 8P、A3 16P、A5 64P 三个 Workflow 的 `name`/`run-name` 保持固定，**不拼 test ID**。`workflow_dispatch.inputs.test_cases` 接收包含 `path`、`test_id`、`params` 的 JSON 数组，例如：
+三个 Workflow 的显示名固定，不再拼接测试 ID；通过 `workflow_dispatch.inputs.test_cases` 传递 **`{test_id, params}`** JSON 数组。文件路径由该 Commit SHA 的 `ci_registry.json` 唯一解析，用户不需要填写/重复维护模块路径：
 
 ```json
-[
-  {"path": "tests/integration_tests/nightly_all_models_test/a3_8p_tests.py", "test_id": "dsv4_flash_a3_8p_example", "params": {"STEPS": "5"}}
-]
+[{"test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]
 ```
-
-GitHub 托管的 `prepare` Job 用 `.github/scripts/prepare-ci-request.py` 校验 Inputs，生成包含 `run_id`、`attempt`、`sha` 的 `ci-request.json`，通过官方 `actions/upload-artifact@v4` 上传。Lite Actions 调度机使用 GitHub REST Artifacts API 依据**本 Run ID**领取清单，并与模型仓**该 Commit SHA**中的 `ci_registry.json` 校验：模块路径必须严格对应、拓扑匹配、参数只允许覆盖该用例注册的 `env_vars`。调度机不接收任意 Python 模块或 Shell 命令。
-
-输入数组含 1～12 个测试时，同一个 Action 依次执行全部用例、每个用例独立保存日志与 TensorBoard；遇到 Failure 立即停止并向 GitHub 回传失败。添加新模型时在 `nightly_all_models_test/*_tests.py` 按 `OverrideDefinitions` 风格增加测试定义，再注册 `test_id`，不用改 Lite Actions 的 `pipelines.json`；已有同一文件多个定义时，共用 Runner 会用注册的 ID 精确选择其中一个。
-
-示例触发：
 
 ```bash
 gh workflow run a3-8p-ci.yml --ref refactor/unified-a3-a5-ci \
-  -f 'test_cases=[{"path":"tests/integration_tests/nightly_all_models_test/a3_8p_tests.py","test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]'
+  -f 'test_cases=[{"test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]'
 ```
 
-这是 **GitHub Actions 标准 Inputs + Artifact API** 的交接流程，内网调度机不需要接收入站 Webhook。`ci-wait-result.py` 仍只等待该 Run 的报告，不感知测试清单。
+`prepare` Job 拒绝未经授权的 actor/branch，并将 Run ID、attempt、SHA 与测试清单一同写入 `ci-request.json`；调度机通过 GitHub Artifact API 读取，仅依据 pinned SHA 注册表授权模型模块、资源拓扑和可覆盖参数，不执行 Workflow 提供的代码路径/命令。A3 通道一次最多 2 个测试（受统一超时预算限制），A5 通道最多 1 个；同一次 Run 顺序执行，失败则停止后续。
+
+`.github/scripts/ci-wait-result.py` 在模型仓是**唯一 GitHub 可执行源文件**，`lite-actions/github/` 只保存非权威测试/部署镜像。跨仓更改需要通过 `lite-actions/scripts/sync_ci_mirror.py --model-repo <model-path> --check` 校验，或不带 `--check` 同步镜像。不要单独手改两个副本。A5 64P 尚未开放；其 prepare Job 会显式失败，不会因 CI Job 被跳过而出现绿色假阳性。
 
 ## A3 / A5 多机 Lite Actions（统一执行器）
 
@@ -166,7 +160,7 @@ GitHub Actions 仅负责触发和等待。内网 Lite Actions 的 `ci_core/ssh_r
 
 A5 64P 的模型入口为 `tests.integration_tests.nightly_all_models_test.a5_64p_tests`，
 在 8 个节点分别执行 `launch <output>`，结束后主节点执行 `verify <output>`；
-recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
+recipe 复用 `examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh`（根据 NODE_IPS×NGPU 推导 DP replicate），
 默认 EP32 / DP-shard32，8×8 下 DP-replicate2。必须先准备每机可用的
 `HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、`NODE_IPS`、`NGPU=8` 和 CANN/torch-npu；
 实际 A5 设备映射、HCCL 训练网和完整 64P 执行须通过实机验证。
@@ -273,36 +267,12 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 先训练两步并保存同一模型的原生 DCP 和 FP32 HF 权重，再各自通过真实 CheckpointManager 初始化模型，使用相同的新优化器和数据种子训练三步。每个 rank 校验加载后的 Engram 参数及 MXFP8 缓存/scale 有效行字节，随后对比 TensorBoard loss/grad_norm。失败会使测试返回非零，成功输出 `HF_ROUNDTRIP PASS`。不读取固定 golden，不验证优化器状态续训，也不覆盖正式整包非 Engram 量化权重的导入。
 
 
-## A3 16P DeepSeek-V4 Flash（两机 Eager，独立验证）
+## A3 16P DeepSeek-V4 Flash（双机 Eager）
 
-- 在调度机启动：
-  通过 Lite Actions 的 `python3 scripts/preflight_pool.py --pool a3-shared --npu` 检查节点可达性；
-  实际运行统一由调度机 `ci_core/ssh_runner.py` 完成。
-  如暂时占卡，可 `--run-id manual --stage-only` 仅部署，然后用
-  `--run-dir /mnt/share/ci_tests/<对应目录>` 执行已部署代码。
-- 两机固定 `a3-3-docker-relay`（192.168.0.30，rank 0–7，物理芯片 0–7）及
-  `a3-4-docker-relay`（192.168.0.107，rank 8–15，物理芯片 8–15，避让现有 8P 作业）。本地 `NGPU=8`、
-  `NNODES=2`、`EP=16`、`DP_SHARD=16`、`GBS=128`；模块和模型配置
-  与 8P 一致，默认 Inductor，调度机明确 `COMPILE_ENABLE=0`。
-- 示例脚本：`examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh`。
-  两机分别运行 `python -m tests.integration_tests.nightly_all_models_test.a3_16p_tests launch <output>`，
-  全部成功退出后，只在主机执行 `... verify <output>`，断言 TensorBoard
-  `loss_metrics/global_avg_loss` 正好包含 1–5 步的有限值、无重复步号。
-- 每台执行机分别保留自己的源码、日志、训练输出及退出码于
-  `/mnt/share/ci_tests/<北京时间>_run-<ID>_16p/node0/` 或 `node1/`。
-两机的 `/mnt/share` 是同一 NFS 共享卷，因此必须隔离各自的子目录。
-当前属于手工验证阶段，
-  **不能把代码已部署视作 16P 训练通过**。成功后再接入正式 16P Actions。
+16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`，不维护第三份完整 Flash recipe。`a3_16p_tests.py` 将运行配置作为环境传递：每机 8 卡、两机、EP16、DP shard16、GBS128、5 steps、AdamW、关闭 compile 和 checkpoint、MoE force-load-balance。Muon/Inductor **不在此 Eager smoke 覆盖范围内**。模型仓 Unit Tooling Tests 会通过模拟 `run_train_multinodes.sh` 检查最终展开的参数，并确保共享 Flash 默认 Muon/Inductor 配置保持不变。
 
+GitHub 已有历史 Eager 验收：[A3 16P Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)（双节点 5 steps、TensorBoard、GitHub Success）。其成功仅证明旧提交，重构后必须重新完成实机 Actions 回归才能引用为新版本 PASS。
 
-**2026-10-09 手工预验证**：双机源码快照分发成功；两机各 8 个 CPU/Gloo
-Rank 真实完成 world=16 的 AllReduce，期望总和 136（两机退出码 0）；
-16P Shell 的模拟启动核对了 EP16、DP Shard16、GBS128、5 steps 和 Eager。
-**NPU 训练尚被共享资源占用阻塞**：A3-3 的选定 8 卡及 A3-4 的选定 8 卡均有在先任务，
-已由物理 npu-smi info 检查确认，未终止任何在先任务。
+启动/停止统一由 Lite Actions 主机的可信 Workflow → Agent → SSH Runner 完成；不要直接运行不存在的 `--stage-only`、`--run-dir` 等旧参数。独立环境手工排障可按受信任 `ci_entrypoint` 运行 `launch/verify`，两节点需要相同的注册表和准确的 `NODE_IPS`，且不可占用其他训练作业。
 
-16P optimizer note: 原始 Muon/DistMuon 在 EP16 下初始化时报错 optimizer bucket plans differ across ranks。16P Eager 冒烟使用普通 AdamW，禁用 state-swap 覆盖；并不代表 Muon 路线已通过。
-
-2026-10-09 16P real E2E PASS: COMPILE_ENABLE=0, AdamW, --debug.moe-force-load-balance, two hosts 8 NPUs each, EP16, Steps 1-5 completed. Both nodes rc=0, TensorBoard losses: 12.28344, 11.86433, 11.20779, 10.95729, 10.68304. Logs: /mnt/share/ci_tests/2026-10-09_07-56-27_run-manual_16p/node{0,1}/. Muon bucket-validation failure is not covered by this Eager-smoke PASS.
-
-2026-10-09 16P Actions 实机闭环：GitHub Run #37864999747（Eager、AdamW、MoE force-load-balance）运行成功。双机 Run 目录 /mnt/share/ci_tests/2026-10-09_08-29-25_run-37864999747_16p/node{0,1}/；两机退出码 0，训练 5 steps，Step5 loss=10.72270、tps=587，GitHub 收到 PASS、10 行 Step/耗时指标。调度机 upload-metrics.json 记录本轮应用层估算上传字节数 2325。GitHub Action 生产入口仅提供 master 分支手动 workflow_dispatch；PR #26 自动触发仅用于此次合入前联调。
+A5 64P 目前仅完成静态拓扑和命令展开检查，**未实机验证**。

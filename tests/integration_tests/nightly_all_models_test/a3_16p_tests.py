@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed, select_definition
+from tests.integration_tests.nightly_all_models_test.runner import required_steps, run_distributed
 
 
 def build_a3_16p_test_list() -> list[OverrideDefinitions]:
@@ -11,7 +11,7 @@ def build_a3_16p_test_list() -> list[OverrideDefinitions]:
         test_name="dsv4_flash_a3_16p_example",
         test_descr="DeepSeek-V4 Flash A3 16P nightly distributed E2E",
         ngpu=8,  # local NPU count; world_size is 2*8
-        train_script="examples/deepseek_v4/debug/deepseek_v4_flash_16p_cpt_4k_a3.sh",
+        train_script="examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh",
         train_args=("--metrics.enable_tensorboard", "--metrics.log_freq=1"),
         override_args=[()],
         env_vars={
@@ -20,6 +20,10 @@ def build_a3_16p_test_list() -> list[OverrideDefinitions]:
             "HF_ASSETS_PATH": os.environ.get("HF_ASSETS_PATH", ""),
             "STEPS": str(steps),
             "COMPILE_ENABLE": os.environ.get("COMPILE_ENABLE", "0"),
+            "EP": "16", "DP_SHARD": "16", "GBS": "128",
+            "OPTIMIZER_NAME": "AdamW", "CHECKPOINT_ENABLE": "0",
+            "FORCE_LOAD_BALANCE": "1", "COMM_INIT_TIMEOUT_SECONDS": "600",
+            "OPTIMIZER_OVERRIDES": "",
             "USE_GOLDEN": "0",
         },
         expected_steps=(tuple(range(1, steps + 1)),),
@@ -27,8 +31,11 @@ def build_a3_16p_test_list() -> list[OverrideDefinitions]:
     )]
 
 
+# Shared CI entrypoint imports this stable contract; the original builder remains public.
+build_test_list = build_a3_16p_test_list
+
 def main() -> None:
-    run_distributed(select_definition(build_a3_16p_test_list()), nnodes=2)
+    run_distributed(build_a3_16p_test_list()[0], nnodes=2)
 
 
 if __name__ == "__main__":
