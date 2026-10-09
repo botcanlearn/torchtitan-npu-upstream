@@ -67,7 +67,36 @@ def remote_env(dest: str, host: str) -> str:
     return " ".join(f"{key}={shlex.quote(val)}" for key, val in env.items())
 
 
-def check_remote(host: str) -> None:
+
+def release_verified_auto_occupy(host: str, pids: set[int]) -> bool:
+    """Only A3-3's known idle auto-occupy worker may be released.
+
+    Never signal arbitrary PIDs or other users' workloads. Verify ALL
+    selected device PIDs on the host before sending any signal.
+    """
+    if host != "a3-3-docker-relay" or not pids:
+        return False
+    source = (
+        "import os,signal,sys\n"
+        "pids=[int(x) for x in sys.argv[1:]]\n"
+        "expected=b'/data/z00894965/code/auto-occupy/auto_occupy_worker.py'\n"
+        "for pid in pids:\n"
+        "    with open(f'/proc/{pid}/cmdline','rb') as f: parts=f.read().split(b'\\x00')\n"
+        "    if expected not in parts: raise SystemExit(f'REFUSE_UNRELATED_PID:{pid}')\n"
+        "for pid in pids: os.kill(pid,signal.SIGTERM)\n"
+        "print('RELEASED_VERIFIED_AUTO_OCCUPY',*pids)\n"
+    )
+    args = " ".join(str(pid) for pid in sorted(pids))
+    command = f"python3 -c {shlex.quote(source)} {args}"
+    try:
+        response = ssh("a3-3-relay", command).stdout.strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"[PREFLIGHT] auto-occupy release refused: {type(exc).__name__}", flush=True)
+        return False
+    print(f"[PREFLIGHT] {response}", flush=True)
+    return response.startswith("RELEASED_VERIFIED_AUTO_OCCUPY")
+
+def check_remote(host: str, *, release_auto: bool = True) -> None:
     # Check actual physical NPU usage (may belong to another Docker container);
     # checking only local 'ps' is insufficient on shared NPU hosts.
     command = (
@@ -84,10 +113,20 @@ def check_remote(host: str) -> None:
     # ASCEND_RT_VISIBLE_DEVICES chooses individual die IDs (0..15).
     selected_cards = {chip // 2 for chip in VISIBLE_IDS[host]}
     matches = []
+    occupied_pids = set()
     for line in proc_lines.splitlines():
         proc = re.match(r"^\|\s*(\d+)\s+(0|1)\s*\|\s*(\d+)\s*\|", line)
         if proc and int(proc.group(1)) in selected_cards:
             matches.append(line)
+            occupied_pids.add(int(proc.group(3)))
+    if matches and release_auto and release_verified_auto_occupy(host, occupied_pids):
+        import time
+        for _ in range(12):
+            time.sleep(3)
+            try:
+                return check_remote(host, release_auto=False)
+            except RuntimeError:
+                continue
     if matches:
         raise RuntimeError(
             f"{host}: selected NPU chips {VISIBLE_IDS[host]} occupied. "
