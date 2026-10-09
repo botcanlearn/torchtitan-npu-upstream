@@ -1,4 +1,4 @@
-name: A3-8p-CI
+name: A3-8p-CI-Example
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - name: Wait for internal A3-8p-CI
+      - name: Wait for internal A3-8p-CI-Example
         env:
           GH_TOKEN: ${{ github.token }}
           A3_CI_TIMEOUT_SECONDS: "7400"
