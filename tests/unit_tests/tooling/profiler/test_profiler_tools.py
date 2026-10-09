@@ -28,3 +28,21 @@ def test_find_ascend_pt_dirs_scans_flat_and_nested_layouts(tmp_path):
 
 def test_find_ascend_pt_dirs_returns_empty_for_missing_traces(tmp_path):
     assert _find_ascend_pt_dirs(str(tmp_path)) == []
+
+
+def test_find_ascend_pt_dirs_ignores_matching_files_in_mixed_layouts(tmp_path):
+    nested = tmp_path / "profiling_data"
+    nested.mkdir()
+    directories = [tmp_path / "z_ascend_pt", nested / "a_ascend_pt"]
+    for directory in directories:
+        directory.mkdir()
+    for path in (tmp_path / "fake_ascend_pt", nested / "fake_ascend_pt"):
+        path.write_text("not a trace directory", encoding="utf-8")
+
+    assert _find_ascend_pt_dirs(str(tmp_path)) == sorted(str(directory) for directory in directories)
+
+
+def test_find_ascend_pt_dirs_returns_empty_for_matching_files(tmp_path):
+    (tmp_path / "fake_ascend_pt").write_text("not a trace directory", encoding="utf-8")
+
+    assert _find_ascend_pt_dirs(str(tmp_path)) == []
