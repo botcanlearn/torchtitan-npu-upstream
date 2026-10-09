@@ -173,15 +173,12 @@ recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
 实际 A5 设备映射、HCCL 训练网和完整 64P 执行须通过实机验证。
 
 **统一 Lite Actions Runner 实机回归（2026-10-09）**：
-A3 8P [Run 37911399789](https://github.com/depeng1994/torchtitan-npu/actions/runs/37911399789)
-通过（Eager 5 steps + TensorBoard）；A3 16P 的旧版双机 Dispatcher 曾在
-[Run 37868722207](https://github.com/depeng1994/torchtitan-npu/actions/runs/37868722207)
-通过，但新统一 SSH Runner 的
-[Run 37912372023](https://github.com/depeng1994/torchtitan-npu/actions/runs/37912372023) 和
-[Run 37913151439](https://github.com/depeng1994/torchtitan-npu/actions/runs/37913151439)
-发生 `HcclBroadcast` / `Communication_Error_Get_Socket(EI0006)`，**尚未通过**。
-基础 TCP 双向连通性已验证；仍需查 HCCL/RDMA、节点启动参数和设备映射，不应将
-A3 16P 或 A5 64P 标记为统一 Runner 的实机成功用例。
+
+- **A3 8P 已通过**：[Run 37939445270](https://github.com/depeng1994/torchtitan-npu/actions/runs/37939445270)：`nightly_all_models_test/a3_8p_tests.py`，5 steps、TensorBoard、退出码 0、GitHub Success、结束广播
+- **A3 16P 已通过**：[Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)：`nightly_all_models_test/a3_16p_tests.py`，双机各 8P、两节点退出码 0、5 steps、TensorBoard、GitHub Success、结束广播
+- **A5 64P 尚未实机验证**：只完成 8×8 资源规格与 `nightly_all_models_test/a5_64p_tests.py` 定义；独立 HCCL 小网 IP 和模型资产路径仍需填写验证
+
+旧版 16P 回归曾发生 `HcclBroadcast` / `Communication_Error_Get_Socket(EI0006)`。已定位新的 SSH Runner 未传递旧版使用的 `ASCEND_SET_ENV_PATH`；补回后在上面的 16P Run 中通过真实训练。
 
 
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
