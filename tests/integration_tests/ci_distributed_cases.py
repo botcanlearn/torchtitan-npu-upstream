@@ -1,6 +1,6 @@
 """Declarative multi-node CI cases; not a separate SSH/GitHub runner.
 
-A5 64P is specification-only until hardware and launch adapter are validated.
+A5 64P uses the common dispatcher SSH runner; actual execution needs verified nodes.
 """
 from dataclasses import dataclass
 
@@ -43,12 +43,12 @@ def build_a5_pro_64p_case(hf_assets_path: str, *, steps: int = 5) -> Distributed
     """
     if steps < 1 or not hf_assets_path.strip():
         raise ValueError("steps must be positive and HF assets path nonempty")
-    resources = DistributedResources(pool="a5-mock", nodes=8, local_ngpu=8)
+    resources = DistributedResources(pool="a5-64p-lab", nodes=8, local_ngpu=8)
     definition = OverrideDefinitions(
         test_name="dsv4_pro_a5_64p",
         test_descr="DeepSeek-V4 Pro A5 64P distributed specification",
         ngpu=8,  # per node; NOT total world size
-        train_script="examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh",
+        train_script="examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh",
         train_args=("--metrics.enable_tensorboard", "--metrics.log_freq=1"),
         override_args=((),),
         env_vars={

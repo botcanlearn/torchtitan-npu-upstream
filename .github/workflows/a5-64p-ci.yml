@@ -1,0 +1,25 @@
+name: A5-64p-CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a5-64p-ci
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  ci:
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wait for internal A5-64p-CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          A3_CI_TIMEOUT_SECONDS: "14900"
+        run: python3 .github/scripts/a3-ci-wait-result.py --case a5-64p

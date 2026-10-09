@@ -116,6 +116,19 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 **不在本 Actions 的通过范围内**；可在执行机单独以
 `COMPILE_ENABLE=1 STEPS=5` 运行原入口。
 
+## A3 / A5 多机 Lite Actions（统一执行器）
+
+GitHub Actions 仅负责触发和等待。内网 Lite Actions 的 `ci_core/ssh_runner.py`
+根据 `config/pools.json` 和 `config/pipelines.json` 对 **A3 8P（1×8）、A3 16P（2×8）、A5 64P（8×8）**
+使用相同的 SSH 源码分发、跨节点启动、设备锁和日志回传流程；不再使用模型仓下的 A3 双机调度脚本。
+
+A5 64P 的模型入口为 `tests.integration_tests.run_a5_64p_multinode_tests`，
+在 8 个节点分别执行 `launch <output>`，结束后主节点执行 `verify <output>`；
+recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
+默认 EP32 / DP-shard32，8×8 下 DP-replicate2。必须先准备每机可用的
+`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、`NODE_IPS`、`NGPU=8` 和 CANN/torch-npu；
+实际 A5 设备映射、HCCL 训练网和完整 64P 执行须通过实机验证。
+
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
 
 `run_multinode_tests.py` 直接通过现有 integration runner 执行
@@ -211,8 +224,8 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 ## A3 16P DeepSeek-V4 Flash（两机 Eager，独立验证）
 
 - 在调度机启动：
-  `python3 .github/scripts/a3-16p-dispatch.py --preflight` 检查两机所选卡是否空闲；
-  `python3 .github/scripts/a3-16p-dispatch.py --run-id manual` 才真正下发并训练。
+  通过 Lite Actions 的 `python3 scripts/preflight_pool.py --pool a3-shared --npu` 检查节点可达性；
+  实际运行统一由调度机 `ci_core/ssh_runner.py` 完成。
   如暂时占卡，可 `--run-id manual --stage-only` 仅部署，然后用
   `--run-dir /mnt/share/ci_tests/<对应目录>` 执行已部署代码。
 - 两机固定 `a3-3-docker-relay`（192.168.0.30，rank 0–7，物理芯片 0–7）及

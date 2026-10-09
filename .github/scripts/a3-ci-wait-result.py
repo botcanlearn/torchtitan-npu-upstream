@@ -13,6 +13,7 @@ PIPELINES = {
     "a3-smoke": ("A3-2p-CI", "npu-smi"),
     "a3-8p": ("A3-8p-CI-Example", "dsv4-flash-8p"),
     "a3-16p": ("A3-16p-CI-Example", "dsv4-flash-16p"),
+    "a5-64p": ("A5-64p-CI", "dsv4-a5-64p"),
 }
 
 
