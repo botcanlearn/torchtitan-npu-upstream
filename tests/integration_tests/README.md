@@ -129,6 +129,18 @@ recipe 位于 `examples/deepseek_v4/debug/deepseek_v4_pro_64p_cpt_4k_a5.sh`，
 `HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、`NODE_IPS`、`NGPU=8` 和 CANN/torch-npu；
 实际 A5 设备映射、HCCL 训练网和完整 64P 执行须通过实机验证。
 
+**统一 Lite Actions Runner 实机回归（2026-10-09）**：
+A3 8P [Run 37911399789](https://github.com/depeng1994/torchtitan-npu/actions/runs/37911399789)
+通过（Eager 5 steps + TensorBoard）；A3 16P 的旧版双机 Dispatcher 曾在
+[Run 37868722207](https://github.com/depeng1994/torchtitan-npu/actions/runs/37868722207)
+通过，但新统一 SSH Runner 的
+[Run 37912372023](https://github.com/depeng1994/torchtitan-npu/actions/runs/37912372023) 和
+[Run 37913151439](https://github.com/depeng1994/torchtitan-npu/actions/runs/37913151439)
+发生 `HcclBroadcast` / `Communication_Error_Get_Socket(EI0006)`，**尚未通过**。
+基础 TCP 双向连通性已验证；仍需查 HCCL/RDMA、节点启动参数和设备映射，不应将
+A3 16P 或 A5 64P 标记为统一 Runner 的实机成功用例。
+
+
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
 
 `run_multinode_tests.py` 直接通过现有 integration runner 执行
