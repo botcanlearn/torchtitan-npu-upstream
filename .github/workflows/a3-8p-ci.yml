@@ -9,18 +9,17 @@ permissions:
 concurrency:
   group: a3-8p-ci
   cancel-in-progress: false
+  queue: max
 
 jobs:
-  a3-8p-validation:
-    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && github.ref == 'refs/heads/master'
+  ci:
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/refactor/unified-a3-a5-ci')
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Wait for internal A3 8P DeepSeek-V4 integration result
+      - uses: actions/checkout@v4
+      - name: Wait for internal A3-8p-CI
         env:
           GH_TOKEN: ${{ github.token }}
-          A3_8P_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          A3_8P_CI_TIMEOUT_SECONDS: "7400"
-        run: python3 .github/scripts/a3-8p-wait-result.py
+          A3_CI_TIMEOUT_SECONDS: "7400"
+        run: python3 .github/scripts/a3-ci-wait-result.py --case a3-8p

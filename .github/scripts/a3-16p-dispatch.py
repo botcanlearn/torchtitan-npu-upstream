@@ -96,7 +96,7 @@ def release_verified_auto_occupy(host: str, pids: set[int]) -> bool:
     print(f"[PREFLIGHT] {response}", flush=True)
     return response.startswith("RELEASED_VERIFIED_AUTO_OCCUPY")
 
-def check_remote(host: str, *, release_auto: bool = True) -> None:
+def check_remote(host: str, *, release_auto: bool = False) -> None:
     # Check actual physical NPU usage (may belong to another Docker container);
     # checking only local 'ps' is insufficient on shared NPU hosts.
     command = (
