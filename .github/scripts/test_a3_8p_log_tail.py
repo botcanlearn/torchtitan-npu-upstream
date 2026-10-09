@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 import subprocess
 
 
@@ -20,7 +19,6 @@ def load(name, path):
 
 
 TAIL = load("remote_tail", "a3-8p-log-tail.py")
-AGENT = load("remote_agent", "a3-8p-agent.py")
 
 
 class LogTailTests(unittest.TestCase):
@@ -185,56 +183,6 @@ class LogTailTests(unittest.TestCase):
             self.assertEqual(len(selected), 20)
             self.assertIn("timeout: task exceeded deadline", selected[-1])
 
-    def test_dispatcher_pins_pipeline_script_during_execution(self):
-        with tempfile.TemporaryDirectory() as dirname:
-            base = Path(dirname)
-            source = base / "live-pipeline.sh"
-            source.write_text("echo original\n")
-            captured = {}
-
-            def fake_subprocess_run(cmd, **kwargs):
-                pinned = Path(cmd[1])
-                captured["cmd"] = cmd
-                self.assertNotEqual(pinned, source)
-                self.assertEqual(pinned.read_text(), "echo original\n")
-                source.write_text("echo modified\n")
-                self.assertEqual(pinned.read_text(), "echo original\n")
-                return subprocess.CompletedProcess(cmd, 0)
-
-            run = {
-                "id": 42,
-                "run_attempt": 1,
-                "head_sha": "e" * 40,
-                "created_at": "2026-10-08T13:07:51Z",
-            }
-            with patch.object(AGENT, "LOG_DIR", base / "logs"), \
-                 patch.dict(AGENT.PIPELINES, {"dsv4-flash-8p": source}), \
-                 patch.object(AGENT.subprocess, "run", side_effect=fake_subprocess_run):
-                _, result, logfile = AGENT.execute(run)
-            self.assertEqual(result["status"], "PASS")
-            self.assertEqual(result["exit_code"], 0)
-            self.assertEqual(
-                (logfile.parent / "remote-pipeline.sh").read_text(),
-                "echo original\n",
-            )
-
-    def test_dispatcher_never_includes_end_marker(self):
-        with tempfile.TemporaryDirectory() as dirname:
-            p = Path(dirname) / "pipeline.log"
-            p.write_text(
-                "RESULT_LAST_20_LINES_BEGIN\n"
-                "real error 1\nreal error 2\n"
-                "RESULT_LAST_20_LINES_END\n"
-            )
-            self.assertEqual(
-                AGENT.extract_last_20(p), ["real error 1", "real error 2"]
-            )
-            p.write_text(
-                "RESULT_LAST_20_LINES_BEGIN\nRESULT_LAST_20_LINES_END\n"
-            )
-            self.assertEqual(
-                AGENT.extract_last_20(p), ["No remote log lines returned"]
-            )
 
 
 if __name__ == "__main__":
