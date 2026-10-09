@@ -1,0 +1,29 @@
+name: A3-16p-CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: a3-16p-ci
+  cancel-in-progress: false
+
+jobs:
+  a3-16p-validation:
+    if: github.actor == 'depeng1994' && github.repository == 'depeng1994/torchtitan-npu' && (github.ref == 'refs/heads/master' || (github.event_name == 'pull_request' && github.event.pull_request.number == 26 && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Wait for internal A3 16P DeepSeek-V4 Eager test
+        env:
+          GH_TOKEN: ${{ github.token }}
+          A3_16P_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          A3_16P_CI_TIMEOUT_SECONDS: "7400"
+        run: python3 .github/scripts/a3-16p-wait-result.py

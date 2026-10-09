@@ -50,7 +50,7 @@ STEPS="${STEPS:-100}"
 # Debug
 USE_GOLDEN="${USE_GOLDEN:-0}"
 DEBUG_ARGS="
-    --debug.no-moe-force-load-balance
+    --debug.moe-force-load-balance
     --debug.print-config
 "
 

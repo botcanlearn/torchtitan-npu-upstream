@@ -237,3 +237,5 @@ Rank 真实完成 world=16 的 AllReduce，期望总和 136（两机退出码 0�
 已由物理 npu-smi info 检查确认，未终止任何在先任务。
 
 16P optimizer note: 原始 Muon/DistMuon 在 EP16 下初始化时报错 optimizer bucket plans differ across ranks。16P Eager 冒烟使用普通 AdamW，禁用 state-swap 覆盖；并不代表 Muon 路线已通过。
+
+2026-10-09 16P real E2E PASS: COMPILE_ENABLE=0, AdamW, --debug.moe-force-load-balance, two hosts 8 NPUs each, EP16, Steps 1-5 completed. Both nodes rc=0, TensorBoard losses: 12.28344, 11.86433, 11.20779, 10.95729, 10.68304. Logs: /mnt/share/ci_tests/2026-10-09_07-56-27_run-manual_16p/node{0,1}/. Muon bucket-validation failure is not covered by this Eager-smoke PASS.
