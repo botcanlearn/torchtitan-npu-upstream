@@ -88,7 +88,7 @@ CANN 社区统一治理文件。需要跨项目或影响社区方向的事项，
 涉及上游同步或依赖调整的 PR 应：
 
 - 在描述中注明目标分支和上游 `torchtitan` commit。
-- 同步检查 `requirements.txt`、`.ci/lint.sh`、patch 目标和测试入口。
+- 同步检查 `requirements.txt`、`.ci/setup_torchtitan.sh`、patch 目标和测试入口。
 - 需要时更新安装指南、相关功能文档和配置示例。
 - 不直接套用其他开发基线的配置、命令或运行时结论。
 

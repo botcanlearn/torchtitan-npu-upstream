@@ -51,7 +51,7 @@ UT 和 ST 不是同一条覆盖链路。UT 审查 CPU 上可观察的模块行�
 
 ### 2. 选择审查规则
 
-在选择规则前，先从 `requirements.txt` 和 `.ci/lint.sh` 确认固定的 TorchTitan commit。凡是需要拆解前向或训练流程的审查，都必须读取该 commit 对应的上游 torchtitan 源码，沿本仓 `patches`、`override`、模型或算子与上游 trainer、model 和 consumer 的真实调用链核对。上游源码只作为调用链和接口基线；上游仓库的测试不计入本仓 UT/ST 覆盖。
+在选择规则前，先从 `requirements.txt` 和 `.ci/setup_torchtitan.sh` 确认固定的 TorchTitan commit。凡是需要拆解前向或训练流程的审查，都必须读取该 commit 对应的上游 torchtitan 源码，沿本仓 `patches`、`override`、模型或算子与上游 trainer、model 和 consumer 的真实调用链核对。上游源码只作为调用链和接口基线；上游仓库的测试不计入本仓 UT/ST 覆盖。
 
 UT 读取 [references/ut-review.md](references/ut-review.md)，按正向功能单元检查现有 UT；ST 读取 [references/st-review.md](references/st-review.md)，只对 `tests/integration_tests` 的实际 testcase 做路径覆盖比对；格式读取 [references/format-review.md](references/format-review.md) 独立列出文件、收集、命名和隔离问题。
 

@@ -29,7 +29,7 @@
 
 3. **Override 显式启用。** 每个 override 工厂使用 `@override` 注册，并以完整的 `module.function` 写入 `override.imports`。不要在 `__init__.py` 中批量导入具体 override。
 
-4. **固定上游基线。** 当前 torchtitan commit 同时记录在 `requirements.txt` 和 `.ci/lint.sh`。调整上游版本时同步更新两处，并检查 patch 目标、函数签名、模型接口和测试是否仍有效。
+4. **固定上游基线。** 当前 torchtitan commit 同时记录在 `requirements.txt` 和 `.ci/setup_torchtitan.sh`。调整上游版本时同步更新两处，并检查 patch 目标、函数签名、模型接口和测试是否仍有效。
 
 5. **临时 patch 可删除。** `torchtitan_npu/patches/torchtitan/` 只保存已提交上游但当前依赖版本尚未包含的临时补丁。补丁文件必须记录对应 PR；上游合入并更新依赖后删除相关补丁和导入。
 
@@ -87,7 +87,7 @@
 - 先确认任务涉及的目录、模型、并行策略和是否影响训练数值。
 - 先读取相关源码、配置、测试和脚本；涉及 override 或 patch 时再读取对应目录的说明文档。
 - 文档任务使用 `.agents/skills/write-torchtitan-npu-docs/` 中的项目规范。
-- 涉及上游同步时，先核对 `requirements.txt` 与 `.ci/lint.sh` 中的固定 commit。
+- 涉及上游同步时，先核对 `requirements.txt` 与 `.ci/setup_torchtitan.sh` 中的固定 commit。
 
 ### 2. 实施修改
 
