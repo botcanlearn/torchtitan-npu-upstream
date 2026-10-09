@@ -11,10 +11,13 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+# The CI Triton launcher still uses C++17, but PyTorch ATen requires C++20.
+# Restore this GDN-dependent case once the CI toolchain is fixed.
 INTEGRATION_TESTS_START="$(date +%s)"
 "${PYTHON_BIN}" -m tests.integration_tests.run_tests \
     "${OUTPUT_DIR}" \
     --test_suite models \
+    --exclude qwen3_5_debugmodel_1rank \
     --module "${MODULE}" \
     --config "${CONFIG}" \
     --ngpu "${NGPU}"

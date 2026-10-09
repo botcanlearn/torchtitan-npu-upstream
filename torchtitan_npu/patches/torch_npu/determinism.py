@@ -24,17 +24,24 @@ _NPU_DETERMINISTIC_ENV = {
 }
 
 original_use_deterministic_algorithms = torch.use_deterministic_algorithms
+_logged_modes: set[bool] = set()
 
 
 @functools.wraps(original_use_deterministic_algorithms)
 def patched_use_deterministic_algorithms(mode, *args, **kwargs):
     if mode:
         os.environ.update(_NPU_DETERMINISTIC_ENV)
-        logger.info("NPU deterministic env enabled: %s", ", ".join(_NPU_DETERMINISTIC_ENV))
     else:
         for key in _NPU_DETERMINISTIC_ENV:
             os.environ.pop(key, None)
-        logger.info("NPU deterministic env disabled")
+    # Compilation repeatedly restores this switch; only deduplicate the log,
+    # since every call must still synchronize the environment and PyTorch.
+    if mode not in _logged_modes:
+        if mode:
+            logger.info("NPU deterministic env enabled: %s", ", ".join(_NPU_DETERMINISTIC_ENV))
+        else:
+            logger.info("NPU deterministic env disabled")
+        _logged_modes.add(mode)
     return original_use_deterministic_algorithms(mode, *args, **kwargs)
 
 

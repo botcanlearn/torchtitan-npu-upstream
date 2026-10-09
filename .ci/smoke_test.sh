@@ -11,18 +11,21 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-# Suites that the 2026-09-29 CI image cannot run yet. They are deselected here
+# Tests that the 2026-09-29 CI image cannot run yet. They are deselected here
 # instead of patched in the repo; drop a deselect once its toolchain issue is
 # fixed.
 #   * tests/smoke_tests/ops/test_mhc_triton.py (26 cases): triton-ascend
 #     hardcodes -std=c++17 when it builds its NPU host stub / precompiled
 #     header, while torch >= 2.14 refuses anything below C++20
 #     (ATen/ATen.h:5), so every Triton kernel launch fails to compile.
+#   * test_qwen3_5_npu_runtime.py::test_merged_gdn_forward_backward uses the
+#     same Triton host-stub compiler and fails with the same C++17/C++20 error.
 #   * the SDC three-strikes checksum case: torch_npu renamed the ASD checksum
 #     dtype flag (matmul_with_bf16 -> matmul_dtype_supported), so the checksum
 #     is never linked and `checksum_enable` never flips.
 SMOKE_DESELECT=(
     --deselect tests/smoke_tests/ops/test_mhc_triton.py
+    --deselect tests/smoke_tests/ops/test_qwen3_5_npu_runtime.py::test_merged_gdn_forward_backward
     --deselect tests/smoke_tests/sdc/test_sdc.py::test_three_gradient_strikes_activate_checksum_without_recompiling
 )
 
