@@ -3,6 +3,7 @@
 - https://github.com/pytorch/torchtitan/pull/3430
 - https://github.com/pytorch/torchtitan/pull/3634
 - https://github.com/pytorch/torchtitan/pull/3864
+- https://github.com/pytorch/torchtitan/pull/4411
 - https://github.com/pytorch/torchtitan/pull/4474
 - https://github.com/pytorch/torchtitan/pull/3985
 - https://github.com/pytorch/torchtitan/pull/4650
@@ -41,6 +42,7 @@ grep -L "Pending upstream PR: https://github.com/pytorch/torchtitan/pull/" \
 | [#3864](https://github.com/pytorch/torchtitan/pull/3864) | 为 torchtitan 补充 LoggedAuxLoss 辅助损失框架 |
 | [#4474](https://github.com/pytorch/torchtitan/pull/4474) | 补齐部分初始化的 optimizer state，支持完整 checkpoint 恢复 |
 | [#3985](https://github.com/pytorch/torchtitan/pull/3985) | 为 Trainer 补充 EMA 权重维护及 checkpoint 集成 |
+| [#4411](https://github.com/pytorch/torchtitan/pull/4411) | 为 DistMuon 补充 HSDP replica compute 去重 |
 | [#4529](https://github.com/pytorch/torchtitan/pull/4529) | 隔离 EP chunk 与 packed/varlen 动态符号，并修正 singleton batch、copied unbacked range 和具体化范围，对应 `ep_chunk_concretization` |
 | [#4650](https://github.com/pytorch/torchtitan/pull/4650) | 修正 EP overlap 对 shape query 通信标注的校验，对应 `ep_overlap_shape_queries` |
 | [#4516](https://github.com/pytorch/torchtitan/pull/4516) | 去重跨 chunk 共享的 EP ready node，对应 `ep_ready_nodes_dedup` |

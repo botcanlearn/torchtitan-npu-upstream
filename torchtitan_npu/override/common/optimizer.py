@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import partial
 from types import MethodType
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -264,22 +264,11 @@ class _NovaSwapAdamW:
             swap_api.wait_for_device_release(bucket.state_name)
 
         for bucket in new_buckets:
-            original_group = bucket.group
-            original_grads = [(parameter, parameter.grad) for parameter in bucket.parameters]
-            lr = original_group["lr"]
-            bucket.group = {
-                **original_group,
-                "lr": torch.zeros_like(lr) if isinstance(lr, torch.Tensor) else 0.0,
-            }
-            try:
-                for parameter in bucket.parameters:
-                    parameter.grad = torch.zeros_like(parameter)
-                self._initialize_bucket_state(bucket)
-                self._update_bucket(bucket)
-            finally:
-                bucket.group = original_group
-                for parameter, grad in original_grads:
-                    parameter.grad = grad
+            # Checkpoint materialization must reproduce AdamW's lazy state
+            # allocation, not perform a synthetic update.  Calling AdamW.step
+            # with zero gradients increments ``state['step']`` and changes the
+            # first real update's bias correction relative to no-swap AdamW.
+            self._initialize_bucket_state(bucket)
 
             self._submit(bucket, "D2H")
             swap_api.wait_for_device_release(bucket.state_name)
@@ -967,6 +956,14 @@ class OptimizerStateSwapContainer(OptimizersContainer):
 
 
 def _ensure_all_optim_state(optimizer: torch.optim.Optimizer) -> None:
+    if isinstance(optimizer, DistMuon) and hasattr(optimizer, "_replica_dedup_all_layouts"):
+        # Initialize only this replica's owned momentum without a full step.
+        for compute_layout in optimizer._parameter_compute_layouts:
+            state = optimizer.state[compute_layout.param]
+            if "momentum_buffer" not in state:
+                grad = cast("DTensor", torch.zeros_like(compute_layout.param))
+                optimizer._momentum(compute_layout, grad)
+        return
     swap = getattr(optimizer, "_torchtitan_npu_swap_adapter", None)
     if isinstance(swap, _NovaSwapAdamW):
         swap.ensure_all_state()

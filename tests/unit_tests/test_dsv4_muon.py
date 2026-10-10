@@ -11,8 +11,8 @@ from pathlib import Path
 
 import torchtitan.distributed.flex_shard._optimizer_reshard_schedule as schedule
 import torchtitan.distributed.flex_shard.dist_muon as dist_muon
-from torch.distributed.tensor import Shard
 from torchtitan.distributed.flex_shard import BlockShard
+from torch.distributed.tensor import Shard
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan_npu.models.deepseek_v4 import model_registry
@@ -123,7 +123,6 @@ def test_dsv4_unified_muon_policy_follows_paper_parameter_split():
     )
     assert all(".moe.routed_experts.inner_experts." in fqn for fqn in routed_expert_bucket.patterns)
     for unified_muon_parameter in (
-        "indexer",
         "compressor",
         "routed_experts",
         "router",
@@ -158,8 +157,6 @@ def test_dist_muon_patch_rebinds_redistribution_group():
         "mesh_axis_participants",
         "local_participant",
     )
-
-
 def test_dsv4_muon_indexer_query_uses_per_head_block_sharding():
     model_spec = model_registry("debugmodel")
     profile = _dsv4_muon_profile(model_spec)

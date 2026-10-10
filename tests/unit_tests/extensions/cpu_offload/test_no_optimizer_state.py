@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch_npu
 
-from torchtitan_npu.config.configs import OptimizerConfig, TrainingConfig
+from torchtitan_npu.config.configs import MuonOptimizerProfile, OptimizerConfig, TrainingConfig
 from torchtitan_npu.extensions.cpu_offload.cpu_offload_adamw import CpuOffloadAdamW
 from torchtitan_npu.extensions.cpu_offload.staging import CpuStaging
 from torchtitan_npu.extensions.trainer import TrainerEx
@@ -22,6 +22,75 @@ from torchtitan_npu.extensions.trainer import TrainerEx
 requires_npu = pytest.mark.skipif(
     not torch_npu.npu.is_available(), reason="NPU not available"
 )
+
+
+def _muon_factory_kwargs(*, enable_hsdp_replica_dedup: bool) -> dict[str, object]:
+    config = OptimizerConfig(
+        name="Muon",
+        muon_enable_hsdp_replica_dedup=enable_hsdp_replica_dedup,
+        _muon_profile=MuonOptimizerProfile(
+            muon_pattern=r".*",
+            optimizer_factory_kwargs={
+                "DistMuon": {
+                    "compute_sharding_by_fqn": {},
+                    "bucket_configs": (),
+                }
+            },
+        ),
+    )
+    config.materialize()
+    return config.optimizer_factory_kwargs_by_name["DistMuon"]
+
+
+def test_cpu_offload_muon_factory_consumes_disabled_replica_dedup(monkeypatch) -> None:
+    from torchtitan_npu.extensions.cpu_offload import cpu_offload_muon
+
+    captured: dict[str, object] = {}
+
+    class FakeMuon:
+        def __init__(self, _params, **kwargs) -> None:
+            captured.update(kwargs)
+            self._redistribution_runtime = object()
+            self._bucket_plans = ()
+            self._local_tensor_spec = object()
+
+    class FakeLocalPrefetchRuntime:
+        @staticmethod
+        def from_runtime(_runtime, *, local_stream):
+            captured["local_stream"] = local_stream
+            return type(
+                "FakeRuntime",
+                (),
+                {"reserve_buffers": lambda self, _plans, *, local_tensor_spec: None},
+            )()
+
+    monkeypatch.setattr(cpu_offload_muon, "CpuOffloadDistributedMuon", FakeMuon)
+    monkeypatch.setattr(cpu_offload_muon, "LocalPrefetchRuntime", FakeLocalPrefetchRuntime)
+
+    staging = type("FakeStaging", (), {"stream": object()})()
+    optimizer = cpu_offload_muon.build_cpu_offload_distributed_muon(
+        [],
+        staging=staging,
+        offload_states=False,
+        **_muon_factory_kwargs(enable_hsdp_replica_dedup=False),
+    )
+
+    assert isinstance(optimizer, FakeMuon)
+    assert "enable_hsdp_replica_dedup" not in captured
+
+
+def test_cpu_offload_muon_factory_rejects_enabled_replica_dedup() -> None:
+    from torchtitan_npu.extensions.cpu_offload.cpu_offload_muon import (
+        build_cpu_offload_distributed_muon,
+    )
+
+    with pytest.raises(ValueError, match="not supported with CPU-offload Muon"):
+        build_cpu_offload_distributed_muon(
+            [],
+            staging=None,  # type: ignore[arg-type]
+            offload_states=False,
+            **_muon_factory_kwargs(enable_hsdp_replica_dedup=True),
+        )
 
 
 def _step_sequence(

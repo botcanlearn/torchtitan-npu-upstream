@@ -423,7 +423,14 @@ def test_optimizer_state_swap_materializes_only_missing_adamw_state(
             optimizer.state[initialized][name], expected, rtol=0, atol=0
         )
     assert set(optimizer.state[missing]) == {"step", "exp_avg", "exp_avg_sq"}
-    assert optimizer.state[missing]["step"].item() == 1
+    assert optimizer.state[missing]["step"].item() == 0
+    for state_name in ("exp_avg", "exp_avg_sq"):
+        torch.testing.assert_close(
+            optimizer.state[missing][state_name],
+            torch.zeros_like(missing),
+            rtol=0,
+            atol=0,
+        )
     assert missing.grad is None
     for state_name in ("exp_avg", "exp_avg_sq"):
         assert f"state.initialized.{state_name}" in flat_state

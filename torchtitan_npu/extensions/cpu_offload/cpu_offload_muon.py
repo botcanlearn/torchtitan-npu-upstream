@@ -1,4 +1,5 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All rights reserved.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -731,9 +732,12 @@ def build_cpu_offload_distributed_muon(
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
     offload_states: bool = True,
+    enable_hsdp_replica_dedup: bool = False,
     **kwargs: Any,
 ) -> CpuOffloadDistributedMuon:
     """Build the CPU-storage variant through upstream Muon configuration."""
+    if enable_hsdp_replica_dedup:
+        raise ValueError("HSDP replica dedup is not supported with CPU-offload Muon")
     optimizer = CpuOffloadDistributedMuon(
         _normalize_param_groups(params),
         staging=staging,

@@ -52,6 +52,8 @@ class OptimizerConfig(OptimizersContainer.Config):
         2.0315,
     )
     muon_eps: float = 1e-7
+    muon_enable_hsdp_replica_dedup: bool = False
+    """Assign each DistMuon tensor state to one HSDP replica domain."""
     _muon_profile: Annotated[MuonOptimizerProfile | None, tyro.conf.Suppress] = None
     _cpu_offload: Annotated[bool, tyro.conf.Suppress] = False
     """Carrier for ``--training.enable-cpu-offload``, set by the trainer
@@ -102,6 +104,9 @@ class OptimizerConfig(OptimizersContainer.Config):
         self.optimizer_factory_kwargs_by_name = {
             name: dict(kwargs) for name, kwargs in self._muon_profile.optimizer_factory_kwargs.items()
         }
+        self.optimizer_factory_kwargs_by_name["DistMuon"]["enable_hsdp_replica_dedup"] = (
+            self.muon_enable_hsdp_replica_dedup
+        )
 
 
 @dataclass(kw_only=True, slots=True)
