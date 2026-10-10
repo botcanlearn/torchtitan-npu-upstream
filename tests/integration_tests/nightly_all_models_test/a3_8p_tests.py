@@ -26,14 +26,16 @@ def build_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             test_name="dsv4_flash_a3_8p_adamw",
-            test_descr="DeepSeek-V4 Flash A3 8P AdamW Eager, 5 steps",
+            test_descr="DeepSeek-V4 Flash A3 8P AdamW Virtual Optimizer Eager, 5 steps",
             override_args=[("--training.steps", "5", "--compile.no-enable",
                             "--optimizer.name", "AdamW")],
             env_vars={
                 "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
                 "HF_ASSETS_PATH": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
                 "CKPT_INIT_LOAD_PATH": "/mnt/share/dsv4_ckpt_8rank",
-                "OPTIMIZER_OVERRIDES": "",
+                # AdamW needs swap-backed moments to fit the 8P model.
+                # Replaces swap_optimizer; preserves the shell's NPU ops.
+                "OPTIMIZER_OVERRIDES": "torchtitan_npu.override.common.optimizer.virtual",
             },
             **common,
         ),

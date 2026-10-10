@@ -106,7 +106,7 @@ GitHub 的正式 `*-lite-actions.yml` Workflow 配合独立的 [lite-actions](ht
 | Suite / 测试用例 | 训练内容 | 当前验收状态 |
 | --- | --- | --- |
 | `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 历史 [Run 38024403411](https://github.com/depeng1994/torchtitan-npu/actions/runs/38024403411) 中 PASS |
-| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | A3 单机 8P、AdamW、Eager、5 steps | 同一历史 Run 报 FSDP AllGather NPU OOM，未通过 |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | A3 单机 8P、AdamW + Virtual Optimizer、Eager、5 steps | 旧版（未启用 Virtual）曾发生 NPU OOM；新路径待回归 |
 | `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | [Run 38026756435](https://github.com/depeng1994/torchtitan-npu/actions/runs/38026756435) 因 torch_npu 默认 Triton backend 重复注册 erfc 而失败；已恢复 `TORCHINDUCTOR_NPU_BACKEND=ascendc`，待重新回归 |
 | `a5_64p_tests` / `dsv4_pro_a5_64p` | A5 八机 64P、DeepSeek-V4 Pro | 禁用：真实 CANN/HF/Checkpoint 资产及 HCCL 网络未配置、未实机验收 |
 
@@ -123,6 +123,8 @@ gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref maste
 ```
 
 `OverrideDefinitions.env_vars` 由模型用例分别声明 `ASCEND_SET_ENV_PATH`、`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、优化器开关、`TORCHINDUCTOR_NPU_BACKEND` 和模型特定端口；调度机从**请求绑定的 Commit SHA** 的源码解析它们，source 对应 CANN、export 环境后启动。物理 SSH 地址、HCCL 小网 IP、NPU ID、资源锁及动态输出 `CKPT_SAVE_LOAD_PATH` 由 Lite Actions 管理。换模型或升级 CANN 只修改本仓测试定义，不修改 Lite Actions 的模型配置。
+
+8P AdamW case 通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；真实 8P 稳定性仍以新的 Action 结果为准。
 
 同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。历史 CPU 单测以及旧版 5/3-step 双用例 PASS 不代表当前 AdamW 5-step 已通过；Eager PASS 也不等于 Inductor 或数值 golden 通过。
 

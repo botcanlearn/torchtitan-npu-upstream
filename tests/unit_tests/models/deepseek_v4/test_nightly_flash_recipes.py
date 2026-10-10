@@ -39,6 +39,7 @@ def imports(argv):
 def test_a3_muon_and_adamw_effective_recipe(tmp_path):
     muon, adamw = a3_8p_tests.build_test_list()
     swap = 'torchtitan_npu.override.common.optimizer.swap_optimizer'
+    virtual = 'torchtitan_npu.override.common.optimizer.virtual'
     npu = 'torchtitan_npu.override.common.rms_norm.asc'
     for i, case in enumerate((muon, adamw)):
         folder = tmp_path / str(i)
@@ -48,7 +49,12 @@ def test_a3_muon_and_adamw_effective_recipe(tmp_path):
         assert '--compile.no-enable' in argv
         assert npu in imports(argv)
         assert last(argv, '--optimizer.name') == ('Muon' if i == 0 else 'AdamW')
-        assert (swap in imports(argv)) == (i == 0)
+        effective = imports(argv)
+        assert (swap in effective) == (i == 0)
+        assert (virtual in effective) == (i == 1)
+        assert effective.count(virtual) == (1 if i == 1 else 0)
+        # Both replace the same config node and must never co-exist.
+        assert not ({virtual, swap} <= set(effective))
 
 
 def test_a3_16p_effective_recipe(tmp_path):
