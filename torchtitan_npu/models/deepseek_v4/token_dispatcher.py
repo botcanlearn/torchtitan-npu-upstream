@@ -358,6 +358,7 @@ def _assemble_block_plan(
     cmp_k_global_gather_indices = [slots[(seg[0], b)] for seg in segs for b in range(seg[2] // ratio)]
     return CompressedBlockLayout(
         cu_seqlens_cmp_k=cu_cmp_t,
+        is_empty_host=block_total == 0,
         block_remainder=torch.tensor(rem, dtype=torch.int32, device=device),
         gather_indices=_tensor(order, device),
         block_positions=block_positions,

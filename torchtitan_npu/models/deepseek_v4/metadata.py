@@ -92,6 +92,10 @@ class CompressedBlockLayout:
     the eager plan-build boundary so ``_assemble_tnd`` avoids a per-layer
     ``.item()`` D2H sync inside the compiled region."""
 
+    is_empty_host: bool = False
+    """Host-side empty-plan flag for paths whose fused kernel rejects empty input.
+    A Python branch cannot inspect the unbacked ``gather_indices`` length."""
+
     block_remainder: torch.Tensor | None
     """Per-sequence block remainder (int32), ``[n_seqs]``: ``len[i] % ratio``
     trailing tokens of sequence ``i`` fall short of one full block and
@@ -287,6 +291,7 @@ def build_kernel_layout(
         plans[ratio] = CompressedBlockLayout(
             cu_seqlens_cmp_k=cu_seqs,
             n_cmp_blocks_host=sum(length // ratio for length in lengths),
+            is_empty_host=not pieces,
             block_remainder=torch.tensor(
                 [length % ratio for length in lengths],
                 dtype=torch.int32,
