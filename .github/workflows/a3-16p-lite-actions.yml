@@ -51,7 +51,7 @@ jobs:
           CI_MAX_CASES: "2"
           CI_PROTOCOL_VERSION: "2"
           CI_PIPELINE: "a3-16p"
-        run: python3 .github/scripts/lite_actions/prepare_request.py
+        run: PYTHONPATH="$PWD" python3 .github/scripts/lite_actions/prepare_request.py
       - name: Upload immutable CI request
         uses: actions/upload-artifact@v4
         with:
