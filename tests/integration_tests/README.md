@@ -118,11 +118,18 @@ state 的 NovaSwap 路径。该 case 同样只检查训练完成，不读取 gol
 
 新增或修改 case：直接编辑对应 `*_tests.py` 的 `build_test_list()`，保持唯一 `test_name`、正确的 `ngpu/nnodes`、训练入口与 CLI，并按需设置 `env_vars`、验收字段。复用现有资源通道时不需要修改 Lite Actions 注册表。**选择用例、触发、预检查和验收步骤**详见上述 Lite Actions README。
 
-## 单机 Integration Runner 的并行执行
+## 并行调度（单机 Integration Runner）
 
-`python -m tests.integration_tests.run_tests` 复用本仓基于上游 TorchTitan GPUPool 的 NPU 并发机制：使用实际可见 NPU 建池，以 `ASCEND_RT_VISIBLE_DEVICES` 隔离用例；资源不足的用例明确 skip。需要逐个执行时传 `--no-parallel`。每个 case 的完整输出按名称归档，训练进程失败或超时会导致测试失败并清理所属子进程组。
+`python -m tests.integration_tests.run_tests` 默认复用 TorchTitan 的 `GPUPool` 机制并发执行用例；每个用例通过 `ASCEND_RT_VISIBLE_DEVICES` 绑定**互不重叠**的 NPU，池内同时使用的 NPU 数不超过可用数量。需要串行运行时使用 `--no-parallel`。
 
-此处描述的是**单机 Integration Runner**，并非 Lite Actions 的跨机器 SSH 调度。多机资源锁、外部进程占用保护及完整日志位置请以 [Lite Actions README](https://github.com/depeng1994/lite-actions/blob/main/README.md) 为准。同机并发运行独立 HCCL 任务时还需避免通信端口冲突。
+- **设备池来源**：如果环境已设置 `ASCEND_RT_VISIBLE_DEVICES`，只使用显式分配的设备；`--ngpu` 超出该集合时直接报错。否则通过 `torch.npu.device_count()` 获取运行时可见数量；`--ngpu` 超出时告警并截断，不凭参数虚构不存在的设备 ID。
+- **调度与资源不足**：用例按 `ngpu` 从大到小提交；超过实际设备池容量的用例明确跳过，避免在 `acquire()` 中永久等待。
+- **日志与超时**：各用例的输出按 case 名汇总，避免并发日志交错。可通过 `OverrideDefinitions.timeout` 设置超时；超时后先向训练进程组发送 `SIGTERM`，必要时再发送 `SIGKILL`，并将该用例判为失败，防止遗留 `torchrun` rank 继续占卡。
+- **并发诊断**：执行结束输出 `[parallel] pool`（设备池利用率、忙碌时长及分配统计）与 `[parallel] overlap`（并发重叠时长及相对串行运行的节省时间），用于判断测试是否实际并发运行。
+
+**同机多任务注意**：如果手动在同一台机器上并发启动多个独立 HCCL 训练 run，应为各 run 分配**不同的** `HCCL_NPU_SOCKET_PORT_RANGE`，避免端口绑定冲突。
+
+此节仅描述模型仓的**单机用例并发**，不等于 Lite Actions 的**跨机器 SSH 调度和资源锁**；后者的设备分配、外部占用检查与任务排障详见 [Lite Actions README](https://github.com/depeng1994/lite-actions/blob/main/README.md)。
 
 ## LoRA training and resume
 
