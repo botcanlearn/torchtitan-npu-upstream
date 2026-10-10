@@ -48,13 +48,16 @@ def _kernel_options(attention_masks, ratio, window_size):
     convention two call sites have to keep in step.
     """
     # Only ratio 0 has no compressed axis, and the kernels spell that ``None``.  Every
-    # other ratio has one -- at ratio 1 it is the row itself and its frame carries no
-    # residual, which is exactly what the kernel wants there.
+    # other ratio has one -- at ratio 1 it is the row itself and its frame carries a zero
+    # residual tensor, which is exactly what the kernel wants there.
     compressed = attention_masks.kernel.frame_for(ratio) if ratio > 0 else None
     return dict(
         cu_seqlens_q=attention_masks.kernel.q.cu_seqlens,
         cu_seqlens_ori_kv=attention_masks.kernel.swa_k.cu_seqlens,
         cu_seqlens_cmp_kv=None if compressed is None else compressed.cu_seqlens,
+        seqused_q=attention_masks.kernel.q.seqused,
+        seqused_ori_kv=attention_masks.kernel.swa_k.seqused,
+        seqused_cmp_kv=None if compressed is None else compressed.seqused,
         cmp_residual_kv=None if compressed is None else compressed.residual,
         cmp_ratio=max(ratio, 1),
         ori_mask_mode=4,
@@ -81,12 +84,16 @@ def _kernel_geometry(topk_indices, cmp_k):
 
 
 class _SparseMLA(torch.autograd.Function):
-    """The port's SMLAG with the SWA input fake-quantized.
+    """The port's SMLAG and teacher edge with the SWA input fake-quantized.
 
     Identical to the override's Function except that ``swa_k`` is Q/DQ'd before the
     kernel call and the *quantized* tensor is what gets saved, so the backward replays
     the same operand the forward used.  The quantized tensor's gradient is the gradient
     the originals would have received, which is the identity STE.
+
+    ``topk_scores`` is an autograd carrier only: forward never reads its value, while
+    backward publishes SMLAG's compressed-attention marginal as its gradient for the
+    LightningIndexer SLIKG backward to consume.
     """
 
     @staticmethod
@@ -101,6 +108,8 @@ class _SparseMLA(torch.autograd.Function):
         softmax_scale,
         ratio,
         window_size,
+        topk_scores,
+        wants_teacher,
     ):
         options = _kernel_options(attention_masks, ratio, window_size)
         geometry = _kernel_geometry(topk_indices, cmp_k)
@@ -137,6 +146,7 @@ class _SparseMLA(torch.autograd.Function):
             lse,
         )
         ctx.softmax_scale, ctx.ratio, ctx.window_size = softmax_scale, ratio, window_size
+        ctx.wants_teacher = wants_teacher
         # The mask is a dataclass, so ``save_for_backward`` cannot take it; it is a
         # context attribute instead.  That is not extra retention: it holds the same
         # boundary tensors the graph already keeps for the backward, and the node -- and
@@ -160,7 +170,7 @@ class _SparseMLA(torch.autograd.Function):
             **options,
             **_kernel_geometry(topk_indices, cmp_k),
         )
-        dq, dswa_k, dcmp_k, dsinks, _, _ = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
+        dq, dswa_k, dcmp_k, dsinks, _, cmp_softmax_l1_norm = torch.ops.cann_ops_transformer.sparse_flash_mla_grad(
             q,
             grad_output.contiguous(),
             output,
@@ -171,18 +181,15 @@ class _SparseMLA(torch.autograd.Function):
             cmp_sparse_indices=topk_indices,
             sinks=sinks,
             metadata=smla_grad_metadata,
-            seqused_q=None,
-            seqused_ori_kv=None,
-            seqused_cmp_kv=None,
             ori_topk_length=None,
             cmp_topk_length=None,
             softmax_scale=ctx.softmax_scale,
             **options,
         )
         # One gradient per forward input, in order: (q, swa_k, cmp_k, topk_indices,
-        # sinks, attention_masks, softmax_scale, ratio, window_size).  PyTorch silently
-        # ignores extra trailing entries, so a count mismatch here would not raise -- it
-        # would quietly starve a later input, which is why the list is spelled out.
+        # sinks, attention_masks, softmax_scale, ratio, window_size, topk_scores,
+        # wants_teacher). PyTorch silently ignores extra trailing entries, so spell out
+        # every slot to keep the teacher on the carrier input.
         return (
             dq,
             dswa_k,
@@ -192,6 +199,8 @@ class _SparseMLA(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            (cmp_softmax_l1_norm.masked_fill(topk_indices < 0, 0.0) if ctx.wants_teacher else None),
             None,
         )
 
@@ -218,7 +227,17 @@ class QuantV41SparseAttention(torch.nn.Module):
         *,
         cmp_k=None,
         topk_indices=None,
+        topk_scores=None,
     ):
+        if (cmp_k is None) != (topk_indices is None):
+            raise ValueError("cmp_k and topk_indices must be provided together")
+        wants_teacher = self.training and cmp_k is not None
+        teacher_scores = None
+        if wants_teacher:
+            if topk_scores is None:
+                raise ValueError("QuantV41SparseAttention requires topk_scores to publish the LightningIndexer teacher")
+            teacher_scores = topk_scores.reshape(-1, 1, topk_scores.shape[-1])
+
         # The selection arrives document-local from the fused selector, which chose it
         # with the same kernel: the two share one coordinate system, and ``-1`` is how
         # both spell an unused slot.  Order is left exactly as it came -- the selector
@@ -237,5 +256,7 @@ class QuantV41SparseAttention(torch.nn.Module):
             self.softmax_scale,
             self.compress_ratio,
             self.window_size,
+            teacher_scores,
+            wants_teacher,
         )
         return output.reshape_as(q)

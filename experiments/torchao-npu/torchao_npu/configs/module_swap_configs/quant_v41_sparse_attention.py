@@ -21,13 +21,23 @@ class QuantV41SparseAttentionConfig(ModuleSwapConfig):
     """Install FP8 SWA fake quantization; main KV is supplied by QuantCompressor."""
 
 
-def _quantized_forward(self, q, swa_k, attn_sink, attention_masks, *, cmp_k=None, topk_indices=None, **kwargs):
+def _quantized_forward(
+    self,
+    q,
+    swa_k,
+    attn_sink,
+    attention_masks,
+    *,
+    cmp_k=None,
+    topk_indices=None,
+    topk_scores=None,
+    **kwargs,
+):
     from torchao_npu.quantized_modules.v41_sparse_attention import QuantV41SparseAttention
 
     # Same argument order as the port this replaces, so the swap stays invisible to the
-    # host.  ``topk_scores`` may arrive in kwargs and is ignored: the teacher edge lives
-    # in the sparse-attention port, which threads ``topk_scores`` into SMLAG; this module
-    # replaces only the attention computation and returns the output unchanged.
+    # host. Unknown extension keywords remain ignorable, while ``topk_scores`` must keep
+    # the SMLAG-to-SLIKG teacher edge intact.
     del kwargs
     return QuantV41SparseAttention.forward(
         self,
@@ -37,6 +47,7 @@ def _quantized_forward(self, q, swa_k, attn_sink, attention_masks, *, cmp_k=None
         attention_masks,
         cmp_k=cmp_k,
         topk_indices=topk_indices,
+        topk_scores=topk_scores,
     )
 
 

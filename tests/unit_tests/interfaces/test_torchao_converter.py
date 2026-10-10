@@ -167,6 +167,32 @@ def test_recipe_converters_select_filters_for_model_type(
     assert bool(sparse_attention_converters) is expect_sparse_attention_converter
 
 
+def test_v41_li_quantization_alone_selects_only_the_qli_qsli_converter(converter_module):
+    from torchao_npu.configs import QuantV41LightningIndexerConfig
+
+    converters = converter_module._recipe_converters(
+        "mix",
+        model_type="v41",
+        enable_sparse_attention_quantization=False,
+        enable_mxfp4_qat=False,
+        dst_type_max=0.0,
+        enable_fsdp_prequantize=False,
+        model_compile_enabled=False,
+        li_quantization="mxfp4",
+    )
+
+    li_converters = [
+        converter
+        for converter in converters
+        if converter.filter_fn is converter_module._DSV41_CONFIG_FILTERS["lightning_indexer"]
+    ]
+    assert len(li_converters) == 1
+    assert isinstance(li_converters[0].base_config, QuantV41LightningIndexerConfig)
+    assert not any(
+        converter.filter_fn is converter_module._DSV41_CONFIG_FILTERS["sparse_attention"] for converter in converters
+    )
+
+
 def test_recipe_converters_warn_when_sparse_attention_filter_is_unavailable(converter_module, caplog):
     with caplog.at_level(logging.WARNING):
         converters = converter_module._recipe_converters(
@@ -370,6 +396,73 @@ def _capture_compressor_encoding(monkeypatch, width):
 
     monkeypatch.setattr(torch.ops.custom, "kv_compress_epilog_v2", SimpleNamespace(default=encode), raising=False)
     return captured
+
+
+@pytest.mark.parametrize("li_enabled", [False, True], ids=["bf16-li", "qli"])
+@pytest.mark.parametrize("sparse_enabled", [False, True], ids=["bf16-smla", "quant-smla"])
+def test_v41_teacher_pair_survives_independent_quantization_switches(
+    converter_module,
+    li_enabled,
+    sparse_enabled,
+):
+    from torchao_npu.configs import QuantV41LightningIndexerConfig, QuantV41SparseAttentionConfig
+    from torchtitan.config.override import OverrideConfig, apply_overrides
+
+    from torchtitan_npu.config.configs import QuantizationExtensionConfig
+    from torchtitan_npu.models.deepseek_v4_1 import model_registry
+    from torchtitan_npu.models.deepseek_v4_1.attention import _check_indexer_teacher_pair
+
+    converted = converter_module.apply_quantization_converter(
+        model_registry("deepseek_v4_1_debugmodel"),
+        QuantizationExtensionConfig(
+            enable_quantized_training=True,
+            enable_sparse_attention_quantization=sparse_enabled,
+            li_quantization="mxfp4" if li_enabled else None,
+            recipe="all_mxfp8",
+        ),
+        model_compile_enabled=False,
+    )
+    apply_overrides(
+        OverrideConfig(
+            imports=[
+                "torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc",
+                "torchtitan_npu.override.deepseek_v4_1.sparse_attn.asc",
+            ]
+        ),
+        converted.model,
+    )
+
+    for layer in converted.model.layers:
+        selector = layer.attention.indexer.selector
+        inner_attention = layer.attention.inner_attention
+        selector_quant = getattr(selector, "_torchao_npu_config", None)
+        attention_quant = getattr(inner_attention, "_torchao_npu_config", None)
+
+        assert isinstance(selector_quant, QuantV41LightningIndexerConfig) is li_enabled
+        assert isinstance(attention_quant, QuantV41SparseAttentionConfig) is sparse_enabled
+        if inner_attention.compress_ratio > 0:
+            _check_indexer_teacher_pair(inner_attention, layer.attention.indexer)
+            assert type(selector).consumes_indexer_teacher
+            assert type(inner_attention).provides_indexer_teacher
+            # The trainer discovers instances, not configs, to assign the step denominator.
+            selector_module = selector.build()
+            assert isinstance(selector_module, converter_module.V41Selector)
+            assert selector_module.consumes_indexer_teacher
+            assert selector_module.num_global_queries is None
+
+
+@pytest.mark.parametrize("li_quantization", ["mxfp8", "fp8", "hif8"])
+def test_v41_recipe_rejects_non_mxfp4_lightning_indexer(converter_module, li_quantization):
+    with pytest.raises(ValueError, match="supports only li_quantization='mxfp4'"):
+        converter_module._recipe_converters(
+            "mix",
+            model_type="v41",
+            enable_mxfp4_qat=False,
+            dst_type_max=0.0,
+            enable_fsdp_prequantize=False,
+            model_compile_enabled=False,
+            li_quantization=li_quantization,
+        )
 
 
 @pytest.mark.parametrize("ratio", [1, 2], ids=["full-resolution", "compressed"])

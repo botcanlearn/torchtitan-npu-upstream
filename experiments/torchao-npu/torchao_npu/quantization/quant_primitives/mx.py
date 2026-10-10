@@ -487,9 +487,6 @@ def mxfp4_dequantize(
     assert output_shape[axis] % block_size == 0, f"quant dim must be divisible by block_size ({block_size})"
 
     # Use cached 256-entry LUT (indexed by full byte, no nibble splitting)
-    # pyrefly: ignore [bad-assignment, bad-argument-type, bad-argument-count]
-    # (_get_fp4_e2m1_pair_lut is wrapped by @torch.compiler.disable, which
-    # collapses its signature to (fn) -> Any in pyrefly's view.)
     lut: torch.Tensor = _get_fp4_e2m1_pair_lut(data.device, torch.bfloat16, low_first)
     idx = data.to(torch.uint8).reshape(-1).to(torch.long)
     values = torch.index_select(lut, dim=0, index=idx)
@@ -528,7 +525,6 @@ def mxfp4_dequantize(
     return result.to(output_dtype)
 
 
-@torch.compiler.disable
 @functools.cache
 def _get_fp4_e2m1_pair_lut(device, dtype=torch.bfloat16, low_first: bool = True) -> torch.Tensor:
     """LUT mapping a packed uint8 byte to a pair of decoded FP4 values.

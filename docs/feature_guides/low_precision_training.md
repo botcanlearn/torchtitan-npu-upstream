@@ -50,7 +50,7 @@ recipe 按模型配置中的模块路径匹配 Attention linear、shared expert 
 
 QAT 下做 MXFP4 量化时可以使用 `--extension.quantization.dst_type_max` 传参来指定量化时目标域的最大值。参数默认值为 0.0 对应 `Amax(Dtype)`；可以传参 7.0，以防止量化数据中的最大值被截断而产生较大精度损失。
 
-DeepSeek-V4/V4.1 完整的的 QAT 启动方式见[快速上手](../user-guides/quickstart.md#deepseek-v41-torchao-npu-低精度训练)，对应的 qat 脚本同时启用 MXFP4 QAT 和稀疏 attention 量化，后者的自定义算子依赖见下一节。
+DeepSeek-V4/V4.1 的完整 QAT 启动方式见[快速上手](../user-guides/quickstart.md#deepseek-v41-torchao-npu-低精度训练)。V4.1 QAT 脚本同时启用 routed expert MXFP4 fake quant、Lightning Indexer 和稀疏 attention/KV source Compressor 量化，相关自定义算子依赖见下一节。
 
 ## Attention 量化
 
@@ -86,21 +86,40 @@ Lightning Indexer（LI）的 Q/K 量化通过 `li-quantization` 单独选择，�
 
 LI 各模式的实现细节不同：`fp8` 使用 8 bit E4M3 数据，按 token-head 动态量化，scale 以 FP32 保存；`mxfp8` 使用 8 bit E4M3 数据和 E8M0 scale；`mxfp4` 使用 4 bit E2M1 数据和 E8M0 scale；`hif8` 使用 8 bit HiFloat8 数据，按 tensor 动态量化，scale 以 FP32 保存。CANN 的 `quant_mode` 由这些数据格式和量化粒度共同决定。
 
-`li-quantization` 默认传参为 none 不启用量化。当前独立 LI 配置入口匹配 DeepSeek-V4 的模块结构。
+`li-quantization` 默认值为 `None`，即不启用 LI 量化。本节表中的四种格式适用于 DeepSeek-V4；DeepSeek-V4.1 当前仅支持 `mxfp4`，并使用下一节说明的独立 QLI/QSLI 实现。
 
-### DeepSeek-V4.1 稀疏 attention KV Cache 量化
+### DeepSeek-V4.1 LI 与稀疏 attention 量化
 
-`--extension.quantization.enable-sparse-attention-quantization` 将 V4.1 稀疏 attention 替换为混合量化路径：swa_kv 使用 `mxfp8_bf16`，cmp_kv 使用 `mxfp4_bf16`。该路径对 KV 量化再反量化后调用 sparse attention 算子，以引入对应的量化误差。
+QLI（Quantized Lightning Indexer，量化索引器）与 QSLI（Quantized Sparse Lightning Indexer，量化稀疏索引器）负责为每个 query 选择参与稀疏 attention 的 Top-K key。在当前 V4.1 实现中，两者都将 indexer 的 Q/K 量化为 MXFP4，主要区别是选分的搜索范围及是否生产候选池：
+
+| 实现 | 搜索范围 | 候选池行为 | 使用位置 |
+| --- | --- | --- | --- |
+| QLI（`quant_lightning_indexer`） | 当前 query 因果可见的全部 key | 候选源层除输出自身 Top-K 外，还生成候选块表供后续层使用；未启用候选池的层只输出 Top-K | 候选源层，以及候选池之外的选分层 |
+| QSLI（`quant_sparse_lightning_indexer`） | 传入候选块表限定的可见 key | 消费候选源层生成的块表，重新选出本层 Top-K，并将原块表继续向后传递 | 使用候选池的 Reindex 层 |
+
+候选池保存 key 的块索引，每块包含 `candidate_block_size` 个位置，最多保留 `candidate_topk_blocks` 个块。它与最终的 `index_topk` 个 key 是两级筛选：QLI 候选源层先确定候选块，后续 QSLI 层使用各自的 query 和权重在这些块内重新选分。Reuse 层直接沿用已有选择，不调用 QLI 或 QSLI。
+
+`li-quantization=mxfp4` 同时启用这两种实现，由模型层的角色和候选池配置自动选择，无需分别指定。两者输出的索引交给 sparse attention 计算注意力；训练反向均使用 BF16 SLIKG 消费教师信号，QLI/QSLI 本身不替代 sparse attention。
+
+V4.1 的 indexer 训练目标通过 sparse attention 反向提供 teacher（教师信号），再由 selector 的 SLIKG 反向消费。标准 A5 融合路径会同时导入两侧 BF16 override 作为 fallback；在此前提下，以下两个配置可以独立替换对应一侧：
+
+- `--extension.quantization.li-quantization mxfp4`：将 BF16 LI selector 替换为 MXFP4 QLI/QSLI，SLIKG 反向保持 BF16。
+- `--extension.quantization.enable-sparse-attention-quantization`：同时替换 KV source Compressor 和 sparse attention；sparse attention 反向继续提供 indexer teacher。
+
+稀疏 attention 量化路径中，swa_kv 使用 `mxfp8_bf16`，cmp_kv 使用 `mxfp4_bf16`。该路径对 KV 量化再反量化后调用 sparse attention 算子，以引入对应的量化误差。
 
 该缓存布局使用按组保存的 BF16 scale：滑窗 KV 为 8 bit E4M3 数据，每 32 个元素共享一个 BF16 scale；压缩 KV 为 4 bit E2M1 数据，每 16 个元素共享一个 BF16 scale。MXFP4 数据以 `uint8` 打包，每个字节包含两个 4 bit 值。V4.1 的反向计算使用量化反量化的 `swa_kv` 和 `cmp_kv`，并结合量化前向的输出和 LSE 计算梯度。
 
 > [!NOTE]
-> 启用前需参考 [Ascend C 自定义算子编译安装说明](https://gitcode.com/cann/cann-recipes-infer/blob/master/ops/ascendc/README.md)，编译并安装 `kv_compress_epilog_v2`，并配置自定义算子环境变量。
+> 启用 DeepSeek-V4.1 LI 量化（`li-quantization=mxfp4`）前，需参考 [cannbot-dsl 算子编译安装说明](https://gitcode.com/cann/cannbot-dsl/blob/master/net/native_package/README.md)，编译并安装 QLI 和 QSLI 算子。
+>
+> 启用稀疏 attention 量化前，需参考 [Ascend C 自定义算子编译安装说明](https://gitcode.com/cann/cann-recipes-infer/blob/master/ops/ascendc/README.md)，编译并安装 `kv_compress_epilog_v2`，并配置自定义算子环境变量。
 
-在 V4.1 的 CPT 命令中追加以下参数即可启用，QAT 脚本已包含这些开关：
+在 V4.1 的 CPT 命令中追加以下参数，可以同时启用两侧量化；QAT 脚本已包含这些开关：
 
 ```bash
 --extension.quantization.enable-quantized-training \
+--extension.quantization.li-quantization mxfp4 \
 --extension.quantization.enable-sparse-attention-quantization
 ```
 
@@ -152,8 +171,8 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
 | `enable-quantized-training` | `False` | 低精度训练总开关 |
 | `recipe` | `all_block_fp8` | 选择 `all_mxfp8`、`mix` 或 `all_block_fp8` |
 | `enable-mxfp4-qat` | `False` | Routed expert 的 MXFP4 fake quant 约束 |
-| `li-quantization` | `none` | V4 LI Q/K 量化，可选 `fp8`、`mxfp8`、`mxfp4`、`hif8` |
-| `enable-sparse-attention-quantization` | `False` | V4.1 稀疏 attention 混合量化 |
+| `li-quantization` | `None` | LI Q/K 量化；V4 可选 `fp8`、`mxfp8`、`mxfp4`、`hif8`，V4.1 仅支持 `mxfp4` |
+| `enable-sparse-attention-quantization` | `False` | V4.1 KV source Compressor 与稀疏 attention 混合量化 |
 | `dst-type-max` | `0.0` | 用于 MXFP4 量化的目标类型最大值，可取值 0.0, 6.0-12.0 |
 | `enable-fsdp-prequantize` | `False` | Block FP8 权重在 FSDP all-gather 前预量化 |
 | `kv-norm-quantization.format` | 未设置 | V4 nope KV Cache 量化格式，目前为 `mxfp8`（8 bit E4M3） |
@@ -173,4 +192,5 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
 - [量化配置字段](../../torchtitan_npu/config/configs.py)
 - [TorchAO-NPU converter 与 recipe](../../interfaces/torchao_converter.py)
 - [Block FP8 权重与 FSDP 预量化实现](../../experiments/torchao-npu/torchao_npu/wrapper_tensors/block_mx_wrapper_tensor.py)
+- [V4.1 Lightning Indexer 量化实现](../../experiments/torchao-npu/torchao_npu/quantized_modules/v41_lightning_indexer.py)
 - [V4.1 稀疏 attention 量化实现](../../experiments/torchao-npu/torchao_npu/quantized_modules/v41_sparse_attention.py)

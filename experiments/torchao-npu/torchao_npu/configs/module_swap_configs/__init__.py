@@ -8,6 +8,7 @@
 __all__ = [
     "QuantCompressorConfig",
     "QuantLightningIndexerConfig",
+    "QuantV41LightningIndexerConfig",
     "QuantV41SparseAttentionConfig",
     "quant_mode_for_config",
 ]
@@ -17,4 +18,5 @@ from torchao_npu.configs.module_swap_configs.quant_lightning_indexer import (
     QuantLightningIndexerConfig,
     quant_mode_for_config,
 )
+from torchao_npu.configs.module_swap_configs.quant_v41_lightning_indexer import QuantV41LightningIndexerConfig
 from torchao_npu.configs.module_swap_configs.quant_v41_sparse_attention import QuantV41SparseAttentionConfig

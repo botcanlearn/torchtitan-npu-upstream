@@ -20,9 +20,8 @@
 # Run from the repository root:
 #   NGPU=1 bash examples/deepseek_v4_1/debug/deepseek_v4_1_stripped_1p_a5.sh --training.steps 5
 #
-# Append CLI arguments to override the defaults below.  The fused ds41 pair is selected
-# explicitly, because the override defaults to the pre-quantization kernel; set LEGACY=1 to
-# drive the same layers with that pool-free kernel instead.
+# Append CLI arguments to override the defaults below. The TorchAO-NPU option replaces
+# the selector with QLI/QSLI; sparse attention remains the BF16 teacher provider.
 
 set -euo pipefail
 
@@ -37,15 +36,12 @@ export TORCHTITAN_ENGRAM_TABLE_ROWS="${TORCHTITAN_ENGRAM_TABLE_ROWS:-100000}"
 # SMLA's backward emits, and the model refuses a half-fused stack rather than training an
 # indexer that never receives a gradient.
 #
-# `legacy` is passed explicitly because the override now defaults to the pre-quantization
-# kernel; this example exists to drive the quantized pair, so it opts in.  LEGACY=1 selects
-# the pool-free kernel instead, which is the baseline the pooled path is measured against.
 LIGHTNING_INDEXER_OVERRIDE="torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc"
-if [[ "${LEGACY:-0}" == "1" ]]; then
-    LIGHTNING_INDEXER_OVERRIDE="${LIGHTNING_INDEXER_OVERRIDE}={\"legacy\":true}"
-else
-    LIGHTNING_INDEXER_OVERRIDE="${LIGHTNING_INDEXER_OVERRIDE}={\"legacy\":false}"
-fi
+
+QUANTIZATION_ARGS=(
+    --extension.quantization.enable-quantized-training
+    --extension.quantization.li-quantization mxfp4
+)
 
 CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rms_norm.asc \
                                torchtitan_npu.override.common.rope.asc_complex \
@@ -71,4 +67,5 @@ exec bash scripts/run_train.sh \
     --checkpoint.no-enable \
     --metrics.log-freq 1 \
     --override.imports ${CLI_OVERRIDES} \
+    "${QUANTIZATION_ARGS[@]}" \
     "$@"

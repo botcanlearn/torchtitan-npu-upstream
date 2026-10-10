@@ -5,26 +5,14 @@
 
 """DeepSeek-V4.1 LightningIndexer override: selection fused with its SLIKG backward.
 
-Independent of :mod:`~torchtitan_npu.override.deepseek_v4_1.sparse_attn` on purpose.  The
-two are separate kernels with separate targets -- this one replaces the selection node,
-that one the sparse core -- and a run may take either, both, or neither.  They must agree
-on one coordinate system (both speak document-local indices), which is a contract rather
-than a shared module.
+This entry and :mod:`~torchtitan_npu.override.deepseek_v4_1.sparse_attn` have separate
+targets so TorchAO-NPU can independently replace either BF16 fallback.  The resulting
+configuration must still contain both a teacher provider and a consumer, and both sides
+must use document-local indices.
 
-The replacement drives the quantized ``ds41`` pair rather than the plain bf16 selection:
-``quant_lightning_indexer`` on the Full Mode layer that builds the candidate pool or on a
-layer outside the hierarchy, and ``quant_sparse_lightning_indexer`` on a layer that searches
-it.  Which kernel runs follows from ``mode`` together with the pool capacity -- the same pair
-the reference selector dispatches on -- so the candidate mechanism crosses the override
-boundary with the selector instead of being bypassed.
-
-The entry takes one switch, and it **defaults to the pre-quantization kernel**: the
-quantized path currently dies on the second training step with an aicore timeout, so the
-safe kernel is the one a run gets unless it asks for the other.  A run that wants the
-candidate pool has to say so explicitly:
-
-    --override.imports \
-      'torchtitan_npu.override.deepseek_v4_1.lightning_indexer.asc={"legacy":false}'
+This override drives only the BF16 ``lightning_indexer`` forward. The ds41 QLI/QSLI
+quantized forward bridge is isolated in the optional ``torchao-npu`` package under
+``experiments/torchao-npu`` and is not selected by this override.
 """
 
 from typing import TYPE_CHECKING
@@ -40,13 +28,9 @@ if TYPE_CHECKING:
 @override(
     target=Selector.Config,
     exact=True,
-    description=(
-        "LightningIndexer selection fused with its SLIKG backward in one autograd.Function "
-        "(every indexer layer); legacy=true, the default, selects the pre-quantization "
-        "kernel and legacy=false the ds41 QLI/QSLI candidate pair"
-    ),
+    description="BF16 LightningIndexer selection fused with its SLIKG backward in one autograd.Function",
 )
-def asc(cfg: Selector.Config, legacy: bool = False) -> "AscSelector.Config":
+def asc(cfg: Selector.Config) -> "AscSelector.Config":
     from .ascendc import AscSelector
 
-    return derive(cfg, AscSelector.Config, legacy=legacy)
+    return derive(cfg, AscSelector.Config)

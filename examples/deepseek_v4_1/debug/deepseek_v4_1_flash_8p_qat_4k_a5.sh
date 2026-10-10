@@ -7,6 +7,8 @@
 # A5 wrapper around the common DeepSeek-V4.1 Flash CPT launcher. Keep the shared
 # model, training, and parallelism defaults in the A3 script; this entrypoint
 # only supplies A5-specific runtime and fused-operator settings.
+# This entry enables routed-expert MXFP4 fake quant, V4.1 QLI/QSLI, and
+# sparse-attention/KV-source Compressor quantization.
 # Append CLI arguments to override the defaults below:
 #   ./examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_qat_4k_a5.sh --training.steps 5
 
@@ -18,6 +20,7 @@ QUANTIZATION_ARGS=(
     --extension.quantization.enable-quantized-training
     --extension.quantization.recipe all_block_fp8
     --extension.quantization.enable-mxfp4-qat
+    --extension.quantization.li-quantization mxfp4
     --extension.quantization.enable-sparse-attention-quantization
 )
 

@@ -49,6 +49,7 @@ from torchtitan_npu.models.common.metadata_extension import (
 from torchtitan_npu.models.deepseek_v4.compressor import LightningIndexer
 from torchtitan_npu.models.deepseek_v4_1.attention import CompressedSparseInnerAttention2
 from torchtitan_npu.models.deepseek_v4_1.compressor import Compressor as V41Compressor
+from torchtitan_npu.models.deepseek_v4_1.indexer import Selector as V41Selector
 from torchtitan_npu.override.common.swiglu_group.ascendc import AscGroupedExperts, _ensure_cann_ops_loaded
 from torchtitan_npu.patches.torchtitan.models.common.linear import BatchedLinear
 
@@ -118,6 +119,7 @@ _DEFAULT_TARGET_CONFIG_TYPES = (
     LightningIndexerMetadata.Config,
     CompressedSparseInnerAttention2.Config,
     V41Compressor.Config,
+    V41Selector.Config,
 )
 
 
@@ -153,6 +155,10 @@ def _get_npu_quantized_module_cls(parent_cls: type[Module]) -> type[Module]:
 
     NpuQuantizedModule.__name__ = f"NpuQuantized{parent_cls.__name__}"
     NpuQuantizedModule.__qualname__ = f"NpuQuantized{parent_cls.__name__}"
+    if issubclass(parent_cls, V41Selector):
+        NpuQuantizedModule.Config.consumes_indexer_teacher = True
+    if issubclass(parent_cls, CompressedSparseInnerAttention2):
+        NpuQuantizedModule.Config.provides_indexer_teacher = True
     _npu_quantized_module_cache[parent_cls] = NpuQuantizedModule
     return NpuQuantizedModule
 
@@ -488,6 +494,7 @@ _DSV41_CONFIG_FILTERS = {
     "dense": _DSV4_CONFIG_FILTERS["dense"],
     "routed_expert": _DSV4_CONFIG_FILTERS["routed_expert"],
     "compressor": _is_v41_kv_source,
+    "lightning_indexer": match_config_fqn_suffix(".attention.indexer.selector"),
     "sparse_attention": match_config_fqn_suffix(".attention.inner_attention"),
 }
 
@@ -888,11 +895,19 @@ def _recipe_converters(
         ]
 
     if li_quantization is not None:
-        li_config = _quant_lightning_indexer(
-            li_kernel_config or LightningIndexerKernelConfig(),
-            li_quantization=li_quantization,
-            dst_type_max=dst_type_max,
-        )
+        li_config: QuantLightningIndexerConfig | QuantV41LightningIndexerConfig
+        if model_type == "v41":
+            if li_quantization != "mxfp4":
+                raise ValueError("DeepSeek-V4.1 QLI/QSLI supports only li_quantization='mxfp4'")
+            from torchao_npu.configs import QuantV41LightningIndexerConfig
+
+            li_config = QuantV41LightningIndexerConfig()
+        else:
+            li_config = _quant_lightning_indexer(
+                li_kernel_config or LightningIndexerKernelConfig(),
+                li_quantization=li_quantization,
+                dst_type_max=dst_type_max,
+            )
         converters.append(
             _quantization_converter(
                 li_config,
@@ -900,15 +915,16 @@ def _recipe_converters(
                 model_compile_enabled=model_compile_enabled,
             )
         )
-        converters.append(
-            _quantization_converter(
-                None,
-                filters["lightning_indexer_metadata"],
-                model_compile_enabled=model_compile_enabled,
-                replacement_config_type=_QuantizedLightningIndexerMetadataAdapter.Config,
-                replacement_kwargs={"quant_mode": li_config.quant_mode},
+        if model_type == "v4":
+            converters.append(
+                _quantization_converter(
+                    None,
+                    filters["lightning_indexer_metadata"],
+                    model_compile_enabled=model_compile_enabled,
+                    replacement_config_type=_QuantizedLightningIndexerMetadataAdapter.Config,
+                    replacement_kwargs={"quant_mode": cast("QuantLightningIndexerConfig", li_config).quant_mode},
+                )
             )
-        )
     if enable_sparse_attention_quantization:
         if "sparse_attention" in filters:
             from torchao_npu.configs import QuantCompressorConfig, QuantV41SparseAttentionConfig
@@ -999,7 +1015,9 @@ def apply_quantization_converter(
     model_type = _model_type_for_spec(model_spec)
 
     li_kernel_config = (
-        _get_li_kernel_config(model_spec.model) if quantization_config.li_quantization is not None else None
+        _get_li_kernel_config(model_spec.model)
+        if model_type == "v4" and quantization_config.li_quantization is not None
+        else None
     )
     converters = _recipe_converters(
         quantization_config.recipe,
