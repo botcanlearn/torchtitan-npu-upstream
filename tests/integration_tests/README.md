@@ -105,9 +105,9 @@ GitHub 的正式 `*-lite-actions.yml` Workflow 配合独立的 [lite-actions](ht
 
 | Suite / 测试用例 | 训练内容 | 当前验收状态 |
 | --- | --- | --- |
-| `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 历史 [Run 38024403411](https://github.com/depeng1994/torchtitan-npu/actions/runs/38024403411) 中 PASS |
-| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | A3 单机 8P、AdamW + Virtual Optimizer、Eager、5 steps | 旧版（未启用 Virtual）曾发生 NPU OOM；新路径待回归 |
-| `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | [Run 38026756435](https://github.com/depeng1994/torchtitan-npu/actions/runs/38026756435) 因 torch_npu 默认 Triton backend 重复注册 erfc 而失败；已恢复 `TORCHINDUCTOR_NPU_BACKEND=ascendc`，待重新回归 |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 当前 [Run 38034002241](https://github.com/depeng1994/torchtitan-npu/actions/runs/38034002241) 5 steps PASS，退出码 0 |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | A3 单机 8P、AdamW + Virtual Optimizer、Eager、5 steps | 当前 [Run 38034002241](https://github.com/depeng1994/torchtitan-npu/actions/runs/38034002241) 4K + Virtual Optimizer，5 steps PASS，退出码 0；旧版无 Virtual 曾 OOM |
+| `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | 此前版本有成功验收记录；本轮按维护者要求不重复执行 16P。当前 `TORCHINDUCTOR_NPU_BACKEND=ascendc` 的最新提交未单独重新验收 |
 | `a5_64p_tests` / `dsv4_pro_a5_64p` | A5 八机 64P、DeepSeek-V4 Pro | 禁用：真实 CANN/HF/Checkpoint 资产及 HCCL 网络未配置、未实机验收 |
 
 `workflow_dispatch.inputs.test_cases` 只支持真实 test ID 或可信 suite；不接受自定义 Python 路径、CLI、`STEPS` 或 `params`：
@@ -124,9 +124,9 @@ gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref maste
 
 `OverrideDefinitions.env_vars` 由模型用例分别声明 `ASCEND_SET_ENV_PATH`、`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、优化器开关、`TORCHINDUCTOR_NPU_BACKEND` 和模型特定端口；调度机从**请求绑定的 Commit SHA** 的源码解析它们，source 对应 CANN、export 环境后启动。物理 SSH 地址、HCCL 小网 IP、NPU ID、资源锁及动态输出 `CKPT_SAVE_LOAD_PATH` 由 Lite Actions 管理。换模型或升级 CANN 只修改本仓测试定义，不修改 Lite Actions 的模型配置。
 
-8P AdamW 保持原始 4096 序列长度，并通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；真实 8P 稳定性仍以新的 Action 结果为准。
+8P AdamW 保持原始 4096 序列长度，并通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；当前 8P Muon/AdamW 双用例已在上述 Run 38034002241 中完整 PASS；该结果覆盖 Eager smoke，不覆盖 Inductor、golden 或长期稳定性。
 
-同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。历史 CPU 单测以及旧版 5/3-step 双用例 PASS 不代表当前 AdamW 5-step 已通过；Eager PASS 也不等于 Inductor 或数值 golden 通过。
+同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。最新 Run 38034002241 的 GitHub Commit Comment 已包含两条 PASS，Exit Code 均为 0；Eager PASS 不等于 Inductor、数值 golden 或 64P 实机通过。
 
 **GitCode 同步注意：** GitHub 的 `master` 仍存在每日将 GitCode 同名分支强制镜像的 `Sync Upstream`。务必在 GitCode `master` 收录此次改动，避免后续同步覆盖当前 GitHub CI 工作流。
 
