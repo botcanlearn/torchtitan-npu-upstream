@@ -27,11 +27,10 @@ def build_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             test_name="dsv4_flash_a3_8p_adamw",
             test_descr="DeepSeek-V4 Flash A3 8P AdamW Virtual Optimizer Eager, 5 steps",
-            # AdamW adds first/second moment state; the 4K smoke has repeatedly
-            # OOMed on 64-GiB A3 cards at step 2. Keep the same 43-layer model,
-            # EP8/DP8, and 5 optimizer steps while reducing activation peak.
+            # Preserve the original 4K sequence length. Virtual Optimizer must
+            # supply swap-backed AdamW moments; never disable the optimizer
+            # override merely to avoid a CPU-only unit-test mismatch.
             override_args=[("--training.steps", "5", "--compile.no-enable",
-                            "--training.seq-len", "2048",
                             "--optimizer.name", "AdamW")],
             env_vars={
                 "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",

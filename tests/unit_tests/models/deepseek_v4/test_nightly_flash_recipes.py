@@ -49,7 +49,7 @@ def test_a3_muon_and_adamw_effective_recipe(tmp_path):
         assert '--compile.no-enable' in argv
         assert npu in imports(argv)
         assert last(argv, '--optimizer.name') == ('Muon' if i == 0 else 'AdamW')
-        assert last(argv, '--training.seq-len') == ('4096' if i == 0 else '2048')
+        assert last(argv, '--training.seq-len') == '4096'
         effective = imports(argv)
         assert (swap in effective) == (i == 0)
         assert (virtual in effective) == (i == 1)

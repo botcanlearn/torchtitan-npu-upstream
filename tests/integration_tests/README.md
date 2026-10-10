@@ -124,7 +124,7 @@ gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref maste
 
 `OverrideDefinitions.env_vars` 由模型用例分别声明 `ASCEND_SET_ENV_PATH`、`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、优化器开关、`TORCHINDUCTOR_NPU_BACKEND` 和模型特定端口；调度机从**请求绑定的 Commit SHA** 的源码解析它们，source 对应 CANN、export 环境后启动。物理 SSH 地址、HCCL 小网 IP、NPU ID、资源锁及动态输出 `CKPT_SAVE_LOAD_PATH` 由 Lite Actions 管理。换模型或升级 CANN 只修改本仓测试定义，不修改 Lite Actions 的模型配置。
 
-8P AdamW case 将 `--training.seq-len` 从原始 4096 缩短到 2048 做优化器链路冒烟，并通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；真实 8P 稳定性仍以新的 Action 结果为准。
+8P AdamW 保持原始 4096 序列长度，并通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；真实 8P 稳定性仍以新的 Action 结果为准。
 
 同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。历史 CPU 单测以及旧版 5/3-step 双用例 PASS 不代表当前 AdamW 5-step 已通过；Eager PASS 也不等于 Inductor 或数值 golden 通过。
 
