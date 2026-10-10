@@ -129,17 +129,21 @@ AdamW 的空 `OPTIMIZER_OVERRIDES` 是**已有共享 Shell 开关**，不会覆�
 
 ### 模型环境归属（OverrideDefinitions.env_vars）
 
-以 8P 为例，同一测试模块维护通用资产路径，Muon/AdamW 两条 case 复用它，只有优化器覆盖不同：
+8P 两条 `OverrideDefinitions` 分别直接声明自身的 `env_vars`。例如 Muon case：
 
 ```python
-ASSET_ENV = {
-    "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
-    "HF_ASSETS_PATH": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
-    "CKPT_INIT_LOAD_PATH": "/mnt/share/dsv4_ckpt_8rank",
-}
-# Muon:  OverrideDefinitions(..., env_vars=ASSET_ENV)
-# AdamW: OverrideDefinitions(..., env_vars={**ASSET_ENV, "OPTIMIZER_OVERRIDES": ""})
+OverrideDefinitions(
+    test_name="dsv4_flash_a3_8p_example",
+    # ...
+    env_vars={
+        "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
+        "HF_ASSETS_PATH": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
+        "CKPT_INIT_LOAD_PATH": "/mnt/share/dsv4_ckpt_8rank",
+    },
+)
 ```
+
+AdamW case 直接定义同样三项路径，并额外包含 `"OPTIMIZER_OVERRIDES": ""`。不再通过模块级共享常量间接覆盖，每个 testcase 的环境配置独立可读。`runner.py` 不再重复校验这些用例级资产路径，CANN/HF/Checkpoint 的实际加载由执行时相应工具负责。
 
 `ASCEND_SET_ENV_PATH` 不再从 Lite Actions 配置读取。调度机对每项固定 SHA 的 `build_test_list()` 进行可信发现，将对应 `env_vars` 传给通用 SSH Runner；在执行机先 source 所选 CANN 路径，再 export 用例环境。生成输出目录 `CKPT_SAVE_LOAD_PATH` 是 Runner 的通用运行时职责，而非需要维护的模型资产配置。物理 SSH 地址/HCCL 小网 IP 和 NPU IDs 仍由 Lite Actions 拓扑管理。**A5 资产目录和 CANN 安装路径尚未核实，在其用例中保留空值且通道禁用；启用前必须修改模型仓定义。**
 

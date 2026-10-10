@@ -13,14 +13,6 @@ import subprocess
 from tests.integration_tests import OverrideDefinitions
 
 
-def validate_assets(parser: argparse.ArgumentParser, *, ckpt_required: bool = False) -> None:
-    paths = ("HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH") if ckpt_required else ("HF_ASSETS_PATH",)
-    for key in paths:
-        value = os.environ.get(key)
-        if not value or not Path(value).is_dir():
-            parser.error(f"{key} must point to an existing directory")
-
-
 def run_single(test: OverrideDefinitions, *, output_dir: Path | None = None) -> None:
     from tests.integration_tests.run_tests import run_tests
 
@@ -28,7 +20,6 @@ def run_single(test: OverrideDefinitions, *, output_dir: Path | None = None) -> 
     if output_dir is None:
         parser.add_argument("output_dir", type=Path)
         output_dir = parser.parse_args().output_dir
-    validate_assets(parser)
     output = output_dir
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -54,7 +45,6 @@ def run_distributed(test: OverrideDefinitions, *, phase: str,
               f"steps={sorted(values)} loss={values}", flush=True)
         return
 
-    validate_assets(parser, ckpt_required=test.ckpt_init_required)
     ips = [x.strip() for x in os.environ.get("NODE_IPS", "").split(",")]
     if len(ips) != test.nnodes or any(not x for x in ips):
         parser.error(f"NODE_IPS requires exactly {test.nnodes} nonempty IPs")

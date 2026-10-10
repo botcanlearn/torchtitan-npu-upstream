@@ -1,132 +1,109 @@
-"""CPU-only behavior contracts for Nightly Muon/AdamW and suite discovery."""
+"""Generic Lite Actions adapter contracts, independent of the current model recipes."""
 from __future__ import annotations
-import os
+
+import json
+import sys
 from pathlib import Path
-import subprocess
+from types import SimpleNamespace
 
 import pytest
 
-from tests.integration_tests.tools.lite_actions.entrypoint import catalog, select
+from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests.tools.lite_actions import entrypoint
 
 
-def test_discovery_selects_muon_and_adamw_cases():
-    groups = catalog()
-    cases = select(groups, suite="a3_8p_tests")
-    assert [x.test_name for x in cases] == [
-        "dsv4_flash_a3_8p_example", "dsv4_flash_a3_8p_adamw"]
-    assert all(x.expected_steps == (tuple(range(1, 6)),) for x in cases)
-    assert all((x.ngpu, x.nnodes) == (8, 1) for x in cases)
-    assert cases[0].env_vars is None or not cases[0].env_vars.get("OPTIMIZER_OVERRIDES")
-    for case in cases:
-        assert all(case.env_vars[k].startswith("/") for k in (
-            "ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"))
-    assert cases[0].env_vars.keys() == {"ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"}
-    assert cases[1].env_vars["OPTIMIZER_OVERRIDES"] == ""
-    assert cases[1].env_vars["HF_ASSETS_PATH"] == cases[0].env_vars["HF_ASSETS_PATH"]
-    assert "AdamW" not in cases[0].override_args[0]
-    assert "AdamW" in cases[1].override_args[0]
-    assert select(groups, test_id=cases[1].test_name) == [cases[1]]
-    with pytest.raises(ValueError):
-        select(groups, suite="../invalid")
-    with pytest.raises(ValueError):
-        select(groups, test_id="unknown_case")
+def _case(name: str, *, nnodes: int = 1, ngpu: int = 8,
+          disabled: bool = False) -> OverrideDefinitions:
+    return OverrideDefinitions(test_name=name, nnodes=nnodes, ngpu=ngpu,
+                               disabled=disabled, env_vars={"TEST_MODE": name})
 
 
-def expanded_argv(test, tmp_path):
-    """Probe existing Bash recipe's final argv without invoking TorchTitan/NPU."""
-    from tests.integration_tests.nightly_all_models_test import runner
-    root = Path(runner.__file__).resolve().parents[3]
-    stub = tmp_path / "scripts"
-    stub.mkdir(exist_ok=True)
-    filename = "run_train_multinodes.sh" if test.nnodes > 1 else "run_train.sh"
-    (stub / filename).write_text('printf "%s\n" "$@" > "$CASE_ARGS_FILE"\n')
-    env = {**os.environ, **(test.env_vars or {}),
-           "CASE_ARGS_FILE": str(tmp_path / "args.txt"),
-           "NODE_IPS": ",".join(f"192.0.2.{n}" for n in range(1, test.nnodes+1)),
-           "NGPU": str(test.ngpu)}
-    subprocess.run(["bash", str(root / test.train_script), *test.override_args[0]],
-                   cwd=tmp_path, env=env, check=True, text=True, capture_output=True)
-    return (tmp_path / "args.txt").read_text().splitlines()
+def _fake_modules(monkeypatch, suites):
+    """Exercise real discovery while replacing only the import/discovery boundary."""
+    package = SimpleNamespace(__path__=["/synthetic"])
+    modules = {entrypoint.PACKAGE: package}
+    for name, cases in suites.items():
+        modules[entrypoint.PACKAGE + "." + name] = SimpleNamespace(
+            build_test_list=lambda values=cases: values)
+    monkeypatch.setattr(entrypoint.importlib, 'import_module', lambda name: modules[name])
+    monkeypatch.setattr(entrypoint.pkgutil, 'iter_modules', lambda _: [
+        SimpleNamespace(name=name) for name in reversed(tuple(suites))])
 
 
-def last_value(argv, key):
-    index = max(i for i, item in enumerate(argv) if item == key)
-    return argv[index + 1]
+def test_catalog_select_and_inspect_are_generic(monkeypatch, capsys):
+    alpha, beta, gamma = _case('case_alpha'), _case('case_beta'), _case('case_gamma', nnodes=2)
+    _fake_modules(monkeypatch, {'synthetic_tests':[alpha, beta],
+                                'distributed_tests':[gamma]})
+    groups = entrypoint.catalog()
+    assert list(groups) == ['distributed_tests', 'synthetic_tests']
+    assert entrypoint.select(groups, suite='synthetic_tests') == [alpha, beta]
+    assert entrypoint.select(groups, test_id='case_beta') == [beta]
+    with pytest.raises(ValueError, match='unknown'):
+        entrypoint.select(groups, test_id='case_absent')
+    with pytest.raises(ValueError, match='unknown'):
+        entrypoint.select(groups, suite='not_registered')
+    with pytest.raises(ValueError, match='exactly one'):
+        entrypoint.select(groups, test_id='case_alpha', suite='synthetic_tests')
+    monkeypatch.setattr(sys, 'argv', ['entrypoint', 'inspect', '--suite', 'synthetic_tests'])
+    entrypoint.main()
+    data = json.loads(capsys.readouterr().out)
+    assert data == [
+        {'test_id':'case_alpha','ngpu':8,'nnodes':1,'env_vars':{'TEST_MODE':'case_alpha'}},
+        {'test_id':'case_beta','ngpu':8,'nnodes':1,'env_vars':{'TEST_MODE':'case_beta'}},
+    ]
 
 
-def effective_imports(argv):
-    start = max(i for i, val in enumerate(argv) if val == "--override.imports")
-    result = []
-    for value in argv[start+1:]:
-        if value.startswith("--"):
-            break
-        result.append(value)
-    return result
+@pytest.mark.parametrize('name,cases,reason', [
+    ('synthetic_tests', [], 'empty'),
+    ('synthetic_tests', [_case('case_alpha'), _case('case_alpha')], 'duplicate'),
+    ('synthetic_tests', [_case('case_alpha', disabled=True)], 'disabled'),
+    ('synthetic_tests', [_case('bad-name')], 'invalid'),
+    ('synthetic_tests', [_case('case_alpha', ngpu=0)], 'topology'),
+    ('synthetic_tests', [_case('case_alpha', nnodes=0)], 'topology'),
+])
+def test_catalog_rejects_invalid_definitions(monkeypatch, name, cases, reason):
+    _fake_modules(monkeypatch, {name:cases})
+    with pytest.raises(ValueError, match=reason):
+        entrypoint.catalog()
 
 
-def test_muon_adamw_shell_effective_optimizer_and_npu_imports(tmp_path):
-    cases = select(catalog(), suite="a3_8p_tests")
-    npu = "torchtitan_npu.override.common.rms_norm.asc"
-    swap = "torchtitan_npu.override.common.optimizer.swap_optimizer"
-    for index, case in enumerate(cases):
-        folder = tmp_path / str(index)
-        folder.mkdir()
-        argv = expanded_argv(case, folder)
-        assert last_value(argv, "--training.steps") == "5"
-        assert "--compile.no-enable" in argv
-        assert npu in effective_imports(argv)
-        if index == 0:
-            assert last_value(argv, "--optimizer.name") == "Muon"
-            assert swap in effective_imports(argv)
-        else:
-            assert last_value(argv, "--optimizer.name") == "AdamW"
-            assert swap not in effective_imports(argv)
+def test_catalog_rejects_duplicates_across_modules(monkeypatch):
+    _fake_modules(monkeypatch, {
+        'synthetic_tests':[_case('case_alpha')],
+        'other_tests':[_case('case_alpha')]})
+    with pytest.raises(ValueError, match='duplicate'):
+        entrypoint.catalog()
 
 
-def test_distributed_cli_and_verify_uses_case_expected_steps(monkeypatch, tmp_path):
-    from tests.integration_tests.nightly_all_models_test import runner, a3_16p_tests
-    case = a3_16p_tests.build_test_list()[0]
-    assert case.nnodes == 2
-    assert case.env_vars["CONFIG"] == "deepseek_v4_flash_43layers_16experts"
-    assert case.env_vars["OPTIMIZER_OVERRIDES"] == ""
-    assert case.env_vars["MASTER_PORT"] == "6316"
-    assert case.env_vars["HCCL_IF_BASE_PORT"] == "30160"
-    assert all(case.env_vars[k].startswith("/") for k in (
-        "ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"))
-    env_probe = tmp_path / "expanded"
-    env_probe.mkdir()
-    argv = expanded_argv(case, env_probe)
-    assert last_value(argv, "--parallelism.expert-parallel-degree") == "16"
-    assert last_value(argv, "--optimizer.name") == "AdamW"
-    assert "torchtitan_npu.override.common.optimizer.swap_optimizer" not in effective_imports(argv)
-    assert "torchtitan_npu.override.common.rms_norm.asc" in effective_imports(argv)
-    monkeypatch.setenv("HF_ASSETS_PATH", str(tmp_path))
-    monkeypatch.setenv("NODE_IPS", "192.0.2.1,192.0.2.2")
-    monkeypatch.setenv("NGPU", "8")
-    seen = []
-    def launch(cmd, env):
-        seen.append(cmd)
-        return 0
-    monkeypatch.setattr(runner.subprocess, "call", launch)
-    with pytest.raises(SystemExit) as e:
-        runner.run_distributed(case, phase="launch", output_dir=tmp_path / "run")
-    assert e.value.code == 0
-    assert list(case.override_args[0]) == seen[0][6:-1]
-    from tests.integration_tests import loss_compare
-    monkeypatch.setattr(loss_compare, "extract_losses_from_tensorboard",
-                        lambda *a: {x: 1.0 for x in case.expected_steps[0]})
-    runner.run_distributed(case, phase="verify", output_dir=tmp_path / "run")
+@pytest.mark.parametrize('nnodes,phase,runner', [
+    (1, 'launch', 'run_single'),
+    (2, 'launch', 'run_distributed'),
+    (2, 'verify', 'run_distributed'),
+])
+def test_launch_and_verify_forward_original_case(monkeypatch, tmp_path, nnodes, phase, runner):
+    from tests.integration_tests.nightly_all_models_test import runner as impl
+    case = _case('case_alpha', nnodes=nnodes)
+    _fake_modules(monkeypatch, {'synthetic_tests':[case]})
+    single, multi = [], []
+    monkeypatch.setattr(impl, 'run_single', lambda *a, **kw: single.append((a, kw)))
+    monkeypatch.setattr(impl, 'run_distributed', lambda *a, **kw: multi.append((a, kw)))
+    output = tmp_path / 'output'
+    monkeypatch.setattr(sys, 'argv', ['entrypoint', phase, '--test-id', 'case_alpha',
+                                       '--output-dir', str(output)])
+    entrypoint.main()
+    expected = ((case,), {'output_dir': output}) if runner == 'run_single' else (
+        (case,), {'phase': phase, 'output_dir': output})
+    assert (single if runner == 'run_single' else multi) == [expected]
+    assert (multi if runner == 'run_single' else single) == []
+    assert entrypoint.os.environ['TEST_MODE'] == 'case_alpha'
+    monkeypatch.delenv('TEST_MODE', raising=False)
 
 
-def test_model_inspect_contains_complete_case_owned_environment():
-    import json
-    import subprocess
-    import sys
-    result = subprocess.run([sys.executable, "-m",
-        "tests.integration_tests.tools.lite_actions.entrypoint",
-        "inspect", "--suite", "a3_8p_tests"],
-        capture_output=True, text=True, check=True)
-    cases = json.loads(result.stdout)
-    assert len(cases) == 2
-    assert cases[0]["env_vars"]["ASCEND_SET_ENV_PATH"].startswith("/")
-    assert cases[1]["env_vars"]["OPTIMIZER_OVERRIDES"] == ""
+def test_single_verify_has_no_training_side_effect(monkeypatch, tmp_path):
+    from tests.integration_tests.nightly_all_models_test import runner as impl
+    _fake_modules(monkeypatch, {'synthetic_tests':[_case('case_alpha')]})
+    monkeypatch.setattr(impl, 'run_single', lambda *_a, **_kw: pytest.fail('training called'))
+    monkeypatch.setattr(sys, 'argv', ['entrypoint', 'verify', '--test-id', 'case_alpha',
+                                      '--output-dir', str(tmp_path)])
+    entrypoint.main()
+    monkeypatch.delenv('TEST_MODE', raising=False)

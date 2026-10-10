@@ -52,8 +52,7 @@ def main():
     except ValueError as exc:p.error(str(exc))
     if a.phase=='inspect':
         print(json.dumps([{'test_id': t.test_name, 'ngpu': t.ngpu,
-           'nnodes': t.nnodes, 'ckpt_init_required': t.ckpt_init_required,
-           'env_vars': dict(t.env_vars or {})} for t in selected],
+           'nnodes': t.nnodes, 'env_vars': dict(t.env_vars or {})} for t in selected],
            separators=(',', ':')))
         return
     test=selected[0]
