@@ -100,113 +100,32 @@ python -m tests.integration_tests.run_tests \
 直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
 
 
-**A3-8p-CI** 使用独立手工触发的 GitHub Actions。调度机通过 SSH 将精确
-Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、TensorBoard 与
-`exit_code.txt` 仅在 `/mnt/share/ci_tests/<北京时间>_run-<run-id>_attempt-<n>/`
-保存。GitHub 仅收到 PASS/FAIL、退出码及精选日志（成功时筛选含
-`tps:` / `elapsed_time_per_step` 的前 20 行；失败或超时时默认取最后 20 行，
-如末尾已被清理日志覆盖，则优先保留异常文件名/行号/代码片段及最后几行，总计不超过 20 行），
-调度机记录 `upload-metrics.json`。如果训练因超时或异常终止、Runner 的
-`run.log` 未刷新，执行机改从 Rank 0 的 `structured_logs` 提取最后 20
-条事件生成 `tail_20.log`，确保失败的 Actions 日志包含实际训练上下文。
+## Nightly All Models（A3 / A5 CI 用例）
 
-当前 8P Lite Actions Eager smoke 的训练参数由 `OverrideDefinitions.override_args` 提供，而不再通过 example Shell 的 `COMPILE_ENABLE` 或 `STEPS` 环境分支传递。共享 examples 入口保留上游默认的 Inductor 与 100 steps；CI 使用后置 `--compile.no-enable --training.steps <n>`。Eager 冒烟通过不代表 Inductor 通过。
+这里维护**测试定义与训练验收语义**；GitHub Actions 的触发、授权、部署、资源锁、多用例调度、结果查询和故障排查统一参阅 [Lite Actions 使用与开发指南](https://github.com/depeng1994/lite-actions/blob/main/README.md)，不在两仓重复维护。
 
-## Nightly All Models（Lite Actions 调度）
+- 用例：[`nightly_all_models_test/`](nightly_all_models_test/) 中的 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py`；各模块通过 `build_test_list()` 返回 `OverrideDefinitions`。
+- 通用执行：[`nightly_all_models_test/runner.py`](nightly_all_models_test/runner.py)；Lite Actions 专属适配入口：[`tools/lite_actions/entrypoint.py`](tools/lite_actions/entrypoint.py)。测试定义不放进 Lite Actions 目录，也不维护第二份 `ci_registry.json`。
+- `override_args` 声明与共享 example 不同的训练 CLI；不要复制 example 的 NPU imports。当前 `env_vars` 承载用例选定的 CANN/HF/Checkpoint 资产及必要模型环境；执行机的 SSH 地址、物理 NPU 分配和 HCCL 拓扑由 Lite Actions 管理。
 
-正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`，只维护 `build_test_list()` 返回的 `OverrideDefinitions`。Lite Actions 专属适配器在 `tests/integration_tests/tools/lite_actions/entrypoint.py`，GitHub Artifact / Waiter 位于 `.github/scripts/lite_actions/`。仓内不再使用 `ci_registry.json`；测试本身定义 `test_name/ngpu/nnodes/override_args/expected_steps`，`OverrideDefinitions.env_vars` 持有 CANN/HF/Checkpoint 路径和本用例的模型环境。Lite Actions 只管理 SSH/HCCL **物理拓扑**、设备分配、任务执行及结果回传，不保留会随模型或版本变化的路径。
+| Suite / Case | 训练语义 | 状态 |
+| --- | --- | --- |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 需以本次代码的新 Run 验收 |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | 同模型与卡数，AdamW（禁用默认 optimizer swap）、Eager、5 steps | 需以本次代码的新 Run 验收 |
+| `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | 有历史 Eager 成功；本次修改仍需回归 |
+| `a5_64p_tests` / `dsv4_pro_a5_64p` | A5 八机 64P、DeepSeek-V4 Pro | 通道禁用，资产/网络及实机训练未验收 |
 
-8P 有两条**不同优化器训练路径**，不是仅用训练步数区分的重复 smoke：
+上述 Eager 测试**不代表** Inductor、数值 golden 或 A5 训练已通过。两个 8P case 验证的是不同优化器路径，不是用不同 steps 制造重复测试。训练步数固定在 testcase 的 `--training.steps` CLI 中，当前使用 `expected_steps` 核对 TensorBoard 记录；GitHub 输入仅选择 `test_id` 或 `suite`，不接受可变 `STEPS`。
 
-| Case ID | Optimizer | 脚本与参数 | TensorBoard |
-| --- | --- | --- | --- |
-| `dsv4_flash_a3_8p_example` | Muon（共享脚本默认 `swap_optimizer`） | Flash 8P 原始 recipe + `--training.steps 5 --compile.no-enable` | 1–5 |
-| `dsv4_flash_a3_8p_adamw` | AdamW（`OPTIMIZER_OVERRIDES=''` 关闭 Muon swap） | 同一 recipe + `--training.steps 5 --compile.no-enable --optimizer.name AdamW` | 1–5 |
+新增或修改 case：直接编辑对应 `*_tests.py` 的 `build_test_list()`，保持唯一 `test_name`、正确的 `ngpu/nnodes`、训练入口与 CLI，并按需设置 `env_vars`、验收字段。复用现有资源通道时不需要修改 Lite Actions 注册表。**选择用例、触发、预检查和验收步骤**详见上述 Lite Actions README。
 
-AdamW 的空 `OPTIMIZER_OVERRIDES` 是**已有共享 Shell 开关**，不会覆盖、复制或删减源 recipe 自己维护的 NPU 算子 imports；Muon case 不传此环境变量。原始 example 的 Muon、Inductor、100 steps 默认保持不变。单机训练继续使用 TorchTitan 现有 `run_tests`，不新增专属调度框架。
+## 单机 Integration Runner 的并行执行
 
-16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`：`OverrideDefinitions.override_args` 声明 EP16、DP shard16、GBS128、AdamW、Eager、5 steps、关 checkpoint、MoE force-load-balance。通过对应 `env_vars` 同时承载 CANN/HF/Checkpoint 路径、非默认 `CONFIG`、`OPTIMIZER_OVERRIDES=''` 以及 MASTER_PORT/HCCL_IF_BASE_PORT；完整 NPU imports 列表仍由源脚本产生。多机校验直接使用对应 case 的 `expected_steps`。多机实际超时由 Lite Actions `config/pipelines.json` 控制，case 不声明另一份无效超时。
+`python -m tests.integration_tests.run_tests` 复用本仓基于上游 TorchTitan GPUPool 的 NPU 并发机制：使用实际可见 NPU 建池，以 `ASCEND_RT_VISIBLE_DEVICES` 隔离用例；资源不足的用例明确 skip。需要逐个执行时传 `--no-parallel`。每个 case 的完整输出按名称归档，训练进程失败或超时会导致测试失败并清理所属子进程组。
 
-### 模型环境归属（OverrideDefinitions.env_vars）
+此处描述的是**单机 Integration Runner**，并非 Lite Actions 的跨机器 SSH 调度。多机资源锁、外部进程占用保护及完整日志位置请以 [Lite Actions README](https://github.com/depeng1994/lite-actions/blob/main/README.md) 为准。同机并发运行独立 HCCL 任务时还需避免通信端口冲突。
 
-8P 两条 `OverrideDefinitions` 分别直接声明自身的 `env_vars`。例如 Muon case：
-
-```python
-OverrideDefinitions(
-    test_name="dsv4_flash_a3_8p_example",
-    # ...
-    env_vars={
-        "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
-        "HF_ASSETS_PATH": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
-        "CKPT_INIT_LOAD_PATH": "/mnt/share/dsv4_ckpt_8rank",
-    },
-)
-```
-
-AdamW case 直接定义同样三项路径，并额外包含 `"OPTIMIZER_OVERRIDES": ""`。不再通过模块级共享常量间接覆盖，每个 testcase 的环境配置独立可读。`runner.py` 不再重复校验这些用例级资产路径，CANN/HF/Checkpoint 的实际加载由执行时相应工具负责。
-
-`ASCEND_SET_ENV_PATH` 不再从 Lite Actions 配置读取。调度机对每项固定 SHA 的 `build_test_list()` 进行可信发现，将对应 `env_vars` 传给通用 SSH Runner；在执行机先 source 所选 CANN 路径，再 export 用例环境。生成输出目录 `CKPT_SAVE_LOAD_PATH` 是 Runner 的通用运行时职责，而非需要维护的模型资产配置。物理 SSH 地址/HCCL 小网 IP 和 NPU IDs 仍由 Lite Actions 拓扑管理。**A5 资产目录和 CANN 安装路径尚未核实，在其用例中保留空值且通道禁用；启用前必须修改模型仓定义。**
-
-### GitHub Actions 输入与多用例结果
-
-手工触发固定名 `a3-8p-lite-actions.yml` 时，`workflow_dispatch.inputs.test_cases` 可选择单个 test ID：
-
-```json
-[{"test_id":"dsv4_flash_a3_8p_adamw"}]
-```
-
-或一个受信任 suite，运行 8P Muon 和 AdamW 两项：
-
-```json
-[{"suite":"a3_8p_tests"}]
-```
-
-```bash
-gh workflow run a3-8p-lite-actions.yml --ref refactor/unified-a3-a5-ci \
-  -f 'test_cases=[{"suite":"a3_8p_tests"}]'
-```
-
-GitHub 输入**仅选择 case/suite**，不接受 `params`、`STEPS`、任意模块路径或 Shell 命令。Artifact 与 `run_id/attempt/commit SHA` 绑定；调度器在执行前从该 SHA 的源码读取 `build_test_list()`，检查唯一性、disabled、物理拓扑和展开后的测试总数（A3 ≤ 2；A5 ≤ 1，仍禁用）。同一 Run 持有一份设备资源锁，依次执行并分别存储日志，返回 `PASS/FAIL/NOT_RUN` 的逐 case GitHub Commit Comment；启动后续 case 前必须确认选定 NPU 已空闲，否则停止并标记 `NOT_RUN`。
-
-唯一受支持的手工适配器是以下固定入口（先在设备上准备 CANN、NPU、HF assets 和网络环境，并确认资源空闲）：
-
-```bash
-python3 -m tests.integration_tests.tools.lite_actions.entrypoint inspect --suite a3_8p_tests
-python3 -m tests.integration_tests.tools.lite_actions.entrypoint launch \
-  --test-id dsv4_flash_a3_8p_adamw --output-dir ./test_reports/adamw
-```
-
-双机训练分别使用该入口的 `launch` / `verify`，要求两节点一致的模型 SHA、`NODE_IPS`、NPU 分配和模型资产。**请注意：** 历史 8P 双 case PASS（5/3 steps）并不等于这里新引入的 Muon/AdamW 双路径已经实机通过；过去 16P Eager PASS 也不等于本次优化器开关改造已回归。A5 64P 继续禁用、未实机验证。
-
-## 并行调度
-
-runner 迁移自 torchtitan 的 GPUPool 机制：默认将用例并发打包到固定的 NPU 池上，
-每个用例通过 `ASCEND_RT_VISIBLE_DEVICES` 绑定到互不相交的物理 NPU 子集，
-任一时刻在用 NPU 数量不超过设备池大小。设备池从真实可见性构造：若运行环境已通过
-`ASCEND_RT_VISIBLE_DEVICES` 限定可用 NPU 子集（如 CI 按任务分配设备），池从该
-子集构造并对超出的 `--ngpu` 硬报错；否则用 `torch.npu.device_count()` 枚举运行时
-实际暴露的物理 ID，`--ngpu` 超出实际设备数时告警并截断——绝不按 `range(--ngpu)`
-伪造 ID（不存在的 ID 会让子进程在 CANN `GetVisibleDevices` 阶段即失败，torchtitan
-设备探测退回 "cuda" 后以 `torch._C._cuda_setDevice` AttributeError 崩溃）。池小于
-某用例需求时该用例被显式 skip 而非在 `acquire()` 中死锁。用例按 `ngpu` 从大到小
-提交以减少队头阻塞；并行结束后 runner 会输出两行调度遥测：池利用率
-（`[parallel] pool: window/utilization/busy histogram/allocations`）与
-用例重叠（`[parallel] overlap: sequential vs window、节省时长、并发度直方图`），
-统计窗口均为首次分配到最后一次释放，可直接用于核验 CI canary 的打包与重叠效果。
-各用例的输出被整体缓存，结束后以带 `[case 名]` 前缀的连续块输出，避免多用例
-日志交错。如需强制串行执行，传入 `--no-parallel`。用例可通过
-`OverrideDefinitions.timeout` 设置超时；超时后 runner 会向子进程所在进程组先发
-`SIGTERM`、宽限期后再发 `SIGKILL`，确保 `torchrun` 及各 rank 子进程全部退出，不会
-留下占用 NPU 的孤儿进程（超时按失败处理并输出已捕获日志）。
-
-- 同一台机器上并发运行两个 2 卡 case 时必须为每个 run 设置不同的
-  `HCCL_NPU_SOCKET_PORT_RANGE`（例如 `62000-62020`）；否则后启动的 run 会在 HCCL
-  建链时报 `Communication_Error_Bind_IP_Port`（一次并发验证即在同一端口上冲突）。
-
-调度器本身不设独立单元测试：其正确性（设备不重叠、失败/超时释放、并发打包、
-golden loss 等价）由集成测试自身的 canary 运行直接验证。
-
-### LoRA training and resume
+## LoRA training and resume
 
 The default `models` suite includes `dsv4_lora_ep2_fsdp2` for training and PEFT export. The distributed DCP resume case, `dsv4_lora_resume_ep2_fsdp2`, runs separately in `deepseek_v4_checkpoint` (two NPUs each). The resume case compares optimizer state exactly before the first resumed update and checks resumed loss/gradient norm. The block-FP8 case requires `torchao==0.17.0` and the optional `experiments/torchao-npu` package (install with `pip install ./experiments/torchao-npu` from the repository root); it runs real forward/backward/optimizer updates with a quantized frozen base and trainable floating-point adapters. Quantization unit tests follow the repository convention and skip when the optional package is unavailable; explicitly running this NPU case requires the package.
 
