@@ -13,16 +13,6 @@ import subprocess
 from tests.integration_tests import OverrideDefinitions
 
 
-def required_steps() -> int:
-    try:
-        steps = int(os.environ.get("STEPS", "5"))
-    except ValueError as exc:
-        raise ValueError("STEPS must be a positive integer") from exc
-    if steps < 1:
-        raise ValueError("STEPS must be positive")
-    return steps
-
-
 def validate_assets(parser: argparse.ArgumentParser, *, ckpt_required: bool = False) -> None:
     paths = ("HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH") if ckpt_required else ("HF_ASSETS_PATH",)
     for key in paths:

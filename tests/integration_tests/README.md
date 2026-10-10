@@ -110,15 +110,11 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 `run.log` 未刷新，执行机改从 Rank 0 的 `structured_logs` 提取最后 20
 条事件生成 `tail_20.log`，确保失败的 Actions 日志包含实际训练上下文。
 
-为验证 CI 触发、执行与回传通路，**该 Actions 固定 `COMPILE_ENABLE=0`
-(Eager, 5 steps)**。原 Examples Shell 与独立 Runner 默认仍为
-`COMPILE_ENABLE=1` (Inductor)。Inductor 的完整性能和训练稳定性
-**不在本 Actions 的通过范围内**；可在执行机单独以
-`COMPILE_ENABLE=1 STEPS=5` 运行原入口。
+当前 8P Lite Actions Eager smoke 的训练参数由 `OverrideDefinitions.override_args` 提供，而不再通过 example Shell 的 `COMPILE_ENABLE` 或 `STEPS` 环境分支传递。共享 examples 入口保留上游默认的 Inductor 与 100 steps；CI 使用后置 `--compile.no-enable --training.steps <n>`。Eager 冒烟通过不代表 Inductor 通过。
 
 ## Lite Actions Nightly All Models：测试定义与调度分离
 
-正式测试定义位于 `tests/integration_tests/lite_actions/nightly_all_models_test/`；保持 `nightly_all_models_test` 这个目录名，并采用 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py` 与共享 `runner.py`。稳定的 Lite Actions 适配入口是 `tests/integration_tests/lite_actions/tools/entrypoint.py`；可删除的 GitHub Artifact 桥接和 Waiter 归入 `.github/scripts/lite_actions/`，Workflow 名称带 `-lite-actions.yml`，不冒充直接在 GitHub 执行 NPU 训练。
+正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`；保持 `nightly_all_models_test` 这个目录名，并采用 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py` 与共享 `runner.py`。稳定的 Lite Actions 适配入口是 `tests/integration_tests/tools/lite_actions/entrypoint.py`；可删除的 GitHub Artifact 桥接和 Waiter 归入 `.github/scripts/lite_actions/`，Workflow 名称带 `-lite-actions.yml`，不冒充直接在 GitHub 执行 NPU 训练。
 
 **唯一测试定义源：** 每个模块的 `build_test_list()` 返回标准 `OverrideDefinitions`；其 `test_name`、`ngpu`、`nnodes`（默认 1）、`override_args`、`expected_steps` 等定义由模型源码维护。`ci_registry.json` 已删除；环境部署参数如 CANN、HF 路径、Checkpoint 挂载、SSH/HCCL IP 放在 Lite Actions 的 `config/pipelines.json`/`pools.json`，不放回 testcase。多机阶段仅由通用 Runner 执行已授权测试的 launch/verify，不复制完整训练 recipe。
 
@@ -147,33 +143,19 @@ gh workflow run a3-8p-lite-actions.yml --ref refactor/unified-a3-a5-ci \
 
 **验证边界：** 下文的历史 A3 8P/16P 成功只覆盖当时的提交；本次 suite 重构需新的 Actions Run 成功后才能宣称回归。A5 64P 仍禁用、未实机验收。
 
-## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
+## A3 8P DeepSeek-V4 Flash Eager 测试（正式 testcase）
 
-`nightly_all_models_test/a3_8p_tests.py` 直接通过现有 integration runner 执行
-[`deepseek_v4_flash_8p_cpt_4k_a3.sh`](../../examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh)。
-当前用例是**单节点 8 张 A3 NPU**，不是跨节点训练；复用现有 NPU 池、子进程超时清理和 TensorBoard step 检查，
-不在 Python 中复制模型、EP/FSDP、编译、算子和优化器配置。
+`tests/integration_tests/nightly_all_models_test/a3_8p_tests.py` 直接复用仓内 `run_tests.py` 与 `examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh`。当前 8P 模块内有两个真实测试定义：`dsv4_flash_a3_8p_example`（5 steps）与 `dsv4_flash_a3_8p_multicase`（3 steps）。二者均为单节点 8 张 A3 NPU、Eager smoke，使用 `--compile.no-enable` 覆盖 example 的默认 `--compile.enable`；TensorBoard 校验随各自 `expected_steps` 执行。
 
-在已准备好 CANN、torch_npu、TorchTitan 与有效 tokenizer 资产、并获得完整 8P 资源的环境中执行：
+在已准备好 CANN、torch_npu、TorchTitan 和 HF assets 的独立环境中，仅手工运行某个 case（注意先验证这台机器的 NPU 空闲）：
 
 ```bash
 HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
-STEPS=5 \
-python -m tests.integration_tests.lite_actions.nightly_all_models_test.a3_8p_tests ./test_reports/dsv4_flash_a3_8p
+python3 -m tests.integration_tests.nightly_all_models_test.a3_8p_tests \
+  dsv4_flash_a3_8p_example ./test_reports/dsv4_flash_a3_8p
 ```
 
-`HF_ASSETS_PATH` 必须指向存在的目录。Runner 默认 `STEPS=5`，允许通过环境变量覆盖；
-示例 Shell 单独执行时仍默认 100 steps。测试用例通过 `OverrideDefinitions.env_vars` 传递
-`STEPS`、`HF_ASSETS_PATH`、模型 Config 和 `USE_GOLDEN=0`，其余 Shell 参数保持示例默认值。
-`DATASET_PATH` 等已有 Shell 环境变量也可以由执行环境传入。输出目录必须为空。
-
-测试追加的 CLI 仅用于启用 TensorBoard 和逐步记录。成功条件为训练进程正常退出，
-且 `loss_metrics/global_avg_loss` 包含恰好 1 到 `STEPS` 的全部步号、没有重复步或非有限值。
-本用例不比较 Golden loss，也不证明修改 `STEPS` 后与默认 100-step 配置的数值等价。
-
-当前 `.gitcode` 默认 PreSmoke A3 Job 和 `.ci/integration_test.sh` 使用 4P，
-**不会自动执行这个独立 8P 入口**。要加入 CI，必须为它分配 8P 资源并显式运行上述命令；
-不得将 8P 用例混入现有 4P 默认 suite 造成资源跳过。
+指定 `LITE_TEST_STEPS=10` 可修改第一项的 smoke 步数，具体 `--training.steps` 与 `expected_steps` 同源；第二项仍保持独立的 3 steps。不要将 `STEPS=5` 或 `COMPILE_ENABLE=0` 当作此版本的训练参数协议。正式多用例验收请通过 `a3-8p-lite-actions.yml` 输入 `[{"suite":"a3_8p_tests","params":{}}]` 发起；总 Runner 会顺序执行、隔离日志、汇总 `PASS/FAIL/NOT_RUN`。原始 example 直接运行仍保留其既定默认值，Inductor / Muon 不包含在本次 Eager 验收范围内。
 
 ## 并行调度
 

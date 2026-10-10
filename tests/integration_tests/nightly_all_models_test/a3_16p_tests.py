@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.lite_actions.nightly_all_models_test.runner import run_distributed
+from tests.integration_tests.nightly_all_models_test.runner import run_distributed
 
 # The upstream recipe enables Muon swap by default; Tyro uses the final
 # --override.imports list, so replace it with the baseline NPU operations

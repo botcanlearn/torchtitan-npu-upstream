@@ -1,8 +1,8 @@
-"""A3 8P real integration tests; build_test_list is the single source of truth."""
+"""A3 8P integration test definitions, independent of CI scheduling backends."""
 from __future__ import annotations
 import os
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.lite_actions.nightly_all_models_test.runner import run_single
+from tests.integration_tests.nightly_all_models_test.runner import run_single
 
 
 def build_test_list() -> list[OverrideDefinitions]:
@@ -26,7 +26,7 @@ def build_test_list() -> list[OverrideDefinitions]:
 build_a3_8p_test_list=build_test_list
 
 def main() -> None:
-    from tests.integration_tests.lite_actions.nightly_all_models_test.runner import run_single
+    from tests.integration_tests.nightly_all_models_test.runner import run_single
     import argparse
     p=argparse.ArgumentParser();p.add_argument("test_name");p.add_argument("output_dir")
     args=p.parse_args()

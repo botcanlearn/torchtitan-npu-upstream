@@ -9,7 +9,7 @@ from pathlib import Path
 import pkgutil
 import re
 
-PACKAGE="tests.integration_tests.lite_actions.nightly_all_models_test"
+PACKAGE="tests.integration_tests.nightly_all_models_test"
 SAFE=re.compile(r"[a-z][a-z0-9_]{0,79}\Z")
 
 def catalog() -> dict[str,list]:
@@ -55,7 +55,7 @@ def main():
            'timeout':t.timeout,'ckpt_init_required':t.ckpt_init_required} for t in selected],separators=(',',':')))
         return
     test=selected[0]
-    from tests.integration_tests.lite_actions.nightly_all_models_test.runner import run_single,run_distributed
+    from tests.integration_tests.nightly_all_models_test.runner import run_single,run_distributed
     if test.nnodes==1:
         if a.phase=='launch':run_single(test,output_dir=a.output_dir)
     else:
