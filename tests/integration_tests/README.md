@@ -1,5 +1,8 @@
 # 集成测试基础设施
 
+> **Lite Actions V2 Phase 1（开发分支，尚未生产上线）**：8P/16P Workflow 使用动态 Matrix（每个 Test Case 独立 Job/状态），但真正的 NPU 训练由单实例 Lite Actions Dispatcher **全局串行执行**；Dispatcher 从经过验证的 Pool 拓扑动态选卡。A5 保持禁用。正式切换必须等待两仓部署兼容、真实 8P/16P 回归和 GitCode 主源同步确认。此前 Run 只能证明旧版本通过。
+
+
 本目录遵循 Torchtitan 的 `tests/integration_tests` 布局，负责维护集成测试定义、测试入口以及可选的 loss 精确比较。基础架构代码由
 torchtitan 迁移而来。
 
@@ -126,7 +129,7 @@ gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref maste
 
 8P AdamW 保持原始 4096 序列长度，并通过 `env_vars["OPTIMIZER_OVERRIDES"]="torchtitan_npu.override.common.optimizer.virtual"` 选择 Virtual Optimizer，替换（而不是叠加）Shell 默认的 `swap_optimizer`，保持全部 NPU 算子 imports，不修改 Muon 用例。Virtual Optimizer 将 AdamW moments 使用 Host-backed swap memory，以降低 HBM 占用；当前 8P Muon/AdamW 双用例已在上述 Run 38034002241 中完整 PASS；该结果覆盖 Eager smoke，不覆盖 Inductor、golden 或长期稳定性。
 
-同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。最新 Run 38034002241 的 GitHub Commit Comment 已包含两条 PASS，Exit Code 均为 0；Eager PASS 不等于 Inductor、数值 golden 或 64P 实机通过。
+**历史 V1** 同一个 8P Suite 两个测试在单 Job 中汇总结果；**V2 Phase 1** 拆为两个 GitHub Matrix Jobs，各自获得独立 PASS/FAIL，并由 Dispatcher 全局单训练槽位串行执行。最新 Run 38034002241 的 GitHub Commit Comment 已包含两条 PASS，Exit Code 均为 0；Eager PASS 不等于 Inductor、数值 golden 或 64P 实机通过。
 
 **GitCode 同步注意：** GitHub 的 `master` 仍存在每日将 GitCode 同名分支强制镜像的 `Sync Upstream`。务必在 GitCode `master` 收录此次改动，避免后续同步覆盖当前 GitHub CI 工作流。
 

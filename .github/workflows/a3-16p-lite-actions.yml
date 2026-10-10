@@ -6,25 +6,28 @@ on:
   workflow_dispatch:
     inputs:
       test_cases:
-        description: 'JSON list of test_id or suite selectors (max 2 cases)'
+        description: 'JSON list of registered test_id or suite selectors'
         type: string
         required: true
-        default: '[{"test_id":"dsv4_flash_a3_16p_example"}]'
+        default: '[{"suite":"a3_16p_tests"}]'
 
 permissions:
   contents: read
   actions: read
 
+# Per-Run concurrency only. Global training serialization is in Dispatcher.
 concurrency:
-  group: a3-16p-ci
+  group: "${{ github.workflow }}-${{ github.run_id }}"
   cancel-in-progress: false
-  queue: max
 
 jobs:
   prepare:
-    name: Prepare CI request
+    name: Prepare trusted CI Matrix
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Validate CI admission
@@ -33,7 +36,6 @@ jobs:
           CI_REQUEST_ACTOR: ${{ github.actor }}
           CI_REQUEST_REPOSITORY: ${{ github.repository }}
           CI_REQUEST_REF: ${{ github.ref }}
-          CI_CHANNEL_ENABLED: "true"
         run: |
           test "$CI_REQUEST_ACTOR" = "$CI_ALLOWED_ACTOR" || exit 1
           test "$CI_REQUEST_REPOSITORY" = "depeng1994/torchtitan-npu" || exit 1
@@ -41,28 +43,39 @@ jobs:
             refs/heads/master) ;;
             *) echo "CI branch not allowed" >&2; exit 1 ;;
           esac
-          test "$CI_CHANNEL_ENABLED" = true || { echo "CI channel disabled" >&2; exit 1; }
-      - name: Validate workflow_dispatch inputs
+      - name: Validate and expand trusted test plan
+        id: plan
         env:
           CI_TEST_CASES: ${{ inputs.test_cases }}
+          CI_MAX_SELECTORS: "2"
           CI_MAX_CASES: "2"
+          CI_PROTOCOL_VERSION: "2"
+          CI_PIPELINE: "a3-16p"
         run: python3 .github/scripts/lite_actions/prepare_request.py
-      - name: Upload CI request
+      - name: Upload immutable CI request
         uses: actions/upload-artifact@v4
         with:
           name: lite-ci-request-${{ github.run_attempt }}
           path: .ci-request/ci-request.json
           retention-days: 1
           if-no-files-found: error
-  ci:
+
+  case:
     needs: prepare
-    name: CI tests
+    name: ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - name: Wait for internal A3-16p-CI-Example
+      - name: Wait for internal a3-16p case
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_PLAN_DIGEST: ${{ needs.prepare.outputs.plan_digest }}
           CI_WAIT_TIMEOUT_SECONDS: "16800"
-        run: python3 .github/scripts/lite_actions/wait_result.py --case a3-16p
+        run: |
+          python3 .github/scripts/lite_actions/wait_result.py \
+            --case a3-16p --test-id "${{ matrix.test_id }}"
