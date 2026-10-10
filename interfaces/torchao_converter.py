@@ -198,6 +198,14 @@ class NpuQuantizeConverter(QuantizationConverter):
         replacement_config_type: Annotated[type | None, tyro.conf.Suppress] = None
         replacement_kwargs: Annotated[dict[str, object], tyro.conf.Suppress] = field(default_factory=dict)
         require_match: bool = True
+        prequantize_fqns: Annotated[tuple[str, ...] | None, tyro.conf.Suppress] = None
+        """Whitelist of FQN suffix patterns that keep ``fsdp_prequantize=True``.
+        Matched nodes keep the flag, unmatched nodes get an explicit per-node
+        ``fsdp_prequantize=False``. ``None`` disables the policy (the base
+        config's flag applies to every node). Shard-alignment violations are
+        caught at runtime by the fail-fast guard in
+        :class:`BlockMXTrainingWeightWrapperTensor`.
+        """
 
         def __post_init__(self) -> None:
             if self.base_config is None and self.replacement_config_type is None:
@@ -205,6 +213,36 @@ class NpuQuantizeConverter(QuantizationConverter):
 
     def __init__(self, config: Config) -> None:
         self.config = config
+        # Filled by ``convert``: whitelist patterns that matched at least one
+        # pre-quantizing node here. ``apply_quantization_converter`` aggregates
+        # them across converters: a pattern matching nothing anywhere is a
+        # silent no-op (typo / stale name) and must fail fast.
+        self.matched_prequantize_fqns: set[str] = set()
+
+    def _apply_prequantize_policy(self, base_config: AOBaseConfig, fqn: str) -> AOBaseConfig:
+        """Resolve the per-node ``fsdp_prequantize`` flag for one matched node.
+
+        Only nodes whose weight config is a pre-quantizing
+        :class:`BlockMXQuantizeConfig` participate. Whitelisted nodes keep the
+        flag and record their patterns in ``matched_prequantize_fqns``;
+        unmatched nodes get an explicit ``fsdp_prequantize=False`` copy.
+        Returns the (possibly replaced) config for this node.
+        """
+        if self.config.prequantize_fqns is None:
+            return base_config
+        weight_config = getattr(base_config, "weight_config", None)
+        if not _is_prequantizing_block_mx(weight_config):
+            return base_config
+
+        patterns = self.config.prequantize_fqns
+        matched = [pattern for pattern in patterns if _match_fqn_suffix(fqn, pattern)]
+        if not matched:
+            logger.info("[Converter] %s: fsdp_prequantize=disabled (not in whitelist)", fqn)
+            return _param_swap_without_prequantize(base_config)
+
+        logger.info("[Converter] %s: fsdp_prequantize=enabled (whitelist %s)", fqn, matched[0])
+        self.matched_prequantize_fqns.update(matched)
+        return base_config
 
     def convert(self, model_config):
         converted = 0
@@ -242,10 +280,11 @@ class NpuQuantizeConverter(QuantizationConverter):
                     quantized_cls = NpuQuantizedAscGroupedExpertsModule
                 else:
                     quantized_cls = _get_npu_quantized_module_cls(parent_cls)
+                node_base_config = self._apply_prequantize_policy(self.config.base_config, fqn)
                 replacement = derive(
                     config,
                     quantized_cls.Config,
-                    _torchao_npu_config=self.config.base_config,
+                    _torchao_npu_config=node_base_config,
                 )
                 replacement_name = f"{quantized_cls.__qualname__}.Config"
             model_config = _replace_config(model_config, parent, attr, replacement)
@@ -463,20 +502,23 @@ class KVNormFakeQuantConverter(QuantizationConverter):
         return model_config
 
 
+_DENSE_SCOPE_SUFFIXES = (
+    ".attention.wq_a",
+    ".attention.wq_b",
+    ".attention.wkv",
+    ".attention.wo_a",
+    ".attention.wo_b",
+    ".attention.indexer.wq_b",
+    ".moe.shared_experts.w1",
+    ".moe.shared_experts.w2",
+    ".moe.shared_experts.w3",
+)
+_ROUTED_EXPERT_SCOPE_SUFFIXES = (".moe.routed_experts.inner_experts",)
+
 # DeepSeek-V4 config-tree filters for the current model hierarchy.
 _DSV4_CONFIG_FILTERS = {
-    "dense": match_config_fqn_suffix(
-        ".attention.wq_a",
-        ".attention.wq_b",
-        ".attention.wkv",
-        ".attention.wo_a",
-        ".attention.wo_b",
-        ".attention.indexer.wq_b",
-        ".moe.shared_experts.w1",
-        ".moe.shared_experts.w2",
-        ".moe.shared_experts.w3",
-    ),
-    "routed_expert": match_config_fqn_suffix(".moe.routed_experts.inner_experts"),
+    "dense": match_config_fqn_suffix(*_DENSE_SCOPE_SUFFIXES),
+    "routed_expert": match_config_fqn_suffix(*_ROUTED_EXPERT_SCOPE_SUFFIXES),
     "lightning_indexer": match_config_fqn_suffix(".attention.compressed_sparse_attention.lightning_indexer"),
     "lightning_indexer_metadata": match_config_fqn_suffix(".lightning_indexer_metadata"),
 }
@@ -510,6 +552,77 @@ _MODEL_TYPE_BY_MODEL_NAME: dict[str, _ModelType] = {
 
 
 _SUPPORTED_RECIPES = ("all_mxfp8", "all_hif8", "mix", "all_block_fp8")
+
+_PREQUANTIZE_DEFAULT_FQNS: dict[str, tuple[str, ...]] = {
+    "dense": _DENSE_SCOPE_SUFFIXES,
+    "routed_expert": _ROUTED_EXPERT_SCOPE_SUFFIXES,
+}
+
+
+def _match_fqn_suffix(fqn: str, pattern: str) -> bool:
+    """Match a config-tree FQN by a dotted suffix pattern (``.attention.wkv``)."""
+    normalized = pattern.lstrip(".")
+    return fqn == normalized or fqn.endswith(f".{normalized}")
+
+
+def _is_prequantizing_block_mx(weight_config: object) -> bool:
+    """Whether a weight config is a Block MX config with pre-quantize enabled."""
+    return isinstance(weight_config, BlockMXQuantizeConfig) and weight_config.fsdp_prequantize
+
+
+def _param_swap_without_prequantize(param_swap: ParamSwapConfig) -> ParamSwapConfig:
+    """Copy a ``ParamSwapConfig`` with the node-local ``fsdp_prequantize`` off.
+
+    Used for weights outside the whitelist: the BF16 communication path is
+    then an explicit configuration decision, not an implicit runtime fallback.
+    Every constructor field is carried over so the copy cannot silently drop
+    state if ``ParamSwapConfig`` grows new parameters.
+    """
+    weight_config = param_swap.weight_config
+    assert isinstance(weight_config, BlockMXQuantizeConfig)
+    return ParamSwapConfig(
+        base_config=param_swap.base_config,
+        activation_config=param_swap.activation_config,
+        weight_config=replace(weight_config, fsdp_prequantize=False),
+        step=param_swap.step,
+        params_filter_fn=param_swap.params_filter_fn,
+    )
+
+
+def _check_prequantize_policy(
+    converters: list[object],
+    prequantize_fqns: tuple[str, ...],
+    *,
+    strict: bool,
+) -> None:
+    """Validate whitelist coverage after conversion.
+
+    ``strict`` distinguishes the two whitelist sources. A *user-provided*
+    whitelist is a promise that every pattern exists, so a pattern matching no
+    pre-quantizing node is a typo or stale name and must fail fast. The
+    *recipe default* whitelist enumerates the full projection set including
+    optional modules (e.g. factories with ``shared_experts=None``), so a
+    zero-match default entry is a legitimate absent module and only logs.
+    """
+    if not prequantize_fqns:
+        return
+    matched: set[str] = set()
+    for converter in converters:
+        matched |= getattr(converter, "matched_prequantize_fqns", set())
+    unmatched = [pattern for pattern in prequantize_fqns if pattern not in matched]
+    if not unmatched:
+        return
+    if not strict:
+        logger.info(
+            "fsdp_prequantize default whitelist entries not present in this model, skipped: %s",
+            unmatched,
+        )
+        return
+    raise ValueError(
+        f"fsdp_prequantize_fqns patterns matched no quantized weight: {unmatched}. "
+        f"Check the spelling against the model's quantized projections "
+        f"(all patterns: {list(prequantize_fqns)})."
+    )
 
 
 def _model_type_for_spec(model_spec: ModelSpec) -> _ModelType:
@@ -819,6 +932,7 @@ def _quantization_converter(
     model_compile_enabled: bool,
     replacement_config_type: type | None = None,
     replacement_kwargs: dict[str, object] | None = None,
+    prequantize_fqns: tuple[str, ...] | None = None,
 ) -> NpuQuantizeConverter.Config:
     return NpuQuantizeConverter.Config(
         base_config=base_config,
@@ -826,7 +940,36 @@ def _quantization_converter(
         model_compile_enabled=model_compile_enabled,
         replacement_config_type=replacement_config_type,
         replacement_kwargs=replacement_kwargs or {},
+        prequantize_fqns=prequantize_fqns,
     )
+
+
+def _resolve_prequantize_fqns(
+    user_fqns: list[str] | None,
+    *,
+    enabled: bool,
+) -> dict[str, tuple[str, ...]] | None:
+    """Resolve the per-scope pre-quantize whitelists for the recipe converters.
+
+    Returns ``None`` when pre-quantize is off (no policy is applied). With the
+    master switch on, an unset user list falls back to the recipe default
+    whitelist per scope (logged), while an explicit list applies to every
+    scope. An explicitly empty list is a contradictory configuration and is
+    rejected by ``QuantizationExtensionConfig.validate`` upstream. The
+    default/user distinction also drives the zero-match strictness in
+    :func:`_check_prequantize_policy`.
+    """
+    if not enabled:
+        return None
+    if user_fqns is None:
+        logger.info(
+            "fsdp_prequantize whitelist = recipe default (%s)",
+            {scope: list(fqns) for scope, fqns in _PREQUANTIZE_DEFAULT_FQNS.items()},
+        )
+        return dict(_PREQUANTIZE_DEFAULT_FQNS)
+    logger.info("fsdp_prequantize whitelist = user (%d patterns)", len(user_fqns))
+    resolved = tuple(user_fqns)
+    return dict.fromkeys(_PREQUANTIZE_DEFAULT_FQNS, resolved)
 
 
 def _recipe_converters(
@@ -841,6 +984,7 @@ def _recipe_converters(
     li_quantization: LIQuantization | None = None,
     li_kernel_config: LightningIndexerKernelConfig | None = None,
     kv_norm_quantization: KVNormQuantizationConfig | None = None,
+    prequantize_fqns_by_scope: dict[str, tuple[str, ...]] | None = None,
     enable_hif8_save_quant_codes: bool = False,
 ) -> list[QuantizationConverter.Config]:
     converters: list[QuantizationConverter.Config]
@@ -881,16 +1025,29 @@ def _recipe_converters(
         else:
             raise ValueError(f"recipe must be one of {_SUPPORTED_RECIPES}, got {recipe!r}")
 
+        # A scope only participates in the whitelist policy when its param
+        # swap actually pre-quantizes (e.g. "mix" runs dense as plain MX:
+        # passing the dense whitelist there would make every dense pattern a
+        # zero-match error in _check_prequantize_policy).
+        def _scope_fqns(config: ParamSwapConfig, scope: str) -> tuple[str, ...] | None:
+            if prequantize_fqns_by_scope is None:
+                return None
+            if not _is_prequantizing_block_mx(config.weight_config):
+                return None
+            return prequantize_fqns_by_scope.get(scope)
+
         converters = [
             _quantization_converter(
                 dense_config,
                 dense_filter,
                 model_compile_enabled=model_compile_enabled,
+                prequantize_fqns=_scope_fqns(dense_config, "dense"),
             ),
             _quantization_converter(
                 routed_config,
                 filters["routed_expert"],
                 model_compile_enabled=model_compile_enabled,
+                prequantize_fqns=_scope_fqns(routed_config, "routed_expert"),
             ),
         ]
 
@@ -1019,7 +1176,11 @@ def apply_quantization_converter(
         if model_type == "v4" and quantization_config.li_quantization is not None
         else None
     )
-    converters = _recipe_converters(
+    prequantize_fqns_by_scope = _resolve_prequantize_fqns(
+        quantization_config.fsdp_prequantize_fqns,
+        enabled=quantization_config.enable_fsdp_prequantize,
+    )
+    converter_configs = _recipe_converters(
         quantization_config.recipe,
         model_type=model_type,
         enable_sparse_attention_quantization=quantization_config.enable_sparse_attention_quantization,
@@ -1030,12 +1191,44 @@ def apply_quantization_converter(
         li_quantization=quantization_config.li_quantization,
         li_kernel_config=li_kernel_config,
         kv_norm_quantization=quantization_config.kv_norm_quantization,
+        prequantize_fqns_by_scope=prequantize_fqns_by_scope,
         enable_hif8_save_quant_codes=quantization_config.enable_hif8_save_quant_codes,
     )
-    validate_converter_order(converters)
+    validate_converter_order(converter_configs)
 
-    for converter_config in converters:
-        model_config = converter_config.build().convert(model_config)
+    built_converters: list[object] = []
+    for converter_config in converter_configs:
+        converter = converter_config.build()
+        built_converters.append(converter)
+        model_config = converter.convert(model_config)
+
+    # Aggregate the per-node whitelist decisions. Only patterns actually handed
+    # to a pre-quantizing scope participate (e.g. "mix" runs dense as plain MX,
+    # so dense patterns are not passed there and must not be reported as
+    # unmatched). Zero-match handling is source-dependent: user whitelists fail
+    # fast on typos, the recipe default tolerates absent optional modules.
+    # Shard-alignment validation depends on the runtime FSDP sharding and is
+    # left to the fail-fast guard in the wrapper tensor.
+    effective_fqns = tuple(
+        dict.fromkeys(
+            fqn
+            for converter_config in converter_configs
+            for fqn in (getattr(converter_config, "prequantize_fqns", None) or ())
+        )
+    )
+    if quantization_config.enable_fsdp_prequantize and not effective_fqns:
+        # No scope of the recipe pre-quantizes (e.g. "all_mxfp8" is pure MX),
+        # so the master switch and the whitelist would both be silently inert.
+        raise ValueError(
+            f"enable_fsdp_prequantize=True but recipe {quantization_config.recipe!r} pre-quantizes no "
+            "weight scope; use all_block_fp8 (or mix, which pre-quantizes routed experts only) "
+            "or disable enable_fsdp_prequantize."
+        )
+    _check_prequantize_policy(
+        built_converters,
+        effective_fqns,
+        strict=quantization_config.fsdp_prequantize_fqns is not None,
+    )
 
     logger.info(
         "Applied TorchAO-NPU recipe=%s, sparse_attention_quantization=%s, mxfp4_qat=%s, "

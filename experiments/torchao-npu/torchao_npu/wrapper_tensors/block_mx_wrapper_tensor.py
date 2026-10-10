@@ -36,15 +36,28 @@ from torchao_npu.wrapper_tensors.base_wrapper_tensor import (
 )
 
 # Block MX quantizes in 32x32 blocks and packs two adjacent block scales along
-# the quantized dim (scale trailing pack dim of 2). Local-quantize + all-gather
-# reconstructs the global quantized weight correctly only when the FSDP shard's
-# quantized dim is a multiple of the scale packing granularity (2 * 32 = 64):
-# a shard aligned to 32 but not 64 rounds its own scale count up, so the
-# gathered K-dim scale has more rows than the globally-quantized one and the
-# ``npu_quant_matmul`` meta check fails with
-# "k dimension of scale and pertoken_scale must be equal".
+# the quantized dim (scale trailing pack dim of 2). When FSDP shards the
+# quantized dim, local-quantize + all-gather reconstructs the global quantized
+# weight correctly only when each shard is a multiple of the scale packing
+# granularity (2 * 32 = 64): a shard aligned to 32 but not 64 rounds its own
+# scale count up, so the gathered K-dim scale has more rows than the
+# globally-quantized one and the ``npu_quant_matmul`` meta check fails with
+# "k dimension of scale and pertoken_scale must be equal". Sharding another
+# dim (e.g. the expert axis under Shard(0)) keeps each local shard's quantized
+# dim whole and cannot misalign, so the 64-alignment only applies to the dim
+# that is actually sharded.
+
+# MX quantization block size. The unsharded quantized dim (last dim) of a
+# pre-quantized weight must be a multiple of it.
 _BLOCK_SIZE = 32
 _SCALE_PACK = 2
+
+# The alignment an FSDP shard's quantized dim (axis=-2) must satisfy for
+# pre-quantize + all-gather to reconstruct the global scales exactly. The
+# guard below is the single enforcement point: the shard-alignment contract
+# depends on the actual FSDP sharding (dp_shard, cp folding, expert meshes),
+# which config-stage validation deliberately does not model.
+_PREQUANTIZE_SHARD_ALIGNMENT = _BLOCK_SIZE * _SCALE_PACK
 
 
 class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
@@ -220,28 +233,74 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
         new_s2 = B_s2.view(g, -1, *B_s2.shape[1:])
         return new_s1, new_s2
 
-    def _can_prequantize(self, mesh: DeviceMesh | None) -> bool:
+    def _can_prequantize(self, mesh: DeviceMesh | None, outer_size: torch.Size | None = None) -> bool:
         """Whether the local shard can be pre-quantized before all_gather.
 
-        Falls back to BF16 communication + on-the-fly quantization when:
+        Returns False (structural no-op, the BF16 communication path simply
+        applies) when:
         - ``fsdp_prequantize`` is disabled;
         - there is no FSDP sharding (``mesh.size()==1``, e.g. EFSDP=1 MoE);
         - the local storage is not allocated (backward reconstruction phase);
-        - the shard is not aligned to the quantization/packing granularity.
+        - ``outer_size`` equals the local shape (nothing is sharded here).
+
+        Raises ``ValueError`` when the shard violates the quantization/packing
+        alignment: the configuration asked for pre-quantization but the weight
+        shape and parallelism cannot satisfy it, so silently falling back would
+        make the training behavior differ from the configuration.
         """
         if not self.weight_config.fsdp_prequantize:  # pyrefly: ignore [missing-attribute]
             return False
-        if hasattr(mesh, "size") and mesh.size() == 1:
-            return False
+        # A mesh that is not a DeviceMesh (unit-test path) is treated as
+        # sharded so the alignment guards below still run, mirroring a real
+        # FSDP run.
+        if isinstance(mesh, DeviceMesh):
+            if mesh.size() == 1:
+                return False
+            mesh_size = mesh.size()
+        else:
+            mesh_size = 1
         if self._data.data_ptr() == 0:
             return False
-        # The FSDP-sharded quantized dim (axis=-2) needs 2-block scale packing
-        # alignment (64): a 32- but not 64-aligned shard rounds its own K-dim
+        # Which dim FSDP actually shards is decided by the placement, not by
+        # the tensor rank: 3D expert weights use Shard(0) (expert axis) unless
+        # the EFSDP degree exceeds the expert count (extensions/distributed/
+        # fsdp.py). The 2-block scale packing alignment (64) is only required
+        # when a sharded dim IS the quantized dim (axis=-2): a shard of the
+        # quantized dim that is 32- but not 64-aligned rounds its own K-dim
         # scale count up, so the gathered ``B_s2`` has more scale rows than the
-        # global one and the dgrad ``npu_quant_matmul`` meta check fails.
-        if self._data.shape[-2] % (_BLOCK_SIZE * _SCALE_PACK) != 0:
-            return False
-        return self._data.shape[-1] % _BLOCK_SIZE == 0
+        # global one and the dgrad ``npu_quant_matmul`` meta check fails. When
+        # another dim is sharded (e.g. experts under Shard(0)) and axis=-2 is
+        # left whole, packing cannot misalign; when several dims are sharded at
+        # once (e.g. a 2D mesh splitting both the expert axis and the quantized
+        # dim), the guard checks every sharded dim, so a split quantized dim
+        # still fails fast.
+        shard_shape = tuple(self._data.shape)
+        if outer_size is not None:
+            dims = len(shard_shape)
+            sharded = [d - dims for d in range(dims) if shard_shape[d] != outer_size[d]]
+            if not sharded:
+                return False  # Local shape == global shape: nothing to shard.
+            check_quant_dim = -2 in sharded
+        else:
+            # No outer_size (e.g. unit-test path): assume the quantized dim may
+            # be sharded so the alignment guard runs, mirroring a real FSDP run.
+            check_quant_dim = True
+        if check_quant_dim and self._data.shape[-2] % _PREQUANTIZE_SHARD_ALIGNMENT != 0:
+            raise ValueError(
+                f"fsdp_prequantize requires the FSDP-sharded quantized dim (axis=-2) of "
+                f"local shard {shard_shape} (global {tuple(outer_size) if outer_size is not None else 'unknown'}) "
+                f"to be a multiple of {_PREQUANTIZE_SHARD_ALIGNMENT} (block size {_BLOCK_SIZE} x scale "
+                f"pack {_SCALE_PACK}) per FSDP shard (mesh size {mesh_size}); "
+                f"remove this weight from fsdp_prequantize_fqns or adjust the "
+                f"parallelism."
+            )
+        if self._data.shape[-1] % _BLOCK_SIZE != 0:
+            raise ValueError(
+                f"fsdp_prequantize requires the last dim of local shard "
+                f"{shard_shape} to be a multiple of the block size "
+                f"{_BLOCK_SIZE}; remove this weight from fsdp_prequantize_fqns."
+            )
+        return True
 
     # ------------------------------------------------------------------
     # FSDP hooks (pre-quantization)
@@ -255,7 +314,7 @@ class BlockMXTrainingWeightWrapperTensor(BaseTrainingWeightWrapperTensor):
         module: nn.Module,
         mp_policy: MixedPrecisionPolicy,
     ):
-        if not self._can_prequantize(mesh):
+        if not self._can_prequantize(mesh, outer_size):
             return super().fsdp_pre_all_gather(mesh, outer_size, outer_stride, module, mp_policy)
 
         # Cast the local shard to the mixed-precision param dtype before

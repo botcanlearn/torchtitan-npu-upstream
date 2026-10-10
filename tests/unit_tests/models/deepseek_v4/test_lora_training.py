@@ -252,7 +252,7 @@ def test_registered_quantized_lora_accepts_compile_configuration(ao, recipe):
     config.extension.quantization.enable_quantized_training = True
     config.extension.quantization.recipe = recipe
     config.compile.enable = True
-    config.extension.quantization.fsdp_prequantize = recipe != "all_mxfp8"
+    config.extension.quantization.enable_fsdp_prequantize = recipe != "all_mxfp8"
     config.model_spec = ao.apply_quantization_converter(
         config.model_spec,
         config.extension.quantization,

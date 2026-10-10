@@ -35,10 +35,24 @@ export NODE_IPS NGPU
 
 # A5 defaults to block-FP8 quantized training. A trailing
 # --extension.quantization.no-enable-quantized-training selects BF16 instead.
+#
+# The runtime guard requires each pre-quantized weight's dp-sharded dim0 to
+# stay 64-aligned, and the base script runs DP_SHARD=128 (dim0 must be a
+# multiple of 64*128=8192). For the default deepseek_v4_flash config that
+# breaks the evenly-sharded dense projections -- wq_a (1024 -> 8 rows/rank),
+# wkv (512 -> 4), wo_b (4096 -> 32) and shared_experts w1/w3 (2048 -> 16) and
+# w2 (4096 -> 32) -- which fail fast at startup with a fix hint instead of
+# silently falling back to BF16 communication. fsdp-prequantize-fqns below
+# therefore narrows the whitelist to the projections that stay aligned: the
+# per-head/per-group BlockShard projections (wq_b, wo_a, indexer.wq_b) and
+# the expert-axis-sharded routed experts. At lower DP_SHARD degrees (e.g. 8,
+# where every default entry is aligned) drop that line to restore the recipe
+# default whitelist (all Block FP8 projections).
 QUANTIZATION_ARGS=(
     --extension.quantization.enable-quantized-training
     --extension.quantization.recipe all_block_fp8
     --extension.quantization.enable-fsdp-prequantize
+    --extension.quantization.fsdp-prequantize-fqns .attention.wq_b .attention.wo_a .attention.indexer.wq_b .moe.routed_experts.inner_experts
     --extension.quantization.li-quantization fp8
     --extension.quantization.kv-norm-quantization.format mxfp8
     --extension.quantization.kv-norm-quantization.fqns .attention.kv_norm,.attention.compressor.norm

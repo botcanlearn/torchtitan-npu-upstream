@@ -166,5 +166,5 @@ def deepseek_v4_lora_quantized_training():
     config = deepseek_v4_lora_training()
     config.extension.quantization.enable_quantized_training = True
     config.extension.quantization.recipe = "all_block_fp8"
-    config.extension.quantization.fsdp_prequantize = False
+    config.extension.quantization.enable_fsdp_prequantize = False
     return config

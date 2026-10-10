@@ -138,7 +138,10 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
     │ fsdp_pre_all_gather()
     ├─ 满足条件：cast 到 param_dtype → Block MX 量化
     │              → B_q（FP8）+ B_s1/B_s2（scale）
-    └─ 不满足条件：回退普通参数通信
+    ├─ 结构性 no-op（不在白名单 / 无 FSDP 分片 / 本地存储未分配）：
+    │              回退普通参数通信（高精度 + 运行时量化），不报错
+    └─ 白名单命中但对齐失败（axis=-2 非 64 倍数 / 末维非 32 倍数）：
+                   抛 ValueError 立即终止，不静默回退
     │
     ├─ FSDP 分别 all-gather B_q、B_s1、B_s2
     │
@@ -152,7 +155,7 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
 
 这里的逻辑 dtype 与物理 payload 是两个概念：逻辑参数仍用于梯度路由和 FSDP 状态管理，实际通信和量化计算使用 FP8 权重及 scale。量化 wrapper 的自定义反向将梯度转换回逻辑权重，再交给 FSDP 按 `reduce_dtype` 做 reduce-scatter；优化器参数和 checkpoint 不会因此永久变成 FP8。
 
-该选项默认关闭，需要同时启用低精度训练。它只作用于 `mix` 中的 routed expert 和 `all_block_fp8` 中匹配的 Block FP8 模块，对 `all_mxfp8` 无效果：
+该选项默认关闭，需要同时启用低精度训练。它只作用于 `mix` 中的 routed expert 和 `all_block_fp8` 中匹配的 Block FP8 模块；`all_mxfp8`/`all_hif8` 没有任何预量化 scope，与该开关同开属于矛盾配置，转换阶段直接抛出 `ValueError`（提示改用 `all_block_fp8`/`mix` 或关闭开关），不会被静默忽略：
 
 ```bash
 --extension.quantization.enable-quantized-training \
@@ -160,7 +163,12 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
 --extension.quantization.enable-fsdp-prequantize
 ```
 
-当前实现要求本地权重分片的倒数第二维按 64 对齐、最后一维按 32 对齐。不满足对齐要求、没有 FSDP 分片（如 EFSDP=1 的 MoE）或本地存储未分配时，回退为高精度通信加运行时量化。
+哪些权重保留预量化由 `--extension.quantization.fsdp-prequantize-fqns` 白名单控制：未设置时使用 recipe 默认白名单（全部 Block FP8 投影），显式空表与开关同开在配置校验时报 `ValueError`。白名单命中后，退出路径分为两类，行为刻意不同：
+
+- **结构性 no-op（回退，不报错）**：没有 FSDP 分片（mesh size 1，如 EFSDP=1 的 MoE）、本地存储未分配（反向重建阶段）或本地形状即全局形状时，回退为高精度通信加运行时量化。这是并行拓扑决定的正常路径，不是错误。
+- **对齐失败（报错，不回退）**：分片后的量化维（axis=-2）须为 64 的倍数、最后一维须为 32 的倍数，不满足时抛 `ValueError` 立即终止，报错信息给出本地/全局分片形状与 mesh size，并提示从 `fsdp-prequantize-fqns` 移除该权重或调整并行度。按专家轴分片（Shard(0)）的 3D 专家权重本地量化维完整，不受 64 对齐约束。静默回退会让训练行为偏离配置，因此对齐失败是硬错误。
+
+典型示例：默认白名单包含 `.attention.wkv`（dim0=512）。`dp_shard=8` 时每卡分片 64 行，满足对齐、正常预量化；`dp_shard=16` 时每卡 32 行，启动即报错，需把 `.attention.wkv` 从 `fsdp-prequantize-fqns` 中排除（列出默认白名单的其余模式）。更高并行度会成批触发：如 `dp_shard=128` 时要求 dim0 为 8192 的倍数，均分切分的 `wq_a`/`wkv`/`wo_b`/shared experts（dim0 为 512–4096）全部违规，仅按 head/group 块切分的 `wq_b`/`wo_a`/`indexer.wq_b` 与按专家轴切分的 routed experts 仍可预量化。
 
 ## 配置与生效检查
 
@@ -169,19 +177,20 @@ FSDP 的参数通信和梯度通信是两个阶段：参数在模块计算前通
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enable-quantized-training` | `False` | 低精度训练总开关 |
-| `recipe` | `all_block_fp8` | 选择 `all_mxfp8`、`mix` 或 `all_block_fp8` |
+| `recipe` | `all_block_fp8` | 选择 `all_mxfp8`、`all_hif8`、`mix` 或 `all_block_fp8` |
 | `enable-mxfp4-qat` | `False` | Routed expert 的 MXFP4 fake quant 约束 |
 | `li-quantization` | `None` | LI Q/K 量化；V4 可选 `fp8`、`mxfp8`、`mxfp4`、`hif8`，V4.1 仅支持 `mxfp4` |
 | `enable-sparse-attention-quantization` | `False` | V4.1 KV source Compressor 与稀疏 attention 混合量化 |
 | `dst-type-max` | `0.0` | 用于 MXFP4 量化的目标类型最大值，可取值 0.0, 6.0-12.0 |
 | `enable-fsdp-prequantize` | `False` | Block FP8 权重在 FSDP all-gather 前预量化 |
+| `fsdp-prequantize-fqns` | `None` | 预量化权重 FQN 后缀白名单；`None` 用 recipe 默认白名单（全部 Block FP8 投影），显式空表与开关同开报 `ValueError`，命中但对齐失败的权重启动即报错 |
 | `kv-norm-quantization.format` | 未设置 | V4 nope KV Cache 量化格式，目前为 `mxfp8`（8 bit E4M3） |
 | `kv-norm-quantization.fqns` | 空列表 | V4 的量化插入位置，脚本使用 `.attention.kv_norm,.attention.compressor.norm` |
 | `kv-norm-quantization.block-size` | `32` | V4 KV Cache MXFP8 的 block size；A5 脚本使用 `64` |
 
 布尔开关可通过对应的 `no-` 形式显式关闭，例如 `--extension.quantization.no-enable-mxfp4-qat`、`--extension.quantization.no-enable-fsdp-prequantize`。使用 `--extension.quantization.no-enable-quantized-training` 可关闭量化训练总开关。
 
-启动日志中的 `Applied TorchAO-NPU recipe=...` 表示 recipe 已应用；同时检查 `mxfp4_qat`、`li_quantization`、`sparse_attention_quantization` 和 `enable_fsdp_prequantize` 是否符合预期。该日志用于确认配置应用情况，不能替代训练精度和性能验证。
+启动日志中的 `Applied TorchAO-NPU recipe=...` 表示 recipe 已应用；同时检查 `mxfp4_qat`、`li_quantization`、`sparse_attention_quantization` 和 `enable_fsdp_prequantize` 是否符合预期。预量化白名单的生效来源由 `fsdp_prequantize whitelist = recipe default ...`（默认白名单）或 `fsdp_prequantize whitelist = user ...`（用户白名单）日志行确认。该日志用于确认配置应用情况，不能替代训练精度和性能验证。
 
 需要采集性能信息时，可增加 `--profiler.enable-profiling`。示例脚本中的 `USE_GOLDEN=1` 用于选择数值基线 attention override，默认使用 Ascend 融合路径；该变量不控制低精度训练总开关。
 

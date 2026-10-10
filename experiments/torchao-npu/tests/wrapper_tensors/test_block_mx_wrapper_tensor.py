@@ -102,9 +102,10 @@ def test_prequantized_wrapper_can_prequantize_falls_back_when_disabled():
 def test_prequantized_wrapper_can_prequantize_requires_block_alignment():
     """_can_prequantize requires a 32-aligned last dim."""
     wrapper = _make_prequantized_wrapper(shape=(64, 128), fsdp_prequantize=True)
-    # Non-32-aligned last dim -> cannot prequantize.
+    # Non-32-aligned last dim -> the configuration cannot be honored.
     wrapper._data = torch.randn(64, 100).to(torch.float8_e4m3fn)
-    assert wrapper._can_prequantize(None) is False
+    with pytest.raises(ValueError, match="last dim"):
+        wrapper._can_prequantize(None)
 
 
 def test_prequantized_wrapper_can_prequantize_requires_scale_pack_alignment():
@@ -115,14 +116,45 @@ def test_prequantized_wrapper_can_prequantize_requires_scale_pack_alignment():
     all-gather the K-dim scale has more rows than the globally quantized one
     and the dgrad ``npu_quant_matmul`` fails the "k dimension of scale and
     pertoken_scale must be equal" meta check (16P wkv: N=512, shard 32 rows).
+    An enabled-but-unsatisfiable configuration raises instead of silently
+    falling back, so training behavior never diverges from the configuration.
     """
     wrapper = _make_prequantized_wrapper(shape=(64, 128), fsdp_prequantize=True)
-    # 32-aligned but not 64-aligned axis=-2 -> fall back to BF16 all-gather.
+    # 32-aligned but not 64-aligned axis=-2 -> fail fast.
     wrapper._data = torch.randn(32, 128).to(torch.float8_e4m3fn)
-    assert wrapper._can_prequantize(None) is False
+    with pytest.raises(ValueError, match="fsdp_prequantize_fqns"):
+        wrapper._can_prequantize(None)
     # 64-aligned axis=-2 -> pre-quantize path is taken.
     wrapper._data = torch.randn(64, 128).to(torch.float8_e4m3fn)
     assert wrapper._can_prequantize(None) is True
+
+
+def test_prequantized_wrapper_shard_dim_decides_scale_pack_alignment():
+    """The 64-alignment applies whenever a sharded dim IS the quantized dim.
+
+    3D expert weights use Shard(0) (expert axis) unless the EFSDP degree
+    exceeds the expert count (extensions/distributed/fsdp.py). Under Shard(0)
+    each local shard keeps the quantized dim whole, so a 32- but not 64-aligned
+    axis=-2 is legitimate and must not fail; under Shard(1) the same shard
+    breaks the scale packing contract and must still fail. A 2D mesh that
+    shards both the expert axis and the quantized dim still hits the guard on
+    the split quantized dim.
+    """
+    wrapper = _make_prequantized_wrapper(shape=(4, 32, 128), fsdp_prequantize=True)
+    wrapper._data = torch.randn(4, 32, 128).to(torch.float8_e4m3fn)
+    # Shard(0): local (4,32,128) vs global (8,32,128) -> expert axis sharded.
+    assert wrapper._can_prequantize(None, torch.Size((8, 32, 128))) is True
+    # Shard(1): local (4,32,128) vs global (4,64,128) -> quantized dim sharded.
+    with pytest.raises(ValueError, match="fsdp_prequantize_fqns"):
+        wrapper._can_prequantize(None, torch.Size((4, 64, 128)))
+    # Shard(0)+Shard(1): local (4,32,128) vs global (8,64,128) -> both the
+    # expert axis and the quantized dim are sharded; the 32-row quantized-dim
+    # shard still breaks the 64 scale packing and must fail even though the
+    # expert axis is sharded too.
+    with pytest.raises(ValueError, match="fsdp_prequantize_fqns"):
+        wrapper._can_prequantize(None, torch.Size((8, 64, 128)))
+    # Local shape == global shape: nothing is sharded here, structural no-op.
+    assert wrapper._can_prequantize(None, torch.Size((4, 32, 128))) is False
 
 
 @pytest.mark.parametrize("device", target_devices)

@@ -154,6 +154,15 @@ class QuantizationExtensionConfig:
     """
     dst_type_max: float = 0.0
     enable_fsdp_prequantize: bool = False
+    fsdp_prequantize_fqns: list[str] | None = None
+    """FQN suffix patterns that ENABLE FSDP pre-quantize, only meaningful with
+    ``enable_fsdp_prequantize=True``. ``None`` (unset) falls back to the recipe
+    default whitelist; only whitelisted weights are enabled, non-whitelisted
+    weights are explicitly disabled. A whitelisted weight whose shard breaks
+    the pre-quantize alignment contract fails fast at runtime with a fix hint.
+    An explicitly empty list with the master switch on is a contradictory
+    configuration and raises ``ValueError``.
+    """
     kv_norm_quantization: KVNormQuantizationConfig = field(default_factory=KVNormQuantizationConfig)
     enable_hif8_save_quant_codes: bool = False
     """Keep HiF8's quantized operands and result across the
@@ -166,6 +175,11 @@ class QuantizationExtensionConfig:
     def validate(self) -> None:
         if self.li_quantization not in (None, "mxfp4", "mxfp8", "fp8", "hif8"):
             raise ValueError("li_quantization must be None or one of: mxfp4, mxfp8, fp8, hif8")
+        if self.enable_fsdp_prequantize and self.fsdp_prequantize_fqns is not None and not self.fsdp_prequantize_fqns:
+            raise ValueError(
+                "fsdp_prequantize_fqns is explicitly empty while enable_fsdp_prequantize is enabled; "
+                "unset it to use the recipe default whitelist, or list the FQN patterns to enable."
+            )
 
 
 @dataclass(kw_only=True, slots=True)
