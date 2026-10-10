@@ -3,9 +3,34 @@
 本目录遵循 Torchtitan 的 `tests/integration_tests` 布局，负责维护集成测试定义、测试入口以及可选的 loss 精确比较。基础架构代码由
 torchtitan 迁移而来。
 
-当前注册 DeepSeek-V4 与 DeepSeek-V3.2 模型的集成用例。
+默认 `models` suite 覆盖 DeepSeek-V4、DeepSeek-V3.2 和 Qwen3.5；checkpoint、量化及 Engram HF 另有独立 suite。
 
-## 测试矩阵
+## 入口
+
+CI 通过以下脚本启动本目录的 integration ST：
+
+```bash
+.ci/integration_test.sh
+```
+
+`.ci/smoke_test.sh` 只负责 `tests/smoke_tests` 的 smoke 阶段，不再触发本目录的 ST。
+两个入口都先 source `.ci/common.sh`，由它完成 CANN 环境、解释器 shim 和 torchtitan
+checkout 准备。
+
+或直接运行 Python 入口：
+
+
+```bash
+python -m tests.integration_tests.run_tests \
+  ./test_reports/integration \
+  --test_suite models \
+  --ngpu 4
+```
+其中`./test_reports/integration` 是必填的测试输出目录，运行前需要确保该目录为空。
+
+直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
+
+## 主要测试矩阵
 
 | Case 名称 | 模型 | 并行配置 | Rank 数 | 编译配置 | Check Loss | 不检查 Loss 原因 |
 |---|---|---|---|---:|---|---|
@@ -73,32 +98,6 @@ state 的 NovaSwap 路径。该 case 同样只检查训练完成，不读取 gol
 这里的 integration recipe 聚焦 sparse-attention / MHC 回归边界。端到端 example 脚本
 额外启用 Virtual Optimizer；checkpoint 保存兼容由 extension `CheckpointManager` 提供。
 这些 optimizer state/checkpoint 路径不属于当前 integration loss regression 的覆盖范围。
-
-## 入口
-
-CI 通过以下脚本启动本目录的 integration ST：
-
-```bash
-.ci/integration_test.sh
-```
-
-`.ci/smoke_test.sh` 只负责 `tests/smoke_tests` 的 smoke 阶段，不再触发本目录的 ST。
-两个入口都先 source `.ci/common.sh`，由它完成 CANN 环境、解释器 shim 和 torchtitan
-checkout 准备。
-
-或直接运行 Python 入口：
-
-
-```bash
-python -m tests.integration_tests.run_tests \
-  ./test_reports/integration \
-  --test_suite models \
-  --ngpu 4
-```
-其中`./test_reports/integration` 是必填的测试输出目录，运行前需要确保该目录为空。
-
-直接运行上述 Python 命令仅执行 integration tests。`--test_suite models` 与 CI 的集成测试配置保持一致，覆盖 DeepSeek-V4 和 DeepSeek-V3.2。完整 CI 流程还会在此之前执行 `tests/smoke_tests`。
-
 
 ## Nightly All Models（A3 / A5 CI 用例）
 
