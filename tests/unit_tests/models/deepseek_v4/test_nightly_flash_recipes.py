@@ -55,6 +55,7 @@ def test_a3_16p_effective_recipe(tmp_path):
     case = a3_16p_tests.build_test_list()[0]
     argv = expanded_argv(case, tmp_path)
     assert last(argv, '--parallelism.expert-parallel-degree') == '16'
+    assert case.env_vars['TORCHINDUCTOR_NPU_BACKEND'] == 'ascendc'
     assert last(argv, '--optimizer.name') == 'AdamW'
     assert '--checkpoint.no-enable' in argv
     assert 'torchtitan_npu.override.common.optimizer.swap_optimizer' not in imports(argv)

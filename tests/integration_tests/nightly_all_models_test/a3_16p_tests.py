@@ -31,6 +31,11 @@ def build_test_list() -> list[OverrideDefinitions]:
             "HCCL_IF_BASE_PORT": "30160",
             "CONFIG": "deepseek_v4_flash_43layers_16experts",
             "OPTIMIZER_OVERRIDES": "",
+            # On some installed torch_npu builds the default Triton backend
+            # registers aten.erfc twice at import-time (even in Eager runs).
+            # Pin this test's known-good backend, without coupling Lite Actions
+            # to the model runtime version.
+            "TORCHINDUCTOR_NPU_BACKEND": "ascendc",
         },
         expected_steps=(tuple(range(1, STEPS + 1)),),
         check_loss=False,
