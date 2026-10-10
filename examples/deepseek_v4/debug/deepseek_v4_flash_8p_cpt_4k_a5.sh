@@ -21,6 +21,7 @@ export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:
 # A5-only fused ops; USE_GOLDEN=1 keeps the pure reference list.
 if [[ "${USE_GOLDEN:-0}" != "1" ]]; then
     export CLI_OVERRIDES="${CLI_OVERRIDES:-torchtitan_npu.override.common.rope.asc_partial \
+                                           torchtitan_npu.override.deepseek_v4.compressor.asc \
                                            torchtitan_npu.override.common.swiglu_group.asc \
                                            torchtitan_npu.override.common.swiglu_group.asc_shared_experts}"
 fi
