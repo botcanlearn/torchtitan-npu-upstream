@@ -126,7 +126,7 @@ gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref maste
 
 同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。历史 CPU 单测以及旧版 5/3-step 双用例 PASS 不代表当前 AdamW 5-step 已通过；Eager PASS 也不等于 Inductor 或数值 golden 通过。
 
-**GitCode 同步注意：** 如果 GitHub 的 `master` 仍由 `.github/workflows/sync-upstream.yml` 按日从 GitCode 强制镜像，同步前需要将本 PR 代码落到 GitCode 对应分支；否则下一次镜像可能覆盖 GitHub 上刚合并的内容。
+**GitCode 同步注意：** GitHub 的 `master` 仍存在每日将 GitCode 同名分支强制镜像的 `Sync Upstream`。务必在 GitCode `master` 收录此次改动，避免后续同步覆盖当前 GitHub CI 工作流。
 
 ## 并行调度（单机 Integration Runner）
 
