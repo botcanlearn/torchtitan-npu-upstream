@@ -101,22 +101,32 @@ state 的 NovaSwap 路径。该 case 同样只检查训练完成，不读取 gol
 
 ## Nightly All Models（A3 / A5 CI 用例）
 
-这里维护**测试定义与训练验收语义**；GitHub Actions 的触发、授权、部署、资源锁、多用例调度、结果查询和故障排查统一参阅 [Lite Actions 使用与开发指南](https://github.com/depeng1994/lite-actions/blob/main/README.md)，不在两仓重复维护。
+GitHub 的正式 `*-lite-actions.yml` Workflow 配合独立的 [lite-actions](https://github.com/depeng1994/lite-actions) 调度仓；每条模型测试由本仓的 `tests/integration_tests/nightly_all_models_test/` 中的 `OverrideDefinitions/build_test_list()` 定义，入口固定为 `tests.integration_tests.tools.lite_actions.entrypoint`。无需 `ci_registry.json`、为单个模型新增调度分支或复制 Workflow。
 
-- 用例：[`nightly_all_models_test/`](nightly_all_models_test/) 中的 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py`；各模块通过 `build_test_list()` 返回 `OverrideDefinitions`。
-- 通用执行：[`nightly_all_models_test/runner.py`](nightly_all_models_test/runner.py)；Lite Actions 专属适配入口：[`tools/lite_actions/entrypoint.py`](tools/lite_actions/entrypoint.py)。测试定义不放进 Lite Actions 目录，也不维护第二份 `ci_registry.json`。
-- `override_args` 声明与共享 example 不同的训练 CLI；不要复制 example 的 NPU imports。当前 `env_vars` 承载用例选定的 CANN/HF/Checkpoint 资产及必要模型环境；执行机的 SSH 地址、物理 NPU 分配和 HCCL 拓扑由 Lite Actions 管理。
-
-| Suite / Case | 训练语义 | 状态 |
+| Suite / 测试用例 | 训练内容 | 当前验收状态 |
 | --- | --- | --- |
-| `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 需以本次代码的新 Run 验收 |
-| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | 同模型与卡数，AdamW（禁用默认 optimizer swap）、Eager、5 steps | 需以本次代码的新 Run 验收 |
-| `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | 有历史 Eager 成功；本次修改仍需回归 |
-| `a5_64p_tests` / `dsv4_pro_a5_64p` | A5 八机 64P、DeepSeek-V4 Pro | 通道禁用，资产/网络及实机训练未验收 |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_example` | A3 单机 8P、Muon、Eager、5 steps | 历史 [Run 38024403411](https://github.com/depeng1994/torchtitan-npu/actions/runs/38024403411) 中 PASS |
+| `a3_8p_tests` / `dsv4_flash_a3_8p_adamw` | A3 单机 8P、AdamW、Eager、5 steps | 同一历史 Run 报 FSDP AllGather NPU OOM，未通过 |
+| `a3_16p_tests` / `dsv4_flash_a3_16p_example` | A3 双机 16P、AdamW、EP16、Eager、5 steps | 旧版 Runner 有成功记录，当前源码尚待新回归 |
+| `a5_64p_tests` / `dsv4_pro_a5_64p` | A5 八机 64P、DeepSeek-V4 Pro | 禁用：真实 CANN/HF/Checkpoint 资产及 HCCL 网络未配置、未实机验收 |
 
-上述 Eager 测试**不代表** Inductor、数值 golden 或 A5 训练已通过。两个 8P case 验证的是不同优化器路径，不是用不同 steps 制造重复测试。训练步数固定在 testcase 的 `--training.steps` CLI 中，当前使用 `expected_steps` 核对 TensorBoard 记录；GitHub 输入仅选择 `test_id` 或 `suite`，不接受可变 `STEPS`。
+`workflow_dispatch.inputs.test_cases` 只支持真实 test ID 或可信 suite；不接受自定义 Python 路径、CLI、`STEPS` 或 `params`：
 
-新增或修改 case：直接编辑对应 `*_tests.py` 的 `build_test_list()`，保持唯一 `test_name`、正确的 `ngpu/nnodes`、训练入口与 CLI，并按需设置 `env_vars`、验收字段。复用现有资源通道时不需要修改 Lite Actions 注册表。**选择用例、触发、预检查和验收步骤**详见上述 Lite Actions README。
+```bash
+# 一次性依次执行 Muon、AdamW 两条 8P case
+gh workflow run a3-8p-lite-actions.yml -R depeng1994/torchtitan-npu --ref master \
+  -f 'test_cases=[{"suite":"a3_8p_tests"}]'
+
+# 仅执行一个 16P case
+gh workflow run a3-16p-lite-actions.yml -R depeng1994/torchtitan-npu --ref master \
+  -f 'test_cases=[{"test_id":"dsv4_flash_a3_16p_example"}]'
+```
+
+`OverrideDefinitions.env_vars` 由模型用例分别声明 `ASCEND_SET_ENV_PATH`、`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、优化器开关和模型特定端口；调度机从**请求绑定的 Commit SHA** 的源码解析它们，source 对应 CANN、export 环境后启动。物理 SSH 地址、HCCL 小网 IP、NPU ID、资源锁及动态输出 `CKPT_SAVE_LOAD_PATH` 由 Lite Actions 管理。换模型或升级 CANN 只修改本仓测试定义，不修改 Lite Actions 的模型配置。
+
+同一个 8P suite 两个测试拥有隔离日志，统一的 GitHub Commit Comment 逐项报告 `PASS/FAIL/NOT_RUN`，整体必须全部 PASS 才成功。历史 CPU 单测以及旧版 5/3-step 双用例 PASS 不代表当前 AdamW 5-step 已通过；Eager PASS 也不等于 Inductor 或数值 golden 通过。
+
+**GitCode 同步注意：** 如果 GitHub 的 `master` 仍由 `.github/workflows/sync-upstream.yml` 按日从 GitCode 强制镜像，同步前需要将本 PR 代码落到 GitCode 对应分支；否则下一次镜像可能覆盖 GitHub 上刚合并的内容。
 
 ## 并行调度（单机 Integration Runner）
 
