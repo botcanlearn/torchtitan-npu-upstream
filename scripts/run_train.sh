@@ -27,6 +27,7 @@ export TORCHINDUCTOR_NPU_BACKEND="${TORCHINDUCTOR_NPU_BACKEND:-ascendc}"
 
 NGPU=${NGPU:-1}
 export LOG_RANK=${LOG_RANK:-0}
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 MODULE=${MODULE:-"torchtitan.models.deepseek_v3"}
 CONFIG=${CONFIG:-"deepseek_v3_debugmodel"}
 TRAIN_FILE=${TRAIN_FILE:-torchtitan_npu.train}

@@ -11,6 +11,7 @@
 # --debug.seed 42 --debug.deterministic to the command line.
 
 set -euo pipefail
+export TORCHTITAN_ENGRAM_TABLE_ROWS="${TORCHTITAN_ENGRAM_TABLE_ROWS:-100000}"
 
 NGPU="${NGPU:-8}"
 WORLD_SIZE="${NGPU}"

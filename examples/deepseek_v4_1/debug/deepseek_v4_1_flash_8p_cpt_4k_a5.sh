@@ -17,8 +17,6 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Use the command line `npu-smi info -t topo` to query the CPU affinity of the
 # NPU cards for configuration.
 export CPU_AFFINITY_CONF="${CPU_AFFINITY_CONF:-1,npu0:288-311,npu1:312-335,npu2:336-359,npu3:360-383,npu4:96-119,npu5:120-143,npu6:144-167,npu7:168-191}"
-export PYTHONUNBUFFERED=1
-export TORCHTITAN_ENGRAM_TABLE_ROWS=100000
 
 # A5-only fused ops; USE_GOLDEN=1 keeps the pure reference list.
 # USE_TILELANG=1 swaps the mHC pre/post entries to the TileLang overrides
