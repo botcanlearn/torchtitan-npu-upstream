@@ -112,50 +112,51 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 
 当前 8P Lite Actions Eager smoke 的训练参数由 `OverrideDefinitions.override_args` 提供，而不再通过 example Shell 的 `COMPILE_ENABLE` 或 `STEPS` 环境分支传递。共享 examples 入口保留上游默认的 Inductor 与 100 steps；CI 使用后置 `--compile.no-enable --training.steps <n>`。Eager 冒烟通过不代表 Inductor 通过。
 
-## Lite Actions Nightly All Models：测试定义与调度分离
+## Nightly All Models（Lite Actions 调度）
 
-正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`；保持 `nightly_all_models_test` 这个目录名，并采用 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py` 与共享 `runner.py`。稳定的 Lite Actions 适配入口是 `tests/integration_tests/tools/lite_actions/entrypoint.py`；可删除的 GitHub Artifact 桥接和 Waiter 归入 `.github/scripts/lite_actions/`，Workflow 名称带 `-lite-actions.yml`，不冒充直接在 GitHub 执行 NPU 训练。
+正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`，只维护 `build_test_list()` 返回的 `OverrideDefinitions`。Lite Actions 专属适配器在 `tests/integration_tests/tools/lite_actions/entrypoint.py`，GitHub Artifact / Waiter 位于 `.github/scripts/lite_actions/`。仓内不再使用 `ci_registry.json`；测试本身定义 `test_name/ngpu/nnodes/override_args/expected_steps`，调度部署环境（CANN/HF/Checkpoint/SSH/HCCL）由独立 `lite-actions` 仓库配置。
 
-**唯一测试定义源：** 每个模块的 `build_test_list()` 返回标准 `OverrideDefinitions`；其 `test_name`、`ngpu`、`nnodes`（默认 1）、`override_args`、`expected_steps` 等定义由模型源码维护。`ci_registry.json` 已删除；环境部署参数如 CANN、HF 路径、Checkpoint 挂载、SSH/HCCL IP 放在 Lite Actions 的 `config/pipelines.json`/`pools.json`，不放回 testcase。多机阶段仅由通用 Runner 执行已授权测试的 launch/verify，不复制完整训练 recipe。
+8P 有两条**不同优化器训练路径**，不是仅用训练步数区分的重复 smoke：
 
-**工作流选择协议：** `workflow_dispatch.inputs.test_cases` 为有界 JSON 数组，支持单项 test ID 或可信 suite 名称：
+| Case ID | Optimizer | 脚本与参数 | TensorBoard |
+| --- | --- | --- | --- |
+| `dsv4_flash_a3_8p_example` | Muon（共享脚本默认 `swap_optimizer`） | Flash 8P 原始 recipe + `--training.steps 5 --compile.no-enable` | 1–5 |
+| `dsv4_flash_a3_8p_adamw` | AdamW（`OPTIMIZER_OVERRIDES=''` 关闭 Muon swap） | 同一 recipe + `--training.steps 5 --compile.no-enable --optimizer.name AdamW` | 1–5 |
+
+AdamW 的空 `OPTIMIZER_OVERRIDES` 是**已有共享 Shell 开关**，不会覆盖、复制或删减源 recipe 自己维护的 NPU 算子 imports；Muon case 不传此环境变量。原始 example 的 Muon、Inductor、100 steps 默认保持不变。单机训练继续使用 TorchTitan 现有 `run_tests`，不新增专属调度框架。
+
+16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`：`OverrideDefinitions.override_args` 声明 EP16、DP shard16、GBS128、AdamW、Eager、5 steps、关 checkpoint、MoE force-load-balance。只通过 `env_vars={'CONFIG':'deepseek_v4_flash_43layers_16experts','OPTIMIZER_OVERRIDES':''}` 选定非默认 Flash config 并关闭 Muon swap；完整 NPU imports 列表仍由源脚本产生。多机校验直接使用对应 case 的 `expected_steps`。多机实际超时由 Lite Actions `config/pipelines.json` 控制，case 不声明另一份无效超时。
+
+### GitHub Actions 输入与多用例结果
+
+手工触发固定名 `a3-8p-lite-actions.yml` 时，`workflow_dispatch.inputs.test_cases` 可选择单个 test ID：
 
 ```json
-[{"test_id":"dsv4_flash_a3_8p_example","params":{}}]
+[{"test_id":"dsv4_flash_a3_8p_adamw"}]
 ```
+
+或一个受信任 suite，运行 8P Muon 和 AdamW 两项：
 
 ```json
-[{"suite":"a3_8p_tests","params":{}}]
+[{"suite":"a3_8p_tests"}]
 ```
-
-第二种会通过固定 Commit SHA 的真实 `a3_8p_tests.build_test_list()` 展开为 `dsv4_flash_a3_8p_example`（默认 5 steps）和 `dsv4_flash_a3_8p_multicase`（3 steps）。用户不能提交 Python 模块路径、任意 Shell 片段或资源拓扑；`params` 当前仅支持有界 `STEPS` 字符串，由 case builder 转为 `--training.steps` CLI。此处不依赖 Shell 环境开关改变训练语义。
 
 ```bash
 gh workflow run a3-8p-lite-actions.yml --ref refactor/unified-a3-a5-ci \
-  -f 'test_cases=[{"suite":"a3_8p_tests","params":{}}]'
+  -f 'test_cases=[{"suite":"a3_8p_tests"}]'
 ```
 
-调度机从同一个 GitHub Run 的 Artifact 读取绑定 `run_id/attempt/SHA` 的输入，使用目标 SHA 的可信 `build_test_list()` 校验唯一 ID、disabled 状态、`nnodes/ngpu` 是否匹配物理分配，并**按展开后的实际数量**检查通道预算（A3 最大 2 项，A5 最大 1 项且目前禁用）。这个可信代码发现过程需要既有 actor/branch/SHA 准入，**仅凭 SHA 并不意味着代码无害**。
+GitHub 输入**仅选择 case/suite**，不接受 `params`、`STEPS`、任意模块路径或 Shell 命令。Artifact 与 `run_id/attempt/commit SHA` 绑定；调度器在执行前从该 SHA 的源码读取 `build_test_list()`，检查唯一性、disabled、物理拓扑和展开后的测试总数（A3 ≤ 2；A5 ≤ 1，仍禁用）。同一 Run 持有一份设备资源锁，依次执行并分别存储日志，返回 `PASS/FAIL/NOT_RUN` 的逐 case GitHub Commit Comment；启动后续 case 前必须确认选定 NPU 已空闲，否则停止并标记 `NOT_RUN`。
 
-同一 Run 持有资源锁逐个执行用例：所有测试都有独立日志与结果。`PASS/FAIL/NOT_RUN` 通过原有 Lite Actions Commit Comment 协议一次性汇总，GitHub Waiter 会打印完整短表格；遇失败仅在确认上一项进程及 NPU 释放后才继续执行。释放状态不明就停止后续用例、标记 `NOT_RUN`、整个 Action 判定 Failure。
-
-16P Eager smoke 的 EP16/DP16/GBS128/AdamW/compile off/checkpoint off/force-load-balance 均在 `OverrideDefinitions.override_args` 中；共享 Flash recipe 恢复原样。复用 Tyro 后置 CLI 同名覆盖语义，16P `--override.imports` 会替换默认的包含 Muon swap 的列表以避免不相容优化器。多机 TensorBoard 校验从用例自身 `expected_steps` 读取，和实际训练 CLI 使用同一个步数。
-
-**验证边界：** 下文的历史 A3 8P/16P 成功只覆盖当时的提交；本次 suite 重构需新的 Actions Run 成功后才能宣称回归。A5 64P 仍禁用、未实机验收。
-
-## A3 8P DeepSeek-V4 Flash Eager 测试（正式 testcase）
-
-`tests/integration_tests/nightly_all_models_test/a3_8p_tests.py` 直接复用仓内 `run_tests.py` 与 `examples/deepseek_v4/debug/deepseek_v4_flash_8p_cpt_4k_a3.sh`。当前 8P 模块内有两个真实测试定义：`dsv4_flash_a3_8p_example`（5 steps）与 `dsv4_flash_a3_8p_multicase`（3 steps）。二者均为单节点 8 张 A3 NPU、Eager smoke，使用 `--compile.no-enable` 覆盖 example 的默认 `--compile.enable`；TensorBoard 校验随各自 `expected_steps` 执行。
-
-在已准备好 CANN、torch_npu、TorchTitan 和 HF assets 的独立环境中，仅手工运行某个 case（注意先验证这台机器的 NPU 空闲）：
+唯一受支持的手工适配器是以下固定入口（先在设备上准备 CANN、NPU、HF assets 和网络环境，并确认资源空闲）：
 
 ```bash
-HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
-python3 -m tests.integration_tests.nightly_all_models_test.a3_8p_tests \
-  dsv4_flash_a3_8p_example ./test_reports/dsv4_flash_a3_8p
+python3 -m tests.integration_tests.tools.lite_actions.entrypoint inspect --suite a3_8p_tests
+python3 -m tests.integration_tests.tools.lite_actions.entrypoint launch \
+  --test-id dsv4_flash_a3_8p_adamw --output-dir ./test_reports/adamw
 ```
 
-指定 `LITE_TEST_STEPS=10` 可修改第一项的 smoke 步数，具体 `--training.steps` 与 `expected_steps` 同源；第二项仍保持独立的 3 steps。不要将 `STEPS=5` 或 `COMPILE_ENABLE=0` 当作此版本的训练参数协议。正式多用例验收请通过 `a3-8p-lite-actions.yml` 输入 `[{"suite":"a3_8p_tests","params":{}}]` 发起；总 Runner 会顺序执行、隔离日志、汇总 `PASS/FAIL/NOT_RUN`。原始 example 直接运行仍保留其既定默认值，Inductor / Muon 不包含在本次 Eager 验收范围内。
+双机训练分别使用该入口的 `launch` / `verify`，要求两节点一致的模型 SHA、`NODE_IPS`、NPU 分配和模型资产。**请注意：** 历史 8P 双 case PASS（5/3 steps）并不等于这里新引入的 Muon/AdamW 双路径已经实机通过；过去 16P Eager PASS 也不等于本次优化器开关改造已回归。A5 64P 继续禁用、未实机验证。
 
 ## 并行调度
 
@@ -219,14 +220,3 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 输出目录使用新目录。该用例为 V4.1 debug text、四卡 EP4/FSDP4、eager、seq512、GBS4，启用 Engram MXFP8 override，关闭普通模型 FP8 和 optimizer CPU offload。使用仓内 C4 数据及自动生成的微型 HF fixture，不需要正式模型权重。
 
 先训练两步并保存同一模型的原生 DCP 和 FP32 HF 权重，再各自通过真实 CheckpointManager 初始化模型，使用相同的新优化器和数据种子训练三步。每个 rank 校验加载后的 Engram 参数及 MXFP8 缓存/scale 有效行字节，随后对比 TensorBoard loss/grad_norm。失败会使测试返回非零，成功输出 `HF_ROUNDTRIP PASS`。不读取固定 golden，不验证优化器状态续训，也不覆盖正式整包非 Engram 量化权重的导入。
-
-
-## A3 16P DeepSeek-V4 Flash（双机 Eager）
-
-16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`，不维护第三份完整 Flash recipe。`a3_16p_tests.py` 将运行配置作为环境传递：每机 8 卡、两机、EP16、DP shard16、GBS128、5 steps、AdamW、关闭 compile 和 checkpoint、MoE force-load-balance。Muon/Inductor **不在此 Eager smoke 覆盖范围内**。模型仓 Unit Tooling Tests 会通过模拟 `run_train_multinodes.sh` 检查最终展开的参数，并确保共享 Flash 默认 Muon/Inductor 配置保持不变。
-
-GitHub 已有历史 Eager 验收：[A3 16P Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)（双节点 5 steps、TensorBoard、GitHub Success）。其成功仅证明旧提交，重构后必须重新完成实机 Actions 回归才能引用为新版本 PASS。
-
-启动/停止统一由 Lite Actions 主机的可信 Workflow → Agent → SSH Runner 完成；不要直接运行不存在的 `--stage-only`、`--run-dir` 等旧参数。独立环境手工排障可按受信任 `lite_actions.tools.entrypoint` 运行 `launch/verify`，两节点需要相同的注册表和准确的 `NODE_IPS`，且不可占用其他训练作业。
-
-A5 64P 目前仅完成静态拓扑和命令展开检查，**未实机验证**。

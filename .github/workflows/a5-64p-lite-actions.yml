@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       test_cases:
-        description: 'JSON list: test_id, params (max 1 A5 / 2 A3)'
+        description: 'JSON list of test_id or suite selectors (max 1 case)'
         type: string
         required: true
-        default: '[{"test_id":"dsv4_pro_a5_64p","params":{}}]'
+        default: '[{"test_id":"dsv4_pro_a5_64p"}]'
 
 permissions:
   contents: read

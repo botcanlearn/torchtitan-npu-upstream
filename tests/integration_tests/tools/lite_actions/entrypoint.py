@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
 from pathlib import Path
 import pkgutil
 import re
@@ -52,14 +51,13 @@ def main():
     except ValueError as exc:p.error(str(exc))
     if a.phase=='inspect':
         print(json.dumps([{'test_id':t.test_name,'ngpu':t.ngpu,'nnodes':t.nnodes,
-           'timeout':t.timeout,'ckpt_init_required':t.ckpt_init_required} for t in selected],separators=(',',':')))
+           'ckpt_init_required':t.ckpt_init_required} for t in selected],separators=(',',':')))
         return
     test=selected[0]
     from tests.integration_tests.nightly_all_models_test.runner import run_single,run_distributed
     if test.nnodes==1:
         if a.phase=='launch':run_single(test,output_dir=a.output_dir)
     else:
-        run_distributed(test,nnodes=test.nnodes,ckpt_required=test.ckpt_init_required,
-                        phase=a.phase,output_dir=a.output_dir)
+        run_distributed(test, phase=a.phase, output_dir=a.output_dir)
 
 if __name__=='__main__':main()

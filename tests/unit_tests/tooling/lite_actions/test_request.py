@@ -12,18 +12,18 @@ SCRIPT=Path(__file__).resolve().parents[4]/'.github/scripts/lite_actions/prepare
 spec=importlib.util.spec_from_file_location('prepare_ci_request',SCRIPT)
 prepare=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
-CASE={'test_id':'dsv4_flash_a3_8p_example','params':{'STEPS':'5'}}
+CASE={'test_id':'dsv4_flash_a3_8p_example'}
 
 class InputsArtifactTests(unittest.TestCase):
     def test_valid_multiple_cases(self):
         self.assertEqual(prepare.parse_cases(json.dumps([CASE,CASE])),[CASE,CASE])
 
-    def test_reject_unsafe_ids_params(self):
+    def test_reject_unsafe_ids_and_removed_parameter_fields(self):
         for test_id in ('../bin/sh','test;curl', 'Invalid-ID'):
             with self.subTest(test_id=test_id),self.assertRaises(ValueError):
                 prepare.parse_cases(json.dumps([{**CASE,'test_id':test_id}]))
         with self.assertRaises(ValueError):
-            prepare.parse_cases(json.dumps([{**CASE,'params':{'STEPS':'5\nexit 1'}}]))
+            prepare.parse_cases(json.dumps([{**CASE,'params':{}}]))
 
     def test_workflow_budget_blocks_too_many_cases(self):
         with patch.dict(os.environ, {'CI_MAX_CASES':'2'}):

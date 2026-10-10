@@ -38,16 +38,9 @@ def run_single(test: OverrideDefinitions, *, output_dir: Path | None = None) -> 
               [test], parallel=True)
 
 
-def run_distributed(test: OverrideDefinitions, *, nnodes: int,
-                    ckpt_required: bool = False,
-                    phase: str | None = None,
-                    output_dir: Path | None = None) -> None:
+def run_distributed(test: OverrideDefinitions, *, phase: str,
+                    output_dir: Path) -> None:
     parser = argparse.ArgumentParser(description=test.test_descr)
-    if phase is None or output_dir is None:
-        parser.add_argument("mode", choices=("launch", "verify"))
-        parser.add_argument("output_dir", type=Path)
-        args = parser.parse_args()
-        phase, output_dir = args.mode, args.output_dir
     if phase not in ("launch", "verify"):
         parser.error("phase must be launch or verify")
     run_root = output_dir / test.test_name / "test_run"
@@ -57,14 +50,14 @@ def run_distributed(test: OverrideDefinitions, *, nnodes: int,
         expected = set(test.expected_steps[0]) if test.expected_steps else set()
         if set(values) != expected:
             raise RuntimeError(f"{test.test_name}: expected steps {sorted(expected)}, got {sorted(values)}")
-        print(f"[MULTINODE_VERIFY] PASS nodes={nnodes} ngpu={test.ngpu} "
+        print(f"[MULTINODE_VERIFY] PASS nodes={test.nnodes} ngpu={test.ngpu} "
               f"steps={sorted(values)} loss={values}", flush=True)
         return
 
-    validate_assets(parser, ckpt_required=ckpt_required)
+    validate_assets(parser, ckpt_required=test.ckpt_init_required)
     ips = [x.strip() for x in os.environ.get("NODE_IPS", "").split(",")]
-    if len(ips) != nnodes or any(not x for x in ips):
-        parser.error(f"NODE_IPS requires exactly {nnodes} nonempty IPs")
+    if len(ips) != test.nnodes or any(not x for x in ips):
+        parser.error(f"NODE_IPS requires exactly {test.nnodes} nonempty IPs")
     if os.environ.get("NGPU", str(test.ngpu)) != str(test.ngpu):
         parser.error(f"NGPU must be {test.ngpu} per node")
     output_dir.mkdir(parents=True, exist_ok=True)
