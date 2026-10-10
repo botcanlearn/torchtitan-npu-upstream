@@ -76,6 +76,20 @@ class V2Contract(unittest.TestCase):
         comment["user"]["login"]="attacker"
         self.assertIsNone(waiter.find_case_result([comment],**q))
 
+    def test_partial_matrix_rerun_without_artifact_fails_fast(self):
+        import io
+        with patch.object(waiter.urllib.request, "urlopen",
+                          return_value=io.BytesIO(
+                              b'{"artifacts":[{"name":"lite-ci-request-1",'
+                              b'"expired":false}]}')):
+            with self.assertRaisesRegex(ValueError, "Partial Matrix reruns"):
+                waiter.ensure_attempt_artifact("test-token",1234,2)
+        with patch.object(waiter.urllib.request, "urlopen",
+                          return_value=io.BytesIO(
+                              b'{"artifacts":[{"name":"lite-ci-request-2",'
+                              b'"expired":false}]}')):
+            waiter.ensure_attempt_artifact("test-token",1234,2)
+
     def test_workflow_is_untrusted_pr_closed_and_matrix_native(self):
         for file in ("a3-8p-lite-actions.yml", "a3-16p-lite-actions.yml"):
             data=(ROOT/".github/workflows"/file).read_text()

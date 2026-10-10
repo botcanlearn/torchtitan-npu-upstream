@@ -85,6 +85,38 @@ def get_comments(token: str, sha: str, since: str):
     raise RuntimeError("too many matching commit comments; cannot safely correlate")
 
 
+
+def ensure_attempt_artifact(token: str, run_id: int, attempt: int) -> None:
+    """Fail fast if a partial Matrix rerun lacks this attempt's trusted plan."""
+    name = f"lite-ci-request-{attempt}"
+    query = urllib.parse.urlencode({"name": name, "per_page": 10})
+    url = f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/artifacts?{query}"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "lite-actions-waiter/3",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    for index in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=25) as response:
+                listing = json.load(response)
+            matches = [a for a in listing.get("artifacts", [])
+                       if a.get("name") == name and not a.get("expired")]
+            if len(matches) != 1:
+                raise ValueError(
+                    "No V2 plan Artifact for this attempt. Partial Matrix reruns "
+                    "are not supported; launch a NEW full workflow_dispatch run."
+                )
+            return
+        except ValueError:
+            raise
+        except Exception:
+            if index == 2:
+                raise
+            time.sleep(3)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=PIPELINES, required=True)
@@ -99,6 +131,8 @@ def main():
     if args.test_id:
         if not TEST.fullmatch(args.test_id) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             parser.error("invalid V2 Matrix case/digest")
+    if args.test_id:
+        ensure_attempt_artifact(token, run_id, attempt)
     since = (dt.datetime.now(dt.timezone.utc) -
              dt.timedelta(days=2)).isoformat().replace("+00:00", "Z")
     deadline = time.monotonic() + int(os.environ.get("CI_WAIT_TIMEOUT_SECONDS", "7400"))
