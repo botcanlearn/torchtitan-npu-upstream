@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 from pathlib import Path
 import pkgutil
 import re
@@ -50,10 +51,15 @@ def main():
     try: selected=select(catalog(),test_id=a.test_id,suite=a.suite)
     except ValueError as exc:p.error(str(exc))
     if a.phase=='inspect':
-        print(json.dumps([{'test_id':t.test_name,'ngpu':t.ngpu,'nnodes':t.nnodes,
-           'ckpt_init_required':t.ckpt_init_required} for t in selected],separators=(',',':')))
+        print(json.dumps([{'test_id': t.test_name, 'ngpu': t.ngpu,
+           'nnodes': t.nnodes, 'ckpt_init_required': t.ckpt_init_required,
+           'env_vars': dict(t.env_vars or {})} for t in selected],
+           separators=(',', ':')))
         return
     test=selected[0]
+    # Also support direct, manual invocation of the fixed model-owned entrypoint.
+    # Remote SSH has already sourced the case's toolkit before Python starts.
+    os.environ.update(test.env_vars or {})
     from tests.integration_tests.nightly_all_models_test.runner import run_single,run_distributed
     if test.nnodes==1:
         if a.phase=='launch':run_single(test,output_dir=a.output_dir)

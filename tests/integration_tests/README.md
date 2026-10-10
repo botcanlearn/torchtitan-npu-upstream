@@ -114,7 +114,7 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 
 ## Nightly All Models（Lite Actions 调度）
 
-正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`，只维护 `build_test_list()` 返回的 `OverrideDefinitions`。Lite Actions 专属适配器在 `tests/integration_tests/tools/lite_actions/entrypoint.py`，GitHub Artifact / Waiter 位于 `.github/scripts/lite_actions/`。仓内不再使用 `ci_registry.json`；测试本身定义 `test_name/ngpu/nnodes/override_args/expected_steps`，调度部署环境（CANN/HF/Checkpoint/SSH/HCCL）由独立 `lite-actions` 仓库配置。
+正式测试定义位于 `tests/integration_tests/nightly_all_models_test/`，只维护 `build_test_list()` 返回的 `OverrideDefinitions`。Lite Actions 专属适配器在 `tests/integration_tests/tools/lite_actions/entrypoint.py`，GitHub Artifact / Waiter 位于 `.github/scripts/lite_actions/`。仓内不再使用 `ci_registry.json`；测试本身定义 `test_name/ngpu/nnodes/override_args/expected_steps`，`OverrideDefinitions.env_vars` 持有 CANN/HF/Checkpoint 路径和本用例的模型环境。Lite Actions 只管理 SSH/HCCL **物理拓扑**、设备分配、任务执行及结果回传，不保留会随模型或版本变化的路径。
 
 8P 有两条**不同优化器训练路径**，不是仅用训练步数区分的重复 smoke：
 
@@ -125,7 +125,23 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 
 AdamW 的空 `OPTIMIZER_OVERRIDES` 是**已有共享 Shell 开关**，不会覆盖、复制或删减源 recipe 自己维护的 NPU 算子 imports；Muon case 不传此环境变量。原始 example 的 Muon、Inductor、100 steps 默认保持不变。单机训练继续使用 TorchTitan 现有 `run_tests`，不新增专属调度框架。
 
-16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`：`OverrideDefinitions.override_args` 声明 EP16、DP shard16、GBS128、AdamW、Eager、5 steps、关 checkpoint、MoE force-load-balance。只通过 `env_vars={'CONFIG':'deepseek_v4_flash_43layers_16experts','OPTIMIZER_OVERRIDES':''}` 选定非默认 Flash config 并关闭 Muon swap；完整 NPU imports 列表仍由源脚本产生。多机校验直接使用对应 case 的 `expected_steps`。多机实际超时由 Lite Actions `config/pipelines.json` 控制，case 不声明另一份无效超时。
+16P 复用 `examples/deepseek_v4/deepseek_v4_flash_cpt_4k_a3.sh`：`OverrideDefinitions.override_args` 声明 EP16、DP shard16、GBS128、AdamW、Eager、5 steps、关 checkpoint、MoE force-load-balance。通过对应 `env_vars` 同时承载 CANN/HF/Checkpoint 路径、非默认 `CONFIG`、`OPTIMIZER_OVERRIDES=''` 以及 MASTER_PORT/HCCL_IF_BASE_PORT；完整 NPU imports 列表仍由源脚本产生。多机校验直接使用对应 case 的 `expected_steps`。多机实际超时由 Lite Actions `config/pipelines.json` 控制，case 不声明另一份无效超时。
+
+### 模型环境归属（OverrideDefinitions.env_vars）
+
+以 8P 为例，同一测试模块维护通用资产路径，Muon/AdamW 两条 case 复用它，只有优化器覆盖不同：
+
+```python
+ASSET_ENV = {
+    "ASCEND_SET_ENV_PATH": "/mnt/share/Ascend/20260805101249091/ascend-toolkit/latest/set_env.sh",
+    "HF_ASSETS_PATH": "/mnt/share/models/DeepSeek-V4-Flash-bf16",
+    "CKPT_INIT_LOAD_PATH": "/mnt/share/dsv4_ckpt_8rank",
+}
+# Muon:  OverrideDefinitions(..., env_vars=ASSET_ENV)
+# AdamW: OverrideDefinitions(..., env_vars={**ASSET_ENV, "OPTIMIZER_OVERRIDES": ""})
+```
+
+`ASCEND_SET_ENV_PATH` 不再从 Lite Actions 配置读取。调度机对每项固定 SHA 的 `build_test_list()` 进行可信发现，将对应 `env_vars` 传给通用 SSH Runner；在执行机先 source 所选 CANN 路径，再 export 用例环境。生成输出目录 `CKPT_SAVE_LOAD_PATH` 是 Runner 的通用运行时职责，而非需要维护的模型资产配置。物理 SSH 地址/HCCL 小网 IP 和 NPU IDs 仍由 Lite Actions 拓扑管理。**A5 资产目录和 CANN 安装路径尚未核实，在其用例中保留空值且通道禁用；启用前必须修改模型仓定义。**
 
 ### GitHub Actions 输入与多用例结果
 

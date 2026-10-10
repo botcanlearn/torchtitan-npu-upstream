@@ -17,7 +17,12 @@ def test_discovery_selects_muon_and_adamw_cases():
     assert all(x.expected_steps == (tuple(range(1, 6)),) for x in cases)
     assert all((x.ngpu, x.nnodes) == (8, 1) for x in cases)
     assert cases[0].env_vars is None or not cases[0].env_vars.get("OPTIMIZER_OVERRIDES")
-    assert cases[1].env_vars == {"OPTIMIZER_OVERRIDES": ""}
+    for case in cases:
+        assert all(case.env_vars[k].startswith("/") for k in (
+            "ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"))
+    assert cases[0].env_vars.keys() == {"ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"}
+    assert cases[1].env_vars["OPTIMIZER_OVERRIDES"] == ""
+    assert cases[1].env_vars["HF_ASSETS_PATH"] == cases[0].env_vars["HF_ASSETS_PATH"]
     assert "AdamW" not in cases[0].override_args[0]
     assert "AdamW" in cases[1].override_args[0]
     assert select(groups, test_id=cases[1].test_name) == [cases[1]]
@@ -82,8 +87,12 @@ def test_distributed_cli_and_verify_uses_case_expected_steps(monkeypatch, tmp_pa
     from tests.integration_tests.nightly_all_models_test import runner, a3_16p_tests
     case = a3_16p_tests.build_test_list()[0]
     assert case.nnodes == 2
-    assert case.env_vars == {"CONFIG":"deepseek_v4_flash_43layers_16experts",
-                             "OPTIMIZER_OVERRIDES":""}
+    assert case.env_vars["CONFIG"] == "deepseek_v4_flash_43layers_16experts"
+    assert case.env_vars["OPTIMIZER_OVERRIDES"] == ""
+    assert case.env_vars["MASTER_PORT"] == "6316"
+    assert case.env_vars["HCCL_IF_BASE_PORT"] == "30160"
+    assert all(case.env_vars[k].startswith("/") for k in (
+        "ASCEND_SET_ENV_PATH", "HF_ASSETS_PATH", "CKPT_INIT_LOAD_PATH"))
     env_probe = tmp_path / "expanded"
     env_probe.mkdir()
     argv = expanded_argv(case, env_probe)
@@ -107,3 +116,17 @@ def test_distributed_cli_and_verify_uses_case_expected_steps(monkeypatch, tmp_pa
     monkeypatch.setattr(loss_compare, "extract_losses_from_tensorboard",
                         lambda *a: {x: 1.0 for x in case.expected_steps[0]})
     runner.run_distributed(case, phase="verify", output_dir=tmp_path / "run")
+
+
+def test_model_inspect_contains_complete_case_owned_environment():
+    import json
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable, "-m",
+        "tests.integration_tests.tools.lite_actions.entrypoint",
+        "inspect", "--suite", "a3_8p_tests"],
+        capture_output=True, text=True, check=True)
+    cases = json.loads(result.stdout)
+    assert len(cases) == 2
+    assert cases[0]["env_vars"]["ASCEND_SET_ENV_PATH"].startswith("/")
+    assert cases[1]["env_vars"]["OPTIMIZER_OVERRIDES"] == ""
