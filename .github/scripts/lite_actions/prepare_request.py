@@ -21,17 +21,18 @@ def parse_cases(value: str) -> list[dict]:
     if not isinstance(cases, list) or not 1 <= len(cases) <= int(os.environ.get('CI_MAX_CASES','2')):
         raise ValueError('test_cases exceeds the supported case budget')
     for case in cases:
-        if not isinstance(case, dict) or set(case) != {'test_id', 'params'}:
-            raise ValueError('each test needs test_id and params')
-        if not isinstance(case['test_id'], str) or not TEST.fullmatch(case['test_id']):
-            raise ValueError('invalid registered test_id')
-        params = case['params']
-        if not isinstance(params, dict) or len(params) > 12 or any(
-            not isinstance(k,str) or not KEY.fullmatch(k)
-            or not isinstance(v,str) or len(v) > 120 or any(c in v for c in '\r\n\x00')
-            for k,v in params.items()
-        ):
-            raise ValueError('invalid test parameters')
+        if not isinstance(case,dict) or len(case)!=2 or 'params' not in case or (('test_id' in case)==('suite' in case)):
+            raise ValueError('each request needs exactly one test_id or suite, and params')
+        name=case.get('test_id',case.get('suite'))
+        if not isinstance(name,str) or not TEST.fullmatch(name):
+            raise ValueError('invalid registered test/suite')
+        params=case['params']
+        if not isinstance(params,dict) or set(params)-{'STEPS'}:
+            raise ValueError('only STEPS parameter is permitted')
+        if 'STEPS' in params:
+            v=params['STEPS']
+            if not isinstance(v,str) or not v.isdecimal() or not 1<=int(v)<=1000:
+                raise ValueError('STEPS must be 1..1000')
     return cases
 
 

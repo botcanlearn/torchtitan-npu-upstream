@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import subprocess
 from tests.integration_tests import OverrideDefinitions
-from tests.integration_tests.loss_compare import extract_losses_from_tensorboard
 
 
 def required_steps() -> int:
@@ -40,8 +39,6 @@ def run_single(test: OverrideDefinitions, *, output_dir: Path | None = None) -> 
         parser.add_argument("output_dir", type=Path)
         output_dir = parser.parse_args().output_dir
     validate_assets(parser)
-    if os.environ.get("COMPILE_ENABLE", "1") not in ("0", "1"):
-        parser.error("COMPILE_ENABLE must be 0 or 1")
     output = output_dir
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
@@ -63,11 +60,11 @@ def run_distributed(test: OverrideDefinitions, *, nnodes: int,
         phase, output_dir = args.mode, args.output_dir
     if phase not in ("launch", "verify"):
         parser.error("phase must be launch or verify")
-    steps = required_steps()
     run_root = output_dir / test.test_name / "test_run"
     if phase == "verify":
+        from tests.integration_tests.loss_compare import extract_losses_from_tensorboard
         values = extract_losses_from_tensorboard(run_root, "tb_phase_0")
-        expected = set(range(1, steps + 1))
+        expected = set(test.expected_steps[0]) if test.expected_steps else set()
         if set(values) != expected:
             raise RuntimeError(f"{test.test_name}: expected steps {sorted(expected)}, got {sorted(values)}")
         print(f"[MULTINODE_VERIFY] PASS nodes={nnodes} ngpu={test.ngpu} "
@@ -83,7 +80,10 @@ def run_distributed(test: OverrideDefinitions, *, nnodes: int,
     output_dir.mkdir(parents=True, exist_ok=True)
     if any(output_dir.iterdir()):
         parser.error("output_dir must be empty")
+    if len(test.override_args) != 1:
+        raise ValueError("multi-node CI case requires exactly one CLI phase")
     command = ["bash", test.train_script, "--dump_folder", str(run_root),
-               *test.train_args, "--metrics.save_tb_folder=tb_phase_0"]
+               *(test.train_args or ()), *test.override_args[0],
+               "--metrics.save_tb_folder=tb_phase_0"]
     print("[MULTINODE_LAUNCH] " + " ".join(command), flush=True)
-    raise SystemExit(subprocess.call(command, env={**os.environ, **test.env_vars}))
+    raise SystemExit(subprocess.call(command, env={**os.environ, **(test.env_vars or {})}))

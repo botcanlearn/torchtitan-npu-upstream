@@ -65,6 +65,9 @@ def main():
             result = find_result(items, marker, sha, run_id, attempt, pipeline)
             if result is not None:
                 print(f"RESULT {result['status']} exit_code={result['exit_code']}")
+                print("CASE RESULTS:")
+                for entry in result.get('cases',[]):
+                    print(f"  {entry['test_name']}: {entry['status']} rc={entry['exit_code']}")
                 print("====== Remote diagnostics (max 20 lines) ======")
                 for line in result.get("last_20_lines", [])[-20:]:
                     print(line)

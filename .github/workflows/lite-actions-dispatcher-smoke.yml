@@ -22,4 +22,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CI_WAIT_TIMEOUT_SECONDS: "1000"
-        run: python3 .github/scripts/ci-wait-result.py --case a3-smoke
+        run: python3 .github/scripts/lite_actions/wait_result.py --case a3-smoke

@@ -34,26 +34,24 @@ CKPT_INIT_LOAD_PATH="${CKPT_INIT_LOAD_PATH:-/path/to/init_load_ckpt}" # your mod
 # Parallelism
 TP=1
 PP=1
-EP="${EP:-128}"
+EP=128
 CP=1
-DP_SHARD="${DP_SHARD:-128}"
+DP_SHARD=128
 DP_REPLICATE=$((WORLD_SIZE / (DP_SHARD * CP * TP * PP)))
 SPMD_BACKEND="spmd_types"
 
 # Training
 SEQ_LEN=4096
 MBS=1
-GBS="${GBS:-1024}"
-STEPS="${STEPS:-100}"
+GBS=1024
+STEPS=100
 
 # Debug
 USE_GOLDEN="${USE_GOLDEN:-0}"
-DEBUG_ARGS="--debug.print-config"
-case "${FORCE_LOAD_BALANCE:-0}" in
-    0) DEBUG_ARGS="--debug.no-moe-force-load-balance $DEBUG_ARGS" ;;
-    1) DEBUG_ARGS="--debug.moe-force-load-balance $DEBUG_ARGS" ;;
-    *) echo "FORCE_LOAD_BALANCE must be 0 or 1" >&2; exit 2 ;;
-esac
+DEBUG_ARGS="
+    --debug.no-moe-force-load-balance
+    --debug.print-config
+"
 
 # HF assets
 HF_ASSETS_ARGS="
@@ -78,11 +76,11 @@ PARALLELISM_ARGS="
 "
 
 # Compile
-case "${COMPILE_ENABLE:-1}" in
-    1) COMPILE_ARGS="--compile.enable --compile.components model --compile.backend inductor" ;;
-    0) COMPILE_ARGS="--compile.no-enable" ;;
-    *) echo "COMPILE_ENABLE must be 0 or 1" >&2; exit 2 ;;
-esac
+COMPILE_ARGS="
+    --compile.enable
+    --compile.components model
+    --compile.backend inductor
+"
 
 # Training
 TRAINING_ARGS="
@@ -98,11 +96,13 @@ TRAINING_ARGS="
 # already contains a valid step-* checkpoint, upstream TorchTitan resumes from
 # it and ignores `initial-load-path`; use a new/empty folder when cold-starting
 # from `CKPT_INIT_LOAD_PATH`.
-case "${CHECKPOINT_ENABLE:-1}" in
-    1) CHECKPOINT_ARGS="--checkpoint.enable --checkpoint.load-only --checkpoint.folder ${CKPT_SAVE_LOAD_PATH} --checkpoint.initial-load-path ${CKPT_INIT_LOAD_PATH} --checkpoint.initial-load-in-hf" ;;
-    0) CHECKPOINT_ARGS="--checkpoint.no-enable --checkpoint.load-only --checkpoint.folder ${CKPT_SAVE_LOAD_PATH}" ;;
-    *) echo "CHECKPOINT_ENABLE must be 0 or 1" >&2; exit 2 ;;
-esac
+CHECKPOINT_ARGS="
+    --checkpoint.enable
+    --checkpoint.load-only
+    --checkpoint.folder ${CKPT_SAVE_LOAD_PATH}
+    --checkpoint.initial-load-path ${CKPT_INIT_LOAD_PATH}
+    --checkpoint.initial-load-in-hf
+"
 
 # Profiler
 PROFILER_ARGS="
@@ -116,26 +116,24 @@ PROFILER_ARGS="
 
 # Communication
 COMM_ARGS="
-    --comm.init-timeout-seconds ${COMM_INIT_TIMEOUT_SECONDS:-7200}
+    --comm.init-timeout-seconds 7200
     --comm.train-timeout-seconds 600
 "
 
 # Optimizer
 OPTIMIZER_ARGS="
-    --optimizer.name ${OPTIMIZER_NAME:-Muon}
+    --optimizer.name Muon
     --optimizer.lr 1.0e-5
     --optimizer.beta1 0.9
     --optimizer.beta2 0.95
     --optimizer.eps 1.0e-8
     --optimizer.weight_decay 1.0e-1
-
+    --optimizer.muon_momentum 0.95
+    --optimizer.muon_enable_nesterov
+    --optimizer.muon_ns_steps 10
+    --optimizer.muon_adjust_lr_fn match_rms_adamw
 "
-if [[ "${OPTIMIZER_NAME:-Muon}" == "Muon" ]]; then
-    OPTIMIZER_ARGS+=" --optimizer.muon_momentum 0.95 --optimizer.muon_enable_nesterov --optimizer.muon_ns_steps 10 --optimizer.muon_adjust_lr_fn match_rms_adamw"
-    OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
-else
-    OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-}"
-fi
+OPTIMIZER_OVERRIDES="${OPTIMIZER_OVERRIDES-torchtitan_npu.override.common.optimizer.swap_optimizer}"
 
 if [[ "${USE_GOLDEN}" == "1" ]]; then
     DEFAULT_CLI_OVERRIDES=""

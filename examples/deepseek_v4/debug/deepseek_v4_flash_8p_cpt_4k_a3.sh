@@ -38,7 +38,7 @@ SPMD_BACKEND="spmd_types"
 SEQ_LEN=4096
 MBS=1
 GBS=64
-STEPS="${STEPS:-100}"
+STEPS=100
 
 # Debug
 USE_GOLDEN="${USE_GOLDEN:-0}"
@@ -69,13 +69,12 @@ PARALLELISM_ARGS="
     --parallelism.pipeline-parallel-degree ${PP}
 "
 
-# Compile: preserve the example default; CI smoke may use COMPILE_ENABLE=0.
-COMPILE_ENABLE="${COMPILE_ENABLE:-1}"
-case "$COMPILE_ENABLE" in
-    1) COMPILE_ARGS="--compile.enable --compile.components model --compile.backend inductor" ;;
-    0) COMPILE_ARGS="--compile.no-enable" ;;
-    *) echo "COMPILE_ENABLE must be 0 or 1" >&2; exit 2 ;;
-esac
+# Compile
+COMPILE_ARGS="
+    --compile.enable
+    --compile.components model
+    --compile.backend inductor
+"
 
 # Training
 TRAINING_ARGS="

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-SCRIPT=Path(__file__).resolve().parents[3]/'.github/scripts/prepare-ci-request.py'
+SCRIPT=Path(__file__).resolve().parents[4]/'.github/scripts/lite_actions/prepare_request.py'
 spec=importlib.util.spec_from_file_location('prepare_ci_request',SCRIPT)
 prepare=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
@@ -49,6 +49,6 @@ class InputsArtifactTests(unittest.TestCase):
                 finally:
                     os.chdir(old)
             self.assertEqual(Path.cwd(),old)
-            self.assertTrue(Path('tests/unit_tests/tooling/test_ci_request.py').exists())
+            self.assertTrue(Path('tests/unit_tests/tooling/lite_actions/test_request.py').exists())
 
 if __name__=='__main__':unittest.main()

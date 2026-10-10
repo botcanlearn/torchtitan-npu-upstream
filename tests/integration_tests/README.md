@@ -116,64 +116,36 @@ Commit SHA 的源码压缩包发送至执行机；源码、全量运行日志、
 **不在本 Actions 的通过范围内**；可在执行机单独以
 `COMPILE_ENABLE=1 STEPS=5` 运行原入口。
 
-## Nightly All Models 用例组织（按 Actions 资源规格）
+## Lite Actions Nightly All Models：测试定义与调度分离
 
-只保留一个 `nightly_all_models_test/` 目录，不再为 A3-8P/A3-16P/A5-64P 建子目录：
+正式测试定义位于 `tests/integration_tests/lite_actions/nightly_all_models_test/`；保持 `nightly_all_models_test` 这个目录名，并采用 `a3_8p_tests.py`、`a3_16p_tests.py`、`a5_64p_tests.py` 与共享 `runner.py`。稳定的 Lite Actions 适配入口是 `tests/integration_tests/lite_actions/tools/entrypoint.py`；可删除的 GitHub Artifact 桥接和 Waiter 归入 `.github/scripts/lite_actions/`，Workflow 名称带 `-lite-actions.yml`，不冒充直接在 GitHub 执行 NPU 训练。
 
-```text
-tests/integration_tests/nightly_all_models_test/
-├── __init__.py
-├── a3_8p_tests.py    # A3-8p-CI-Example: build_a3_8p_test_list()
-├── a3_16p_tests.py   # A3-16p-CI-Example: build_a3_16p_test_list()
-├── a5_64p_tests.py   # A5-64p-CI: build_a5_64p_test_list()
-└── runner.py         # 复用单机 run_tests、多机 launch/verify 适配
-```
+**唯一测试定义源：** 每个模块的 `build_test_list()` 返回标准 `OverrideDefinitions`；其 `test_name`、`ngpu`、`nnodes`（默认 1）、`override_args`、`expected_steps` 等定义由模型源码维护。`ci_registry.json` 已删除；环境部署参数如 CANN、HF 路径、Checkpoint 挂载、SSH/HCCL IP 放在 Lite Actions 的 `config/pipelines.json`/`pools.json`，不放回 testcase。多机阶段仅由通用 Runner 执行已授权测试的 launch/verify，不复制完整训练 recipe。
 
-三个用例文件均按 `qwen3_5.py` 的风格返回 `list[OverrideDefinitions]`；
-`ngpu=8` 代表**每节点** NPU 数，跨节点世界规模由通道 `nnodes` 指定。
-原有独立 `run_multinode_tests.py` / `run_16p_multinode_tests.py` /
-`run_a5_64p_multinode_tests.py` 与重复的 A5 规格定义已删除。
-所有 Workflow 统一调用 `.github/scripts/ci-wait-result.py`。
-
-## GitHub Actions 用例与参数（注册 ID / Artifact）
-
-三个 Workflow 的显示名固定，不再拼接测试 ID；通过 `workflow_dispatch.inputs.test_cases` 传递 **`{test_id, params}`** JSON 数组。文件路径由该 Commit SHA 的 `ci_registry.json` 唯一解析，用户不需要填写/重复维护模块路径：
+**工作流选择协议：** `workflow_dispatch.inputs.test_cases` 为有界 JSON 数组，支持单项 test ID 或可信 suite 名称：
 
 ```json
-[{"test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]
+[{"test_id":"dsv4_flash_a3_8p_example","params":{}}]
 ```
+
+```json
+[{"suite":"a3_8p_tests","params":{}}]
+```
+
+第二种会通过固定 Commit SHA 的真实 `a3_8p_tests.build_test_list()` 展开为 `dsv4_flash_a3_8p_example`（默认 5 steps）和 `dsv4_flash_a3_8p_multicase`（3 steps）。用户不能提交 Python 模块路径、任意 Shell 片段或资源拓扑；`params` 当前仅支持有界 `STEPS` 字符串，由 case builder 转为 `--training.steps` CLI。此处不依赖 Shell 环境开关改变训练语义。
 
 ```bash
-gh workflow run a3-8p-ci.yml --ref refactor/unified-a3-a5-ci \
-  -f 'test_cases=[{"test_id":"dsv4_flash_a3_8p_example","params":{"STEPS":"5"}}]'
+gh workflow run a3-8p-lite-actions.yml --ref refactor/unified-a3-a5-ci \
+  -f 'test_cases=[{"suite":"a3_8p_tests","params":{}}]'
 ```
 
-`prepare` Job 拒绝未经授权的 actor/branch，并将 Run ID、attempt、SHA 与测试清单一同写入 `ci-request.json`；调度机通过 GitHub Artifact API 读取，仅依据 pinned SHA 注册表授权模型模块、资源拓扑和可覆盖参数，不执行 Workflow 提供的代码路径/命令。A3 通道一次最多 2 个测试（受统一超时预算限制），A5 通道最多 1 个；同一次 Run 顺序执行，失败则停止后续。
+调度机从同一个 GitHub Run 的 Artifact 读取绑定 `run_id/attempt/SHA` 的输入，使用目标 SHA 的可信 `build_test_list()` 校验唯一 ID、disabled 状态、`nnodes/ngpu` 是否匹配物理分配，并**按展开后的实际数量**检查通道预算（A3 最大 2 项，A5 最大 1 项且目前禁用）。这个可信代码发现过程需要既有 actor/branch/SHA 准入，**仅凭 SHA 并不意味着代码无害**。
 
-`.github/scripts/ci-wait-result.py` 在模型仓是**唯一 GitHub 可执行源文件**，`lite-actions/github/` 只保存非权威测试/部署镜像。跨仓更改需要通过 `lite-actions/scripts/sync_ci_mirror.py --model-repo <model-path> --check` 校验，或不带 `--check` 同步镜像。不要单独手改两个副本。A5 64P 尚未开放；其 prepare Job 会显式失败，不会因 CI Job 被跳过而出现绿色假阳性。
+同一 Run 持有资源锁逐个执行用例：所有测试都有独立日志与结果。`PASS/FAIL/NOT_RUN` 通过原有 Lite Actions Commit Comment 协议一次性汇总，GitHub Waiter 会打印完整短表格；遇失败仅在确认上一项进程及 NPU 释放后才继续执行。释放状态不明就停止后续用例、标记 `NOT_RUN`、整个 Action 判定 Failure。
 
-## A3 / A5 多机 Lite Actions（统一执行器）
+16P Eager smoke 的 EP16/DP16/GBS128/AdamW/compile off/checkpoint off/force-load-balance 均在 `OverrideDefinitions.override_args` 中；共享 Flash recipe 恢复原样。复用 Tyro 后置 CLI 同名覆盖语义，16P `--override.imports` 会替换默认的包含 Muon swap 的列表以避免不相容优化器。多机 TensorBoard 校验从用例自身 `expected_steps` 读取，和实际训练 CLI 使用同一个步数。
 
-GitHub Actions 仅负责触发和等待。内网 Lite Actions 的 `ci_core/ssh_runner.py`
-根据 `config/pools.json` 和 `config/pipelines.json` 对 **A3 8P（1×8）、A3 16P（2×8）、A5 64P（8×8）**
-使用相同的 SSH 源码分发、跨节点启动、设备锁和日志回传流程；不再使用模型仓下的 A3 双机调度脚本。
-
-A5 64P 的模型入口为 `tests.integration_tests.nightly_all_models_test.a5_64p_tests`，
-在 8 个节点分别执行 `launch <output>`，结束后主节点执行 `verify <output>`；
-recipe 复用 `examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh`（根据 NODE_IPS×NGPU 推导 DP replicate），
-默认 EP32 / DP-shard32，8×8 下 DP-replicate2。必须先准备每机可用的
-`HF_ASSETS_PATH`、`CKPT_INIT_LOAD_PATH`、`NODE_IPS`、`NGPU=8` 和 CANN/torch-npu；
-实际 A5 设备映射、HCCL 训练网和完整 64P 执行须通过实机验证。
-
-**统一 Lite Actions Runner 实机回归（2026-10-09）**：
-
-- **A3 8P 已通过**：[Run 37939445270](https://github.com/depeng1994/torchtitan-npu/actions/runs/37939445270)：`nightly_all_models_test/a3_8p_tests.py`，5 steps、TensorBoard、退出码 0、GitHub Success、结束广播
-- **A3 8P 新 Inputs/Artifact 协议已通过**：[Run 37952500554](https://github.com/depeng1994/torchtitan-npu/actions/runs/37952500554)：`Prepare CI request` 与 `CI tests` 两个 Job Success；JSON 传测试路径和 `STEPS=5`、5 steps、TensorBoard、资源释放、GitHub PASS。多用例顺序执行目前仅完成离线验证。
-- **A3 16P 已通过**：[Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)：`nightly_all_models_test/a3_16p_tests.py`，双机各 8P、两节点退出码 0、5 steps、TensorBoard、GitHub Success、结束广播
-- **A5 64P 尚未实机验证**：只完成 8×8 资源规格与 `nightly_all_models_test/a5_64p_tests.py` 定义；独立 HCCL 小网 IP 和模型资产路径仍需填写验证
-
-旧版 16P 回归曾发生 `HcclBroadcast` / `Communication_Error_Get_Socket(EI0006)`。已定位新的 SSH Runner 未传递旧版使用的 `ASCEND_SET_ENV_PATH`；补回后在上面的 16P Run 中通过真实训练。
-
+**验证边界：** 下文的历史 A3 8P/16P 成功只覆盖当时的提交；本次 suite 重构需新的 Actions Run 成功后才能宣称回归。A5 64P 仍禁用、未实机验收。
 
 ## A3 8P DeepSeek-V4 Flash Examples E2E（独立入口）
 
@@ -187,7 +159,7 @@ recipe 复用 `examples/deepseek_v4/debug/deepseek_v4_pro_32p_cpt_4k_a5.sh`（�
 ```bash
 HF_ASSETS_PATH=/path/to/DeepSeekV4_tokenizer \
 STEPS=5 \
-python -m tests.integration_tests.nightly_all_models_test.a3_8p_tests ./test_reports/dsv4_flash_a3_8p
+python -m tests.integration_tests.lite_actions.nightly_all_models_test.a3_8p_tests ./test_reports/dsv4_flash_a3_8p
 ```
 
 `HF_ASSETS_PATH` 必须指向存在的目录。Runner 默认 `STEPS=5`，允许通过环境变量覆盖；
@@ -273,6 +245,6 @@ python -m tests.integration_tests.run_tests /tmp/engram-hf-output \
 
 GitHub 已有历史 Eager 验收：[A3 16P Run 37942444656](https://github.com/depeng1994/torchtitan-npu/actions/runs/37942444656)（双节点 5 steps、TensorBoard、GitHub Success）。其成功仅证明旧提交，重构后必须重新完成实机 Actions 回归才能引用为新版本 PASS。
 
-启动/停止统一由 Lite Actions 主机的可信 Workflow → Agent → SSH Runner 完成；不要直接运行不存在的 `--stage-only`、`--run-dir` 等旧参数。独立环境手工排障可按受信任 `ci_entrypoint` 运行 `launch/verify`，两节点需要相同的注册表和准确的 `NODE_IPS`，且不可占用其他训练作业。
+启动/停止统一由 Lite Actions 主机的可信 Workflow → Agent → SSH Runner 完成；不要直接运行不存在的 `--stage-only`、`--run-dir` 等旧参数。独立环境手工排障可按受信任 `lite_actions.tools.entrypoint` 运行 `launch/verify`，两节点需要相同的注册表和准确的 `NODE_IPS`，且不可占用其他训练作业。
 
 A5 64P 目前仅完成静态拓扑和命令展开检查，**未实机验证**。
