@@ -192,7 +192,9 @@ def test_graph_trainer_conversion_strips_only_npu_top_level_extension():
     for graph_recipe in (
         "graph_trainer_deepseek_v4_debugmodel",
         "graph_trainer_deepseek_v4_flash",
+        "graph_trainer_deepseek_v4_flash_deepep",
         "graph_trainer_deepseek_v4_flash_43layers_16experts",
+        "graph_trainer_deepseek_v4_flash_43layers_16experts_deepep",
         "graph_trainer_deepseek_v4_pro",
         "graph_trainer_deepseek_v4_pro_61layers_32experts",
     ):

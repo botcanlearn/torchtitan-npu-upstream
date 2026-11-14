@@ -18,17 +18,23 @@ GraphTrainer 是 torchtitan 上游 `experiments/graph_trainer/` 中的编译式�
 
 ### 配置入口
 
-`torchtitan_npu/models/deepseek_v4/config_registry.py` 新增 5 个配置工厂，均复用对应 eager 配置，经 `to_graph_trainer_config` 包装为 `GraphTrainer.Config`：
+`torchtitan_npu/models/deepseek_v4/config_registry.py` 新增 7 个配置工厂，均复用对应 eager 配置，经 `to_graph_trainer_config` 包装为 `GraphTrainer.Config`：
 
 | 配置名 | 对应 eager 配置 |
 | --- | --- |
 | `graph_trainer_deepseek_v4_debugmodel` | `deepseek_v4_debugmodel` |
 | `graph_trainer_deepseek_v4_flash` | `deepseek_v4_flash` |
+| `graph_trainer_deepseek_v4_flash_deepep` | `deepseek_v4_flash_deepep` |
 | `graph_trainer_deepseek_v4_flash_43layers_16experts` | `deepseek_v4_flash_43layers_16experts` |
+| `graph_trainer_deepseek_v4_flash_43layers_16experts_deepep` | `deepseek_v4_flash_43layers_16experts_deepep` |
 | `graph_trainer_deepseek_v4_pro` | `deepseek_v4_pro` |
 | `graph_trainer_deepseek_v4_pro_61layers_32experts` | `deepseek_v4_pro_61layers_32experts` |
 
 编译配置统一为 `mode="aot_fx_trace"`、`memory_policy="full"`、`disable_passes=["cudagraph_pass"]`。模型通过 `_graph_trainer_model_registry` 包装为 `GraphTrainerDeepSeekV4Model.Config`，并行化函数指向 `parallelize_graph_trainer_deepseek_v4`。
+
+### DeepEP MoE backend
+
+GraphTrainer 的 EP overlap pass 以 `_c10d_functional.all_to_all_single` token 交换为切分和调度依据，DeepEP 的 `deepep::dispatch/combine` 不产生该结构。`extensions/torchtitan/experiments/graph_trainer/ep_overlap_deepep_guard.py` 在 GraphTrainer 初始化、runtime context patch 与首次 trace 之前检测 DeepEP dispatcher，关闭 `compile.ep_overlap.enabled` 并输出 warning，同时把 `npu_auto_overlap` 组合管线回退到基础管线。因此 A5 GraphTrainer 入口仍会传入 `--compile.ep_overlap.*`，DeepEP 路径下这些参数不生效，通信重叠由 DeepEP 融合 kernel 内部完成。
 
 ### 模型变体
 
@@ -95,7 +101,8 @@ torchrun --nproc_per_node=8 -m torchtitan.train \
 | 并行组合 | FSDP（含 degree 1）、EP 已验证；TP 要求 `seq_len` 整除 `seq_len_divisor` |
 | `spmd_types` backend | 不支持（simple_fsdp 依赖 raw DTensor 操作） |
 | Context Parallel | 不支持（DSV4 稀疏注意力编译路径未适配 CP） |
-| EP overlap（上游实验性 pass） | 已通过 patch 适配；见 [`graph_trainer_ep_overlap.md`](graph_trainer_ep_overlap.md) |
+| EP overlap（上游实验性 pass） | 已通过 patch 适配；标准 all-to-all dispatcher 路径生效 |
+| DeepEP MoE backend | 有限支持：`graph_trainer_*_deepep` 配置与 `asc_deepep` override 可用，但 EP overlap pass 在该组合下自动关闭 |
 
 ## 相关文档
 

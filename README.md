@@ -128,7 +128,7 @@ pip install -e .
     <tr>
       <td><a href="docs/feature_guides/deepep.md">DeepEP（MoE dispatch/combine）</a></td>
       <td>✅</td>
-      <td>✅（GraphTrainer 除外）</td>
+      <td>✅</td>
     </tr>
     <!-- 图编译能力 -->
     <tr>

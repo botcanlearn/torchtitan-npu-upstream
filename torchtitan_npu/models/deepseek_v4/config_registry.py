@@ -660,10 +660,30 @@ def graph_trainer_deepseek_v4_flash() -> GraphTrainer.Config:
     return config
 
 
+def graph_trainer_deepseek_v4_flash_deepep() -> GraphTrainer.Config:
+    """GraphTrainer config for the DeepSeek V4 Flash model with DeepEP MoE dispatch"""
+    config = to_graph_trainer_config(
+        deepseek_v4_flash_deepep(num_mtp_layers=0),
+        _graph_trainer_model_registry,
+    )
+    config.compile = _graph_trainer_compile_config()
+    return config
+
+
 def graph_trainer_deepseek_v4_flash_43layers_16experts() -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 Flash 43 Layers 16 experts model"""
     config = to_graph_trainer_config(
         deepseek_v4_flash_43layers_16experts(num_mtp_layers=0),
+        _graph_trainer_model_registry,
+    )
+    config.compile = _graph_trainer_compile_config()
+    return config
+
+
+def graph_trainer_deepseek_v4_flash_43layers_16experts_deepep() -> GraphTrainer.Config:
+    """GraphTrainer config for the DeepSeek V4 Flash 43 Layers 16 experts model with DeepEP MoE dispatch"""
+    config = to_graph_trainer_config(
+        deepseek_v4_flash_43layers_16experts_deepep(num_mtp_layers=0),
         _graph_trainer_model_registry,
     )
     config.compile = _graph_trainer_compile_config()

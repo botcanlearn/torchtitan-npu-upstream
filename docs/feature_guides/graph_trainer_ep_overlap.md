@@ -18,6 +18,7 @@ EP overlap 默认不启用。它只在 GraphTrainer 编译路径（`graph_traine
 | --- | --- |
 | 能力对象 | 使用 GraphTrainer、MoE 和真实 EP token exchange 的训练图；EP degree > 1 |
 | 当前整网验证模型 | DeepSeek-V4，使用 `graph_trainer_deepseek_v4_flash_43layers_16experts` 配置 |
+| 与 DeepEP MoE 后端的关系 | 互斥：模型使用 DeepEP 时本栈自动关闭并告警；见 [`deepseek_v4_graph_trainer.md`](deepseek_v4_graph_trainer.md) |
 | 训练路径 | GraphTrainer `aot_fx_trace`；eager 路径不涉及 |
 | torchtitan 基线 | `0.3.0`（`requirements.txt` 固定版本） |
 | 环境 | Ascend NPU + `torch-npu` + CANN + HCCL；EP degree > 1 |
@@ -219,6 +220,8 @@ return (*chunked, *moved), tuple(user for user in full if user not in moved_set)
 ## 启用方式
 
 EP overlap 通过 `--compile.ep_overlap.*` 打开。满足前述条件的 GraphTrainer MoE recipe 均通过同一组配置项启用；模型入口、dispatcher、并行配置和算子 override 仍由各模型 recipe 负责。当前 A3 GraphTrainer debug 脚本已设置 `seq` 分块、`graph` 策略和 NPU auto overlap pipeline，调用它时无需重复传这些配置项。自动调度机制见 [`graph_trainer_auto_overlap.md`](graph_trainer_auto_overlap.md)。
+
+该栈以 `_c10d_functional.all_to_all_single` token 交换作为切分和调度依据，与 DeepEP 的 `deepep::dispatch/combine` 不兼容。模型配置使用 DeepEP（`*_deepep` recipe）时，`extensions/torchtitan/experiments/graph_trainer/ep_overlap_deepep_guard.py` 在 GraphTrainer 初始化、runtime context patch 与首次 trace 之前关闭 `compile.ep_overlap.enabled` 并输出 warning，`npu_auto_overlap` 组合管线回退到基础管线。A5 GraphTrainer 入口默认属于这种情况，因此传入的 `--compile.ep_overlap.*` 不改变调度；标准 all-to-all dispatcher 的 recipe 不受影响。
 
 下面给出当前 DSV4 A3 GraphTrainer 入口脚本的调用示例：flash 43layers / 16experts、8 卡、EP=8。此脚本默认启用 NPU auto overlap；下文 2026-09-16 的整网验证对应旧提交和固定调度，不是此命令的验证结果。
 
