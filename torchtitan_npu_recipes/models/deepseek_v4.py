@@ -59,12 +59,24 @@ def _make_trainer_config(
     seq_len: int,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
-    model = model_registry(flavor, seq_len=seq_len, num_mtp_layers=num_mtp_layers, converters=converters)
+    parallelism = parallelism or ParallelismConfig(expert_parallel_degree=1, fsdp_reshard_after_forward="always")
+    model = model_registry(
+        flavor,
+        seq_len=seq_len,
+        num_mtp_layers=num_mtp_layers,
+        converters=converters,
+        parallelism=parallelism,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     model.local_compile_regions = []
     if num_mtp_layers > 0:
         loss = MTPChunkedLossWrapper.Config(
             mtp_scale=0.3,
+            mtp_isolate_gradients=mtp_isolate_gradients,
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model),
             ),
@@ -76,6 +88,7 @@ def _make_trainer_config(
             ),
         )
     config = TrainerEx.Config(
+        hf_assets_path=hf_assets_path or "tests/assets/tokenizer",
         loss=loss,
         profiler=CANNProfiler.Config(
             enable_profiling=False,
@@ -113,10 +126,7 @@ def _make_trainer_config(
             max_context_length=model.max_context_length,
             steps=100,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-            fsdp_reshard_after_forward="always",
-        ),
+        parallelism=parallelism,
         activation_remat=None,
         compile=None,
         checkpointer=None,
@@ -129,15 +139,22 @@ def deepseek_v4_debugmodel(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 2048,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     config = _make_trainer_config(
         "debugmodel",
         local_batch_size=1,
-        seq_len=2048,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
-    config.hf_assets_path = "tests/assets/deepseek_v3"
+    config.hf_assets_path = hf_assets_path or "tests/assets/deepseek_v3"
     return config
 
 
@@ -145,43 +162,102 @@ def deepseek_v4_flash(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     return _make_trainer_config(
         "deepseek_v4_flash",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
-def deepseek_v4_debugmodel_npu(*, num_mtp_layers: int = 0) -> TrainerEx.Config:
+def deepseek_v4_debugmodel_npu(
+    *,
+    num_mtp_layers: int = 0,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 2048,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Construct native V4; NPU kernels are selected through component overrides."""
-    return deepseek_v4_debugmodel(num_mtp_layers=num_mtp_layers)
+    return deepseek_v4_debugmodel(
+        num_mtp_layers=num_mtp_layers,
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
 
 
-def deepseek_v4_flash_npu(*, num_mtp_layers: int = 0) -> TrainerEx.Config:
+def deepseek_v4_flash_npu(
+    *,
+    num_mtp_layers: int = 0,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Construct native Flash; NPU kernels are selected through component overrides."""
-    return _make_trainer_config("deepseek_v4_flash", local_batch_size=1, seq_len=4096, num_mtp_layers=num_mtp_layers)
+    return _make_trainer_config(
+        "deepseek_v4_flash",
+        local_batch_size=1,
+        seq_len=seq_len,
+        num_mtp_layers=num_mtp_layers,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
 
 
-def deepseek_v4_flash_43layers_16experts_npu(*, num_mtp_layers: int = 0) -> TrainerEx.Config:
+def deepseek_v4_flash_43layers_16experts_npu(
+    *,
+    num_mtp_layers: int = 0,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Construct the reduced native Flash model for component overrides."""
     return _make_trainer_config(
         "deepseek_v4_flash_43layers_16experts",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
-def deepseek_v4_flash_lora() -> TrainerEx.Config:
+def deepseek_v4_flash_lora(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     from torchtitan.config.transform import apply_transforms
 
     from torchtitan_npu.models.deepseek_v4.lora import deepseek_v4_lora_transform
     from torchtitan_npu.models.deepseek_v4.peft import DeepSeekV4PEFTCheckpointManager
 
-    config = apply_transforms(deepseek_v4_flash(), [deepseek_v4_lora_transform()])
+    config = apply_transforms(
+        deepseek_v4_flash(
+            parallelism=parallelism,
+            seq_len=seq_len,
+            hf_assets_path=hf_assets_path,
+            mtp_isolate_gradients=mtp_isolate_gradients,
+        ),
+        [deepseek_v4_lora_transform()],
+    )
     assert isinstance(config.model, DeepSeekV4Model.Config)
     assert isinstance(config.optim.optimizer, OptimizerConfig)
     config.optim.optimizer._muon_profile = _dsv4_muon_profile(config.model)
@@ -189,7 +265,13 @@ def deepseek_v4_flash_lora() -> TrainerEx.Config:
     return config
 
 
-def deepseek_v4_flash_cp() -> TrainerEx.Config:
+def deepseek_v4_flash_cp(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     raise NotImplementedError("Context parallelism is deferred in the v0.4 eager upgrade.")
 
 
@@ -202,6 +284,9 @@ def deepseek_v4_flash_sft(
     chat_encoder: DSV4EncoderConfig | None = None,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     if dataset_path is None:
         dataset_path = os.environ.get("DSV4_SFT_DATASET", "/path/to/train.jsonl")
@@ -213,6 +298,9 @@ def deepseek_v4_flash_sft(
         seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
     assert isinstance(config.model, DeepSeekV4Model.Config)
     config.dataloader = GrainDataLoader.Config(
@@ -233,25 +321,56 @@ def deepseek_v4_flash_sft(
     return config
 
 
-def deepseek_v4_debugmodel_sft() -> TrainerEx.Config:
-    return deepseek_v4_flash_sft(flavor="debugmodel", seq_len=2048)
+def deepseek_v4_debugmodel_sft(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 2048,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
+    return deepseek_v4_flash_sft(
+        flavor="debugmodel",
+        seq_len=seq_len,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
 
 
-def deepseek_v4_flash_43layers_16experts_sft() -> TrainerEx.Config:
-    return deepseek_v4_flash_sft(flavor="deepseek_v4_flash_43layers_16experts")
+def deepseek_v4_flash_43layers_16experts_sft(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
+    return deepseek_v4_flash_sft(
+        flavor="deepseek_v4_flash_43layers_16experts",
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
 
 
 def deepseek_v4_flash_43layers_16experts(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     return _make_trainer_config(
         "deepseek_v4_flash_43layers_16experts",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
@@ -292,34 +411,53 @@ def _torchft_flash_config(
     config.fault_tolerance.min_replica_size = 2
     config.training.num_tokens_per_train_step = global_batch_size * config.model.max_context_length
     config.training.disable_cuda_graphs = True
-    config.parallelism.expert_parallel_degree = expert_parallel_degree
-    config.parallelism.data_parallel_shard_degree = data_parallel_shard_degree
+    if (
+        config.parallelism.expert_parallel_degree != expert_parallel_degree
+        or config.parallelism.data_parallel_shard_degree != data_parallel_shard_degree
+    ):
+        raise ValueError("Construct the base model with the TorchFT replica topology")
     return config
 
 
 def deepseek_v4_flash_torchft() -> TrainerEx.Config:
     """Full Flash model on two 64-rank TorchFT replicas."""
-    return _torchft_flash_config(deepseek_v4_flash(), expert_parallel_degree=64)
+    return _torchft_flash_config(
+        deepseek_v4_flash(
+            parallelism=ParallelismConfig(
+                expert_parallel_degree=64, data_parallel_shard_degree=64, fsdp_reshard_after_forward="always"
+            )
+        ),
+        expert_parallel_degree=64,
+    )
 
 
 def deepseek_v4_flash_43layers_16experts_torchft() -> TrainerEx.Config:
     """The 16-expert Flash model on two 64-rank TorchFT replicas."""
-    return _torchft_flash_config(deepseek_v4_flash_43layers_16experts(), expert_parallel_degree=16)
+    return _torchft_flash_config(
+        deepseek_v4_flash_43layers_16experts(
+            parallelism=ParallelismConfig(
+                expert_parallel_degree=16, data_parallel_shard_degree=64, fsdp_reshard_after_forward="always"
+            )
+        ),
+        expert_parallel_degree=16,
+    )
 
 
 def deepseek_v4_flash_8p_torchft() -> TrainerEx.Config:
     """Four Flash layers plus MTP on two EP4/FSDP4 replicas for 8-card validation."""
-    base = deepseek_v4_flash_43layers_16experts(num_mtp_layers=1)
+    base = deepseek_v4_flash_43layers_16experts(
+        num_mtp_layers=1,
+        seq_len=256,
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=4, data_parallel_shard_degree=4, fsdp_reshard_after_forward="always"
+        ),
+    )
     assert base.model is not None
     model = base.model
     assert isinstance(model, DeepSeekV4Model.Config)
     model.layers = model.layers[:4]
     model.n_layers = 4
     model.compress_ratios = model.compress_ratios[:4]
-    # The token budget is derived from the model context, so shrink the context
-    # before the TorchFT config computes it.
-    model.max_context_length = 256
-    base.training.max_context_length = 256
     config = _torchft_flash_config(
         base,
         expert_parallel_degree=4,
@@ -335,13 +473,20 @@ def deepseek_v4_pro(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     return _make_trainer_config(
         "deepseek_v4_pro",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
@@ -349,13 +494,20 @@ def deepseek_v4_pro_61layers_32experts(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     return _make_trainer_config(
         "deepseek_v4_pro_61layers_32experts",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
@@ -363,73 +515,168 @@ def deepseek_v4_pro_61layers_12experts(
     *,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
     return _make_trainer_config(
         "deepseek_v4_pro_61layers_12experts",
         local_batch_size=1,
-        seq_len=4096,
+        seq_len=seq_len,
         num_mtp_layers=num_mtp_layers,
         converters=converters,
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
     )
 
 
 # --- GraphTrainer config factories ---
 
 
-def deepseek_v4_flash_cpt() -> TrainerEx.Config:
+def deepseek_v4_flash_cpt(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash()
+    config = deepseek_v4_flash(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.compile = CompileConfig(components=[], model=ModelCompileConfig())
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config
 
 
-def deepseek_v4_flash_43layers_16experts_compiled() -> TrainerEx.Config:
+def deepseek_v4_flash_43layers_16experts_compiled(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash_43layers_16experts()
+    config = deepseek_v4_flash_43layers_16experts(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.compile = CompileConfig(components=[], model=ModelCompileConfig())
     return config
 
 
-def deepseek_v4_flash_sft_compiled() -> TrainerEx.Config:
+def deepseek_v4_flash_sft_compiled(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash_sft()
+    config = deepseek_v4_flash_sft(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.compile = CompileConfig(components=[], model=ModelCompileConfig())
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config
 
 
-def deepseek_v4_flash_43layers_16experts_sft_compiled() -> TrainerEx.Config:
+def deepseek_v4_flash_43layers_16experts_sft_compiled(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash_43layers_16experts_sft()
+    config = deepseek_v4_flash_43layers_16experts_sft(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.compile = CompileConfig(components=[], model=ModelCompileConfig())
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config
 
 
-def deepseek_v4_flash_lora_compiled() -> TrainerEx.Config:
+def deepseek_v4_flash_lora_compiled(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash_lora()
+    config = deepseek_v4_flash_lora(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.compile = CompileConfig(components=[], model=ModelCompileConfig())
     return config
 
 
-def deepseek_v4_flash_cp_cpt() -> TrainerEx.Config:
+def deepseek_v4_flash_cp_cpt(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_flash_cp()
+    config = deepseek_v4_flash_cp(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config
 
 
-def deepseek_v4_pro_61layers_32experts_cpt() -> TrainerEx.Config:
+def deepseek_v4_pro_61layers_32experts_cpt(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_pro_61layers_32experts()
+    config = deepseek_v4_pro_61layers_32experts(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config
 
 
-def deepseek_v4_pro_61layers_12experts_cpt() -> TrainerEx.Config:
+def deepseek_v4_pro_61layers_12experts_cpt(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = deepseek_v4_pro_61layers_12experts()
+    config = deepseek_v4_pro_61layers_12experts(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=hf_assets_path,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config

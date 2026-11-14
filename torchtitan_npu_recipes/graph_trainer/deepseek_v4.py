@@ -19,6 +19,7 @@ from torchtitan_npu_recipes.models.deepseek_v4 import (
 )
 
 if TYPE_CHECKING:
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
@@ -42,7 +43,12 @@ def _graph_trainer_compile_config() -> GraphTrainerCompileConfig:
     )
 
 
-def graph_trainer_deepseek_v4_debugmodel() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_debugmodel(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 2048,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 debug model"""
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
@@ -51,7 +57,9 @@ def graph_trainer_deepseek_v4_debugmodel() -> GraphTrainer.Config:
     )
 
     config = to_graph_trainer_config(
-        deepseek_v4_debugmodel(num_mtp_layers=0),
+        deepseek_v4_debugmodel(
+            num_mtp_layers=0, parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path
+        ),
         GraphTrainerDeepSeekV4Model.Config,
     )
     config.compile = GraphTrainerCompileConfig(
@@ -65,48 +73,77 @@ def graph_trainer_deepseek_v4_debugmodel() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v4_flash() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_flash(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 Flash model"""
     config = to_graph_trainer_config(
-        deepseek_v4_flash(num_mtp_layers=0),
+        deepseek_v4_flash(num_mtp_layers=0, parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path),
         GraphTrainerDeepSeekV4Model.Config,
     )
     config.compile = _graph_trainer_compile_config()
     return config
 
 
-def graph_trainer_deepseek_v4_flash_43layers_16experts() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_flash_43layers_16experts(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 Flash 43 Layers 16 experts model"""
     config = to_graph_trainer_config(
-        deepseek_v4_flash_43layers_16experts(num_mtp_layers=0),
+        deepseek_v4_flash_43layers_16experts(
+            num_mtp_layers=0, parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path
+        ),
         GraphTrainerDeepSeekV4Model.Config,
     )
     config.compile = _graph_trainer_compile_config()
     return config
 
 
-def graph_trainer_deepseek_v4_pro() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_pro(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 Pro model"""
     config = to_graph_trainer_config(
-        deepseek_v4_pro(num_mtp_layers=0),
+        deepseek_v4_pro(num_mtp_layers=0, parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path),
         GraphTrainerDeepSeekV4Model.Config,
     )
     config.compile = _graph_trainer_compile_config()
     return config
 
 
-def graph_trainer_deepseek_v4_pro_61layers_32experts() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_pro_61layers_32experts(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """GraphTrainer config for the DeepSeek V4 Pro 61 Layers 32 experts model"""
     config = to_graph_trainer_config(
-        deepseek_v4_pro_61layers_32experts(num_mtp_layers=0),
+        deepseek_v4_pro_61layers_32experts(
+            num_mtp_layers=0, parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path
+        ),
         GraphTrainerDeepSeekV4Model.Config,
     )
     config.compile = _graph_trainer_compile_config()
     return config
 
 
-def graph_trainer_deepseek_v4_flash_cpt() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v4_flash_cpt(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    seq_len: int = 4096,
+    hf_assets_path: str | None = None,
+) -> GraphTrainer.Config:
     """Launch recipe with explicit compilation and checkpoint policy."""
-    config = graph_trainer_deepseek_v4_flash()
+    config = graph_trainer_deepseek_v4_flash(parallelism=parallelism, seq_len=seq_len, hf_assets_path=hf_assets_path)
     config.checkpointer = CheckpointManager.Config(load_only=True)
     return config

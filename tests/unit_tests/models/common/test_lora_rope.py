@@ -39,15 +39,12 @@ class CustomComplexRoPE(ComplexRoPE):
 )
 def test_lora_recipe_selects_requested_rope_override(factory, variant, rope_cls):
     config = factory()
-    config.model.update_from_config(config=config)
     original = {
-        fqn: dataclasses.asdict(cfg)
-        for fqn, cfg, _, _ in config.model.traverse(ComplexRoPE.Config, recurse=True)
+        fqn: dataclasses.asdict(cfg) for fqn, cfg, _, _ in config.model.traverse(ComplexRoPE.Config, recurse=True)
     }
     assert original
     assert all(
-        type(cfg) is ComplexRoPE.Config
-        for _, cfg, _, _ in config.model.traverse(ComplexRoPE.Config, recurse=True)
+        type(cfg) is ComplexRoPE.Config for _, cfg, _, _ in config.model.traverse(ComplexRoPE.Config, recurse=True)
     )
     with torch.device("meta"):
         original_model = config.model.build()

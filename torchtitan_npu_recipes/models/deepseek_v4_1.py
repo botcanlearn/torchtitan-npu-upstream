@@ -82,8 +82,15 @@ def _make_trainer_config(
     *,
     converters=None,
     dataloader_factory: Callable[[DeepSeekV41Model.Config], GrainDataLoader.Config] | None = None,
+    parallelism: ParallelismConfig | None = None,
+    hf_assets_path: str | None = None,
+    seq_len: int | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> TrainerEx.Config:
-    model = model_registry(flavor, converters=converters)
+    # V4.1 still runs the Trainer-side update_from_config lifecycle; the
+    # recipe-side arguments only preselect the layouts and asset path.
+    del mtp_isolate_gradients  # V4.1 has no MTP depths yet.
+    model = model_registry(flavor, converters=converters, parallelism=parallelism)
     model = derive(
         model,
         type(model),
@@ -95,7 +102,8 @@ def _make_trainer_config(
         local_compile_regions=[],
     )
     # The upstream validator requires model, data, and RoPE context lengths to agree.
-    model.max_context_length = min(4096, model.max_context_length)
+    context_len = model.max_context_length if seq_len is None else min(seq_len, model.max_context_length)
+    model.max_context_length = min(4096, context_len)
     from torchtitan.models.common.rope import RoPE
 
     for _, rope, _, _ in model.traverse(RoPE.Config):
@@ -137,9 +145,10 @@ def _make_trainer_config(
         tokenizer=HuggingFaceTokenizer.Config(),
         dataloader=dataloader,
         optim=OptimConfig(optimizer=_v41_optimizer_config(model)),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism or ParallelismConfig(),
         activation_remat=None,
         override=OverrideConfig(imports=["torchtitan_npu.override.common.rope.workaround"]),
+        hf_assets_path=hf_assets_path or "tests/assets/tokenizer",
     )
 
 
@@ -283,17 +292,41 @@ def deepseek_v4_1_flash_40layers_24experts_text() -> TrainerEx.Config:
     return _make_trainer_config("deepseek_v4_1_flash_40layers_24experts_text")
 
 
-def deepseek_v4_1_debugmodel_multimodal() -> TrainerEx.Config:
-    return _make_trainer_config("deepseek_v4_1_debugmodel")
+def deepseek_v4_1_debugmodel_multimodal(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    hf_assets_path: str | None = None,
+    seq_len: int | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
+    return _make_trainer_config(
+        "deepseek_v4_1_debugmodel",
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        seq_len=seq_len,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
 
 
 def deepseek_v4_1_debugmodel_multimodal_sft() -> TrainerEx.Config:
     return _vision_sft_recipe("deepseek_v4_1_debugmodel")
 
 
-def deepseek_v4_1_debugmodel_text() -> TrainerEx.Config:
-    config = _make_trainer_config("deepseek_v4_1_debugmodel_text")
-    config.hf_assets_path = os.environ.get("HF_ASSETS_PATH") or "tests/assets/deepseek_v3"
+def deepseek_v4_1_debugmodel_text(
+    *,
+    parallelism: ParallelismConfig | None = None,
+    hf_assets_path: str | None = None,
+    seq_len: int | None = None,
+    mtp_isolate_gradients: bool = False,
+) -> TrainerEx.Config:
+    config = _make_trainer_config(
+        "deepseek_v4_1_debugmodel_text",
+        parallelism=parallelism,
+        hf_assets_path=hf_assets_path,
+        seq_len=seq_len,
+        mtp_isolate_gradients=mtp_isolate_gradients,
+    )
+    config.hf_assets_path = hf_assets_path or os.environ.get("HF_ASSETS_PATH") or "tests/assets/deepseek_v3"
     return config
 
 

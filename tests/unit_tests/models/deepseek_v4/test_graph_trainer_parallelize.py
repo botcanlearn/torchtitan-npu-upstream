@@ -27,7 +27,6 @@ def test_graph_trainer_parallelize_initializes_singleton_model_parallel_axes(tmp
     config.model.vocab_size = 128
     config.model.tok_embeddings.num_embeddings = 128
     config.model.lm_head.out_features = 128
-    config.model.update_from_config(config=config)
     with torch.random.fork_rng(devices=[]), torch.device("cpu"):
         model = config.model.build()
     model = model.parallelize(

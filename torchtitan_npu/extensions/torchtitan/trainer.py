@@ -7,7 +7,7 @@
 # this import before the remaining extension dependencies.
 # ruff: noqa: I001
 import logging
-from copy import copy, deepcopy
+from copy import copy
 from dataclasses import dataclass, field
 
 from typing import Annotated, cast
@@ -196,17 +196,6 @@ class TrainerEx(Trainer):
                 model_compile_enabled=model_compile_enabled,
                 override_config=config.override,
             )
-
-        # v0.4.0 removed the upstream ``update_from_config`` call and applies
-        # overrides before the engine exists. Run the model-owned preparation on a
-        # private copy here so the sharding pass still precedes the overrides, which
-        # derive their configs from it.
-        model_config = getattr(config, "model", None)
-        if model_config is not None:
-            config.model = deepcopy(model_config)
-            update = getattr(config.model, "update_from_config", None)
-            if update is not None:
-                update(config=config)
 
         set_allow_hf32(config.training.extension.allow_hf32)
         if getattr(config.training, "enable_cpu_offload", False):

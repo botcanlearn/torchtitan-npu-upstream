@@ -13,6 +13,8 @@ rank's copy (upstream #4617).  The test keeps the contract's two ends -- per-geo
 entries and the rank-local rebuild -- and drops the per-field detail.
 """
 
+from itertools import pairwise
+
 import pytest
 import torch
 
@@ -111,7 +113,9 @@ def test_native_model_rejects_cp_even_with_aligned_documents():
     config.dataloader.dataset.dataset.processor.per_doc_alignment = 256
 
     with pytest.raises(NotImplementedError, match="TP=CP=PP=1"):
-        config.model.update_from_config(config=config)
+        with torch.device("meta"):
+            model = config.model.build()
+        model.parallelize(parallelism=config.parallelism)
 
 
 def test_entries_are_built_per_geometry():
@@ -158,7 +162,7 @@ def test_attention_without_cp_matches_independent_samples(batch_size, monkeypatc
         total = q.size(0)
         scores = torch.einsum("thd,sd->ths", q.float(), swa_k.float()) * attention.inner_attention.softmax_scale
         allow = torch.zeros(total, total, dtype=torch.bool)
-        for start, end in zip(cu[:-1], cu[1:], strict=False):
+        for start, end in pairwise(cu):
             allow[start:end, start:end] = torch.ones(end - start, end - start, dtype=torch.bool).tril()
         scores = scores.masked_fill(~allow[:, None, :], float("-inf"))
         sink = attn_sink[None, :, None].expand(*scores.shape[:-1], 1)

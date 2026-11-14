@@ -12,6 +12,7 @@ support limits. Selecting an example does not enable a deferred training path.
 from __future__ import annotations
 
 import os
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from torchtitan.components.data import (
@@ -21,8 +22,8 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig, FullActivationRematConfig
-from torchtitan.models.common.rope import RoPE
 
 from torchtitan_npu.config import CompileConfig, ModelCompileConfig, OptimizerConfig
 from torchtitan_npu.config.configs import KVNormQuantizationConfig
@@ -30,13 +31,13 @@ from torchtitan_npu.extensions.torchtitan.components.checkpoint import Checkpoin
 from torchtitan_npu_recipes.models import deepseek_v4 as model_recipes
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Any
 
     from torchtitan.config.override import OverrideImport
 
     from torchtitan_npu.extensions.torchtitan.trainer import TrainerEx
     from torchtitan_npu.models.common.alignment import AlignedTextProcessor
-    from torchtitan_npu.models.deepseek_v4.model import DeepSeekV4Model
     from torchtitan_npu.models.deepseek_v4.peft import DeepSeekV4PEFTCheckpointManager
 
 
@@ -137,7 +138,7 @@ def _overrides(
 
 
 def _configure(
-    config: TrainerEx.Config,
+    recipe: Callable[..., TrainerEx.Config],
     *,
     local_ranks: int,
     nodes: int = 1,
@@ -155,7 +156,7 @@ def _configure(
     text_data: bool = True,
 ) -> TrainerEx.Config:
     _check_override_environment()
-    parallelism = config.parallelism
+    parallelism = ParallelismConfig(fsdp_reshard_after_forward="always")
     parallelism.tensor_parallel_degree = int(os.environ.get("TP", "1")) if pro else 1
     parallelism.pipeline_parallel_degree = int(os.environ.get("PP", "1")) if pro else 1
     parallelism.context_parallel_degree = int(os.environ.get("CP", "1"))
@@ -171,12 +172,11 @@ def _configure(
     if world_size % shard_product or world_size < shard_product:
         raise ValueError(f"WORLD_SIZE={world_size} must be divisible by DP_SHARD*CP*TP*PP={shard_product}")
     parallelism.data_parallel_replicate_degree = world_size // shard_product
-    config.hf_assets_path = os.environ.get("HF_ASSETS_PATH") or "/path/to/DeepSeekV4_tokenizer"
-    model = cast("DeepSeekV4Model.Config", config.model)
-    model.max_context_length = seq_len
-    for _, rope, _, _ in model.traverse(RoPE.Config):
-        rope.max_context_length = seq_len
-    config.training.max_context_length = seq_len
+    config = recipe(
+        parallelism=parallelism,
+        seq_len=seq_len,
+        hf_assets_path=os.environ.get("HF_ASSETS_PATH") or "/path/to/DeepSeekV4_tokenizer",
+    )
     config.training.num_tokens_per_microbatch_per_dp_rank = tokens_per_microbatch
     config.training.num_tokens_per_train_step = tokens_per_step
     config.training.steps = steps
@@ -245,7 +245,7 @@ def _a5_quantization(config: TrainerEx.Config, *, full_model: bool = False) -> N
 
 def _flash_8p(*, a5: bool = False, hif8: bool = False) -> TrainerEx.Config:
     config = _configure(
-        model_recipes.deepseek_v4_flash_43layers_16experts_compiled(),
+        model_recipes.deepseek_v4_flash_43layers_16experts_compiled,
         local_ranks=8,
         ep=8,
         dp_shard=8,
@@ -267,7 +267,7 @@ def _flash_8p(*, a5: bool = False, hif8: bool = False) -> TrainerEx.Config:
 
 def _flash_full(*, a5: bool = False) -> TrainerEx.Config:
     config = _configure(
-        model_recipes.deepseek_v4_flash_cpt(),
+        model_recipes.deepseek_v4_flash_cpt,
         local_ranks=8 if a5 else 16,
         nodes=16 if a5 else 8,
         ep=128,
@@ -292,7 +292,7 @@ def deepseek_v4_eager_1p() -> TrainerEx.Config:
 
 def deepseek_v4_mini_1p_cpt_2k_a3() -> TrainerEx.Config:
     return _configure(
-        model_recipes.deepseek_v4_debugmodel(),
+        model_recipes.deepseek_v4_debugmodel,
         local_ranks=1,
         ep=1,
         dp_shard=1,
@@ -339,9 +339,8 @@ def deepseek_v4_flash_qat_4k_a5() -> TrainerEx.Config:
 
 def deepseek_v4_flash_cpt_1024k_a5() -> TrainerEx.Config:
     """Retain the explicit CP migration guard from the selected model recipe."""
-    config = model_recipes.deepseek_v4_flash_cp_cpt()
     config = _configure(
-        config,
+        model_recipes.deepseek_v4_flash_cp_cpt,
         local_ranks=8,
         nodes=16,
         ep=128,
@@ -367,7 +366,7 @@ def deepseek_v4_flash_cpt_1024k_a5() -> TrainerEx.Config:
 
 def deepseek_v4_pro_32p_cpt_4k_a5() -> TrainerEx.Config:
     config = _configure(
-        model_recipes.deepseek_v4_pro_61layers_32experts_cpt(),
+        model_recipes.deepseek_v4_pro_61layers_32experts_cpt,
         local_ranks=8,
         nodes=4,
         ep=32,
@@ -385,7 +384,7 @@ def deepseek_v4_pro_32p_cpt_4k_a5() -> TrainerEx.Config:
 
 def deepseek_v4_pro_8p_cpt_4k_a5_cpuoffload() -> TrainerEx.Config:
     config = _configure(
-        model_recipes.deepseek_v4_pro_61layers_12experts_cpt(),
+        model_recipes.deepseek_v4_pro_61layers_12experts_cpt,
         local_ranks=8,
         ep=4,
         dp_shard=8,
@@ -401,12 +400,13 @@ def deepseek_v4_pro_8p_cpt_4k_a5_cpuoffload() -> TrainerEx.Config:
 
 
 def _sft(*, reduced: bool) -> TrainerEx.Config:
-    config = model_recipes.deepseek_v4_flash_sft(
+    recipe = partial(
+        model_recipes.deepseek_v4_flash_sft,
         dataset_path=os.environ.get("DATASET_PATH", os.environ.get("DSV4_SFT_DATASET", "/path/to/train.jsonl")),
         flavor="deepseek_v4_flash_43layers_16experts" if reduced else "deepseek_v4_flash",
     )
     config = _configure(
-        config,
+        recipe,
         local_ranks=8 if reduced else 16,
         nodes=1 if reduced else 8,
         ep=8 if reduced else 128,
@@ -437,7 +437,7 @@ def deepseek_v4_flash_8node_sft_4k_a3() -> TrainerEx.Config:
 
 def deepseek_v4_flash_lora_4k_a3() -> TrainerEx.Config:
     config = _configure(
-        model_recipes.deepseek_v4_flash_lora_compiled(),
+        model_recipes.deepseek_v4_flash_lora_compiled,
         local_ranks=16,
         nodes=8,
         ep=128,

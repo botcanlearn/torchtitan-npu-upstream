@@ -17,8 +17,6 @@ from torchtitan.models.deepseek_v4.model import DeepSeekV4TransformerBlock as De
 from .mtp import DeepSeekV4MTPDecoder
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.moe import MoE
-
     from .compressor import Indexer
     from .mtp import DeepSeekV4MTPTransformerBlock
 
@@ -27,6 +25,21 @@ if TYPE_CHECKING:
 
 
 class DeepSeekV4Model(DeepSeekV4MTPDecoder):
+    supports_pipeline_parallel = False
+
+    def parallelize(self, **kwargs):
+        from torchtitan_npu.models.common.moe import validate_dispatcher_capacity
+
+        parallelism = kwargs["parallelism"]
+        if (
+            parallelism.tensor_parallel_degree != 1
+            or parallelism.context_parallel_degree != 1
+            or parallelism.pipeline_parallel_degree != 1
+        ):
+            raise NotImplementedError("The eager upgrade supports TP=CP=PP=1 only.")
+        validate_dispatcher_capacity(self.config, training=kwargs["training"], parallelism=parallelism)
+        return super().parallelize(**kwargs)
+
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallelism_context):
         from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
@@ -77,30 +90,6 @@ class DeepSeekV4Model(DeepSeekV4MTPDecoder):
         vocab_size: int
         compress_ratios: tuple[int, ...]
         n_layers: int
-
-        def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.models.common.linear import Linear
-
-            for _, linear, _, _ in self.traverse(Linear.Config):
-                linear.inplace_wgrad_accum = False
-            self.mtp_isolate_gradients = getattr(config.loss, "mtp_isolate_gradients", False)
-            parallelism = config.parallelism
-            if (
-                parallelism.tensor_parallel_degree != 1
-                or parallelism.context_parallel_degree != 1
-                or parallelism.pipeline_parallel_degree != 1
-            ):
-                raise NotImplementedError("The eager upgrade supports TP=CP=PP=1 only.")
-            from torchtitan.models.common.moe.sharding import routed_expert_linear_sharding_config
-
-            for layer in (*self.layers, *(self.mtp_layers or ())):
-                experts = cast("MoE.Config", layer.feed_forward).routed_experts
-                experts.w13.sharding_config = routed_expert_linear_sharding_config(
-                    enable_ep=parallelism.expert_parallel_degree > 1,
-                )
-                experts.w2.sharding_config = routed_expert_linear_sharding_config(
-                    enable_ep=parallelism.expert_parallel_degree > 1,
-                )
 
         def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
             deepseek_v4_model = cast("DeepSeekV4Model", model)

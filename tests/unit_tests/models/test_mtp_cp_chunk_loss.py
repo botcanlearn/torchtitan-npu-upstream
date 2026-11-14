@@ -10,15 +10,17 @@ from importlib import import_module
 
 import pytest
 import torch
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.validation import validate_context_parallel
 
 from torchtitan_npu.models.deepseek_v3_2 import model_registry as deepseek_v3_2_model_registry
-from torchtitan_npu_recipes.models.deepseek_v3_2 import deepseek_v3_2_debugmodel
-from torchtitan_npu_recipes.models.deepseek_v4 import deepseek_v4_debugmodel
 from torchtitan_npu.models.deepseek_v4.mtp import (
     MTPChunkedLossWrapper,
     MTPModelOutput,
     prepare_mtp_batch,
 )
+from torchtitan_npu_recipes.models.deepseek_v3_2 import deepseek_v3_2_debugmodel
+from torchtitan_npu_recipes.models.deepseek_v4 import deepseek_v4_debugmodel
 
 _community_loss = import_module("torchtitan.components.loss")
 _community_mtp = import_module("torchtitan.models.deepseek_v3.mtp")
@@ -68,34 +70,23 @@ def test_dsv3_mtp_uses_community_implementation():
 
 
 def test_dsv32_mtp_keeps_community_cp_restriction():
-    config = deepseek_v3_2_debugmodel()
-    config.model_spec = deepseek_v3_2_model_registry(
+    parallelism = ParallelismConfig(context_parallel_degree=2)
+    model_config = deepseek_v3_2_model_registry(
         "debugmodel",
         num_mtp_layers=1,
+        parallelism=parallelism,
     )
-    config.parallelism = dataclasses.replace(
-        config.parallelism,
-        context_parallel_degree=2,
-    )
-
-    # The pinned decoder refuses CP for the VarlenAttention-derived cores at
-    # configuration time.  DeepSeek-V3.2 has no successor rank-local CP path:
-    # its retired varlen-CP metadata system is not replaced by a second guard.
-    with pytest.raises(NotImplementedError, match="Context Parallel is not supported"):
-        config.model_spec.model.update_from_config(config=config)
+    with pytest.raises(ValueError, match="must use CPInnerAttention"):
+        validate_context_parallel(model_config, parallelism)
 
 
-def test_dsv4_mtp_accepts_cp_configuration():
-    config = deepseek_v4_debugmodel()
-    # A CP run splits every document into equal chunks and each chunk must stay
-    # ratio-aligned, so the loader's per-document alignment grows with the degree.
-    config.dataloader.dataset.dataset.processor.per_doc_alignment = 256
-    config.parallelism = dataclasses.replace(
-        config.parallelism,
-        context_parallel_degree=2,
-    )
-
-    config.model.update_from_config(config=config)
+def test_dsv4_mtp_rejects_cp_configuration():
+    config = deepseek_v4_debugmodel(num_mtp_layers=1)
+    with torch.device("meta"):
+        model = config.model.build()
+    parallelism = dataclasses.replace(config.parallelism, context_parallel_degree=2)
+    with pytest.raises(NotImplementedError, match="TP=CP=PP=1"):
+        model.parallelize(parallelism=parallelism)
 
 
 def test_prepare_mtp_batch_respects_packed_sequence_boundaries():

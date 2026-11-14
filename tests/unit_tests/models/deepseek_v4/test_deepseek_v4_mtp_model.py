@@ -156,22 +156,21 @@ def single_threaded_cpu():
         torch.set_num_threads(previous)
 
 
-def test_deepseek_v4_mtp_loss_flag_reaches_model():
-    trainer_config = deepseek_v4_debugmodel(num_mtp_layers=1)
-    assert not trainer_config.loss.mtp_isolate_gradients
-    trainer_config.loss.mtp_isolate_gradients = True
+@pytest.mark.parametrize("isolate", [False, True], ids=["shared-gradients", "isolated-gradients"])
+def test_deepseek_v4_mtp_recipe_configures_model_and_loss_together(isolate):
+    trainer_config = deepseek_v4_debugmodel(num_mtp_layers=1, mtp_isolate_gradients=isolate)
+    assert trainer_config.loss.mtp_isolate_gradients is isolate
     model_config = trainer_config.model
-    model_config.update_from_config(config=trainer_config)
     with torch.device("meta"):
         model = model_config.build()
 
-    assert model.mtp_isolate_gradients
-    assert isinstance(model.lm_head, SharedLinear)
+    assert model.mtp_isolate_gradients is isolate
+    assert isinstance(model.lm_head, SharedLinear) is isolate
 
 
 @pytest.mark.parametrize("missing_head", [False, True], ids=["ordinary_linear", "missing_head"])
 def test_deepseek_v4_mtp_isolation_rejects_incompatible_loss_head(missing_head):
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         loss_fn = MTPChunkedLossWrapper(
             MTPChunkedLossWrapper.Config(
                 num_chunks=2,
@@ -193,7 +192,7 @@ def test_deepseek_v4_mtp_isolation_rejects_incompatible_loss_head(missing_head):
 
 
 def test_deepseek_v4_mtp_isolation_rejects_replaced_model_head():
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         config = _build_model_config()
         config.mtp_isolate_gradients = True
         model = build_cpu_model(config)
@@ -207,7 +206,7 @@ def test_deepseek_v4_mtp_isolation_rejects_replaced_model_head():
 
 @pytest.mark.parametrize("num_mtp_layers", [1, 2], ids=["depth1", "depth2"])
 def test_deepseek_v4_mtp_detaches_all_shared_parameters(num_mtp_layers):
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         config = _build_model_config(num_mtp_layers=num_mtp_layers)
         config.mtp_isolate_gradients = True
         model = build_cpu_model(config)
@@ -229,7 +228,7 @@ def test_deepseek_v4_mtp_detaches_all_shared_parameters(num_mtp_layers):
 
 @pytest.mark.parametrize("chunked", [False, True], ids=["logits", "chunked"])
 def test_deepseek_v4_mtp_isolation_preserves_main_gradients(chunked, single_threaded_cpu):
-    with torch.random.fork_rng():
+    with torch.random.fork_rng(devices=[]):
         config = _build_model_config()
         reference = build_cpu_model(config)
         isolated_config = deepcopy(config)

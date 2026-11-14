@@ -16,6 +16,7 @@ from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.debug import _clear_sharding_prop_cache
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed.fake_pg import FakeStore
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.parallelism_context import DistributedTopology, ParallelismContext
 
@@ -52,10 +53,10 @@ def test_model_parallelize_places_expert_weights_on_dense_or_sparse_storage(
     cpu_storage_world, family, recipe, ep, full_ac
 ):
     registry = importlib.import_module(f"torchtitan_npu_recipes.models.{family}")
-    config = getattr(registry, recipe)()
-    config.hf_assets_path = "/tmp"
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.expert_parallel_degree = ep
+    config = getattr(registry, recipe)(
+        parallelism=ParallelismConfig(data_parallel_shard_degree=2, expert_parallel_degree=ep),
+        hf_assets_path="/tmp",
+    )
     # One real block is sufficient to exercise the model's sharding policy and
     # native recursive state distribution, without allocating model weights.
     config.model.layers = config.model.layers[:1]
@@ -64,7 +65,6 @@ def test_model_parallelize_places_expert_weights_on_dense_or_sparse_storage(
     if family == "deepseek_v4_1":
         config.model.kv_source_layers = config.model.kv_source_layers[:1]
         config.model.layers[0].engram = None
-    config.model.update_from_config(config=config)
     context = ParallelismContext.from_config(config.parallelism, DistributedTopology(world_size=2), dump_folder="")
     context.build_mesh()
     with torch.device("meta"):
@@ -109,17 +109,16 @@ def test_model_parallelize_places_expert_weights_on_dense_or_sparse_storage(
 def test_multimodal_parallelize_shards_all_vision_parameters(cpu_storage_world, full_ac):
     from torchtitan_npu_recipes.models.deepseek_v4_1 import deepseek_v4_1_debugmodel_multimodal
 
-    config = deepseek_v4_1_debugmodel_multimodal()
-    config.hf_assets_path = "/tmp"
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.expert_parallel_degree = 1
+    config = deepseek_v4_1_debugmodel_multimodal(
+        parallelism=ParallelismConfig(data_parallel_shard_degree=2, expert_parallel_degree=1),
+        hf_assets_path="/tmp",
+    )
     config.model.layers = config.model.layers[:1]
     config.model.n_layers = 1
     config.model.compress_ratios = config.model.compress_ratios[:1]
     config.model.kv_source_layers = config.model.kv_source_layers[:1]
     config.model.layers[0].engram = None
     config.model.vision_encoder.num_layers = 1
-    config.model.update_from_config(config=config)
     context = ParallelismContext.from_config(config.parallelism, DistributedTopology(world_size=2), dump_folder="")
     context.build_mesh()
     with torch.device("meta"):

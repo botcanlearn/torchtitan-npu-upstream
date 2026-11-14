@@ -67,7 +67,6 @@ def test_typed_cp_recipe_passes_native_cli_validation_and_retains_fused_owner(
     fused_owner = owner.__bases__[1]
     # A normal exact core override remains harmless after explicit CP selection.
     config.override.imports.append(f"torchtitan_npu.override.{family}.sparse_attn.asc")
-    config.model.update_from_config(config=config)
     apply_overrides(config.override, config)
     cores = [layer.attention.inner_attention for layer in config.model.layers]
     selector = _selectors(config, family)[0]

@@ -9,6 +9,7 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import torch.nn as nn
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ModelConfigConverter, validate_converter_compatibility
 from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RMSNorm
 from torchtitan.models.common.decoder_sharding import (
@@ -461,7 +462,8 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
-    parallelism=None,
+    parallelism: ParallelismConfig | None = None,
+    mtp_isolate_gradients: bool = False,
 ) -> DeepSeekV4Model.Config:
     if flavor not in deepseek_v4_configs:
         raise ValueError(f"Unknown deepseek_v4 flavor: {flavor}. Available: {list(deepseek_v4_configs.keys())}")
@@ -475,12 +477,7 @@ def model_registry(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter_cfg in converters:
-            config = converter_cfg.build().convert(config)
     # Configure layouts before construction and disable the upstream in-place WGRAD path.
-    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.models.common.linear import Linear
 
     from .sharding import set_upstream_deepseek_v4_sharding_config
@@ -493,4 +490,9 @@ def model_registry(
     )
     for _, linear, _, _ in config.traverse(Linear.Config):
         linear.inplace_wgrad_accum = False
+    config.mtp_isolate_gradients = mtp_isolate_gradients
+    if converters is not None:
+        validate_converter_compatibility(converters)
+        for converter_cfg in converters:
+            config = converter_cfg.build().convert(config)
     return config

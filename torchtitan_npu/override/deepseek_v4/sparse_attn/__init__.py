@@ -102,7 +102,7 @@ def asc_legacy(
     from .ascendc import AscCompressedSparseInnerAttention
 
     # ``sharding_config`` is copied from the source by ``derive``; the
-    # sharding pass already ran before the overrides (update_from_config),
+    # registry installed sharding declarations before the overrides,
     # so the derived config keeps the sharding-pass values as-is.
     result = derive(
         cfg,
