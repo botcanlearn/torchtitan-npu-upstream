@@ -6,6 +6,7 @@
 - https://github.com/pytorch/torchtitan/pull/4734
 - https://github.com/pytorch/torchtitan/pull/4708
 - https://github.com/pytorch/torchtitan/pull/4763
+- https://github.com/pytorch/torchtitan/pull/5323
 - https://github.com/pytorch/torchtitan/pull/6180
 - https://github.com/pytorch/torchtitan/pull/6290
 - https://github.com/pytorch/torchtitan/pull/6315
@@ -43,6 +44,7 @@ grep -L -E "Pending upstream PR: https://github.com/pytorch/(torchtitan|pytorch)
 | [#4734](https://github.com/pytorch/torchtitan/pull/4734) | 在支持的一维 SimpleFSDP 场景下，将 GraphTrainer 每个 microbatch 的 chunk-loss head 梯度 ReduceScatter 合并为一次，对应 `experiments/graph_trainer/chunked_loss` |
 | [#4708](https://github.com/pytorch/torchtitan/pull/4708) | 修复 functionalize_recompute_mutations_pass 和 EpOverlap 的冲突 |
 | [#4763](https://github.com/pytorch/torchtitan/pull/4763) | 向 GraphTrainer graph pass 提供运行时上下文，用于 auto-overlap 调度时整图 profiling |
+| [#5323](https://github.com/pytorch/torchtitan/pull/5323) | 缓存 `BaseEPTokenDispatcher.ep_mesh`，避免每次 MoE dispatch/combine 重复构造 `DeviceMesh["ep"]` 子网，对应 `models/common/token_dispatcher.py` |
 | [#201621](https://github.com/pytorch/pytorch/pull/201621) | 为本地 FileSystemReader 增加可选 mmap 加载，对应 `distributed/checkpoint/filesystem` |
 | [#6180](https://github.com/pytorch/torchtitan/pull/6180) | 回移 override 成功日志分组，对应 `config/override.py` |
 | [#6290](https://github.com/pytorch/torchtitan/pull/6290) | 将 `--print-config` 与 `debug.print_config` 配置输出压缩为无损扁平折叠 JSON，对应 `config/format.py`、`config/loader.py` 和 `trainer.py` |

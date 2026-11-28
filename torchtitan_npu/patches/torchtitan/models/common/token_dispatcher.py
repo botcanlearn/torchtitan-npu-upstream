@@ -1,4 +1,5 @@
 # Pending upstream PR: https://github.com/pytorch/torchtitan/pull/5543
+# Pending upstream PR: https://github.com/pytorch/torchtitan/pull/5323
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -6,23 +7,35 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Adapt PR 5543 score transport for pre-W2 router-score absorption.
+"""Adapt PR 5543 score transport and PR 5323 EP submesh caching.
 
-The PR's rematerialization changes are not included.
+The PR 5543 rematerialization changes are not included.
 
 The TorchTitan revision pinned by ``requirements.txt`` applies scores after
-combine. This patch adds the opt-in score transport needed by standard EP1/EP2
-dispatch while keeping the default path numerically identical. DeepEP only
-exposes the same ``absorb_router_scores`` configuration knob here; pre-W2
-absorption is implemented by the NPU dispatcher override. HybridEP,
-MinimalAsyncEP, and TorchAO keep their pinned behavior and are not patched here.
-The dispatcher contract follows the upstream design in
-https://github.com/pytorch/torchtitan/pull/5543.
+combine and re-slices ``mesh["ep"]`` on every ``BaseEPTokenDispatcher.ep_mesh``
+access.
+
+- Router-score absorption (PR 5543): adds opt-in pre-W2 score transport to
+  standard EP1/EP2 dispatch (``LocalTokenDispatcher`` and
+  ``AllToAllTokenDispatcher``) while keeping the default path numerically
+  identical. ``DeepEPTokenDispatcher`` only exposes the same
+  ``absorb_router_scores`` knob here (pre-W2 absorption lives in the NPU
+  dispatcher override), while ``HybridEP``, ``MinimalAsyncEP``, and ``TorchAO``
+  keep their pinned router-score behavior.
+- EP submesh caching (PR 5323): replaces ``BaseEPTokenDispatcher.ep_mesh`` at
+  import time so the sliced EP submesh is cached on the active sparse mesh
+  keyed by ``_dim_group_names``, avoiding repeated ``DeviceMesh.__getitem__``
+  construction across MoE layers and forward/backward passes. Every dispatcher
+  inheriting ``BaseEPTokenDispatcher.ep_mesh`` (including ``AllToAll``,
+  ``TorchAO``, ``DeepEP``, ``HybridEP``, and subclasses) uses this cache.
+
+Remove this module after the TorchTitan dependency includes the PRs.
 """
 
 # pylint: disable=huawei-invalid-name
 
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -314,11 +327,44 @@ class DeepEPTokenDispatcher(TorchTitanDeepEPTokenDispatcher):
         self.absorb_router_scores = config.absorb_router_scores
 
 
+_EP_SUBMESH_ATTR = "_torchtitan_npu_cached_ep_submesh"
+
+
+def _ep_submesh_cache_key(mesh: Any) -> tuple[str, ...] | None:
+    dim_group_names = getattr(mesh, "_dim_group_names", None)
+    if isinstance(dim_group_names, (list, tuple)):
+        return tuple(dim_group_names)
+    return None
+
+
+def _cached_ep_mesh(self) -> Any:
+    """Return the active 1D EP mesh without repeated ``DeviceMesh.__getitem__`` slicing."""
+    import torchtitan.models.common.moe.token_dispatcher as native_token_dispatcher
+
+    with spmd.no_typecheck():
+        mesh = native_token_dispatcher.spmd_sparse_mesh()
+        if mesh is None:
+            return None
+        cache_key = _ep_submesh_cache_key(mesh)
+        cached = getattr(mesh, _EP_SUBMESH_ATTR, None)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == cache_key:
+            return cached[1]
+        submesh = mesh["ep"]
+        try:
+            setattr(mesh, _EP_SUBMESH_ATTR, (cache_key, submesh))
+        except (AttributeError, TypeError):
+            return submesh
+        return submesh
+
+
 def apply() -> None:
     import torchtitan.models.common.config_utils
     import torchtitan.models.common.moe.moe
     import torchtitan.models.common.moe.token_dispatcher
 
+    torchtitan.models.common.moe.token_dispatcher.BaseEPTokenDispatcher.ep_mesh = (  # pyrefly: ignore [bad-assignment]
+        property(_cached_ep_mesh)
+    )
     torchtitan.models.common.moe.token_dispatcher.LocalTokenDispatcher = (  # pyrefly: ignore [bad-assignment]
         LocalTokenDispatcher
     )
