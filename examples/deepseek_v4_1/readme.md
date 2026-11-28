@@ -183,7 +183,7 @@ bash examples/deepseek_v4_1/debug/deepseek_v4_1_flash_8p_cpt_4k_a3.sh \
 | `common.token_dispatcher.asc_deepep`（A5） | 替换 `DeepEPTokenDispatcher`，由 CANN `ElasticBuffer` 完成 dispatch/combine；需配合 `CONFIG=*_deepep` | Ascend DeepEP dispatcher |
 | `mhc.asc_hc_post` | mHC post 变换 | Ascend mHC post |
 | `mhc.asc_sinkhorn`（仅 A5） | `HcPre._split_sinkhorn`（新接口，`hc_eps` 字段） | npu_mhc_sinkhorn |
-| `mhc.asc_hc_premix`（仅 A5） | `HcPre.forward`：Sinkhorn + 压流一并下沉。要求 `hc_mult=4`、`sinkhorn_iters=20`，950 上要求 `c ∈ {4096, 7168}` | `cann_ops_transformer.mhc_pre_sinkhorn_premix` |
+| `mhc.asc_hc_premix` | `HcPre.forward`：Sinkhorn + 压流一并下沉。要求 `hc_mult=4`、`sinkhorn_iters=20`，`c` 需 128 对齐且 ∈ [1, 100000] | `cann_ops_transformer.mhc_pre_sinkhorn`（`pre_mix` 路径）<br>反向 `cann_ops_transformer.mhc_pre_sinkhorn_backward_v2` |
 | `tilelang.tilelang_hc_pre` / `tilelang.tilelang_hc_post`（A5，`USE_TILELANG=1`） | 整体替换 `HcPre.forward` 与 `HcPost.forward` | 外部 `tile_kernels`（mhc4 + fp32 mix） |
 
 量化路径不是这两个 override 的包装，而是另一个 backend：开启 `--extension.quantization.enable-sparse-attention-quantization` 后，量化后的 sparse attention（`torchao_npu` 里 fused attention 的拷贝）由 converter 安装，它自己构建 entry 的四份 metadata（含量化 selector 的两条 schedule），因此 `sparse_attn.asc` 在该路径上不生效；`--extension.quantization.li-quantization mxfp4` 必须与该开关同时开启，否则非量化 attention 的 BF16 schedule 会被量化 kernel 读到（垃圾索引，kernel 可能崩），converter 会直接报错。非量化路径的 `lightning_indexer.fwd_sparse` / `.sparse_length` 当前留空，等带 candidate 的非量化算子落地后由 port 填。

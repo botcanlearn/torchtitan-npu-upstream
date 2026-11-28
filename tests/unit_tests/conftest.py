@@ -85,13 +85,7 @@ _TORCH_OPS_MUTATOR_SCHEMAS = (
     (
         "mhc_pre_sinkhorn",
         "mhc_pre_sinkhorn(Tensor x, Tensor phi, Tensor alpha, Tensor bias, int hc_mult, "
-        "int num_iters, float hc_eps, float norm_eps, bool out_flag) -> "
-        "(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)",
-    ),
-    (
-        "mhc_pre_sinkhorn_premix",
-        "mhc_pre_sinkhorn_premix(Tensor x, Tensor phi, Tensor alpha, Tensor bias, Tensor? premix, "
-        "int hc_mult, int num_iters, float hc_eps, float norm_eps, bool out_flag) -> "
+        "int num_iters, float hc_eps, float norm_eps, bool out_flag, Tensor? pre_mix=None) -> "
         "(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)",
     ),
 )

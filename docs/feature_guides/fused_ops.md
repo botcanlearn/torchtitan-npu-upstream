@@ -215,8 +215,10 @@ python -m torchtitan_npu.train \
   `HcHead.Config`；同一节点只能选择一个实现。DeepSeek-V4.1 另有
   `tilelang.tilelang_hc_pre` / `tilelang.tilelang_hc_post`，分别声明 V4.1 自己的 `HcPre.Config` / `HcPost.Config`；
   pre 侧与 `mhc.asc_sinkhorn` / `mhc.asc_hc_premix` 三者互斥，
-  post 侧与 `mhc.asc_hc_post` 互斥。Ascend 侧只支持 `hc_mult=4`，且仅 A5（Ascend 950）可用，
-  要求 `bfloat16` 输入与 `hidden % 64 == 0`；launcher 通过 `USE_TILELANG` 选择。
+  post 侧与 `mhc.asc_hc_post` 互斥。AscendC 入口统一要求 `hc_mult=4`：`mhc.asc_sinkhorn`完成 `comb` 的 Sinkhorn 均衡；
+  `mhc.asc_hc_premix` 把系数推导、Sinkhorn 与压流整段融合（需 CANN 提供带 `pre_mix` 的
+  `mhc_pre_sinkhorn` 与反向 v2）；TileLang 入口要求 `bfloat16` 输入与 `hidden % 64 == 0`；
+  launcher 通过 `USE_TILELANG` 选择。
 - 两个 override 声明同一节点，或一个声明另一个的祖先/后代节点时会冲突；可移除互斥入口，
   或使用 `fqns` 缩小范围。
 

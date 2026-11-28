@@ -6,10 +6,10 @@
 """V4.1 mHC overrides; both preserve the cross-layer pre-mix graph.
 
 ``asc_sinkhorn`` fuses the Sinkhorn projection only; ``asc_hc_premix`` fuses the
-coefficient derivation, the projection and the collapse through the experimental
-``mhc_pre_sinkhorn_premix`` operator (Ascend 950 only, ``hc_mult=4``,
-``sinkhorn_iters=20``, and a last dim the kernel accepts). Both select the same
-``HcPre.Config`` node, so at most one is enabled at a time.
+coefficient derivation, the projection and the collapse through
+``cann_ops_transformer.mhc_pre_sinkhorn`` and its optional ``pre_mix`` operand
+(``hc_mult=4``, ``sinkhorn_iters=20``, and a last dim the kernel accepts). Both
+select the same ``HcPre.Config`` node, so at most one is enabled at a time.
 """
 
 from dataclasses import dataclass
@@ -18,8 +18,8 @@ import torch
 import torch_npu
 from torchtitan.config import derive, override
 
-import torchtitan_npu.ops.ascendc.mhc  # noqa: F401
 from torchtitan_npu.models.deepseek_v4_1.mhc import HcPost, HcPre
+from torchtitan_npu.ops.ascendc.mhc import allow_hf32, schema_arguments
 
 
 class AscV41HcPre(HcPre):
@@ -58,23 +58,33 @@ class AscV41HcPrePremix(HcPre):
     class Config(HcPre.Config):
         pass
 
+    def __init__(self, config: Config):
+        super().__init__(config)
+        # Reading the schema per call breaks ``torch.compile``: Dynamo cannot
+        # iterate the C++ argument list.  Ask once and branch on a plain bool.
+        arguments = schema_arguments(torch.ops.cann_ops_transformer.mhc_pre_sinkhorn)
+        self._accepts_hf32 = arguments is not None and "enable_hf32" in arguments
+
     def forward(
         self, x_BLHcD: torch.Tensor, pre_mix_BLHc: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # The kernel collapses with the cross-layer mix and returns ``hin``
         # already reduced to one stream. The mixing parameters stay fp32 for the
         # kernel even when mixed precision casts the module.
-        h_in, h_post, h_res, h_pre, *_ = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn_premix(
+        h_in, h_post, h_res, h_pre, *_ = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn(
             x_BLHcD,
             self.hc_fn.float(),
             self.hc_scale.float(),
             self.hc_base.float(),
-            pre_mix_BLHc,
             self.hc_mult,
             self.sinkhorn_iters,
             self.hc_eps,
             self.norm_eps,
-            True,  # needBackward: hPre must stay valid for the next sub-layer
+            True,  # outFlag: hPre must stay valid for the next sub-layer
+            pre_mix_BLHc,  # cross-layer mix; the unified schema keeps it last
+            # The shipped schema leaves HF32 to the dispatch, which reads the
+            # switch itself; only builds that declare it take it explicitly.
+            **({"enable_hf32": allow_hf32()} if self._accepts_hf32 else {}),
         )
         h_res = h_res.reshape(*x_BLHcD.shape[:-2], self.hc_mult, self.hc_mult)
         return h_in.to(x_BLHcD.dtype), h_pre, h_post, h_res
@@ -96,7 +106,7 @@ def asc_sinkhorn(cfg: HcPre.Config) -> AscV41HcPre.Config:
     return derive(cfg, AscV41HcPre.Config)
 
 
-# The experimental operator is specialised for these two values; anything else
+# The operator is specialised for these two values; anything else
 # changes the arithmetic without saying so.
 _PREMIX_HC_MULT = 4
 _PREMIX_SINKHORN_ITERS = 20
@@ -105,17 +115,32 @@ _PREMIX_SINKHORN_ITERS = 20
 def _require_premix_operator() -> None:
     """Reject ``asc_hc_premix`` before the model is built when it cannot run."""
     ops_ns = getattr(torch.ops, "cann_ops_transformer", None)
-    if ops_ns is None or getattr(ops_ns, "mhc_pre_sinkhorn_premix", None) is None:
+    forward = None if ops_ns is None else getattr(ops_ns, "mhc_pre_sinkhorn", None)
+    if forward is None:
         raise RuntimeError(
-            "mhc.asc_hc_premix needs the experimental mhc_pre_sinkhorn_premix operator, "
+            "mhc.asc_hc_premix needs mhc_pre_sinkhorn from cann_ops_transformer, "
             "which this CANN build does not provide; use mhc.asc_sinkhorn instead"
+        )
+    # A nine-argument ``mhc_pre_sinkhorn`` predates the cross-layer mix; the
+    # probe keeps a mixed build from failing on the first mHC call instead.
+    arguments = schema_arguments(forward)
+    if arguments is not None and "pre_mix" not in arguments:
+        raise RuntimeError(
+            "mhc.asc_hc_premix needs the mhc_pre_sinkhorn schema with the optional pre_mix "
+            "operand; this CANN build registers the nine-argument form only, "
+            "use mhc.asc_sinkhorn instead"
+        )
+    if getattr(ops_ns, "mhc_pre_sinkhorn_backward_v2", None) is None:
+        raise RuntimeError(
+            "mhc.asc_hc_premix needs mhc_pre_sinkhorn_backward_v2 to train the premix "
+            "parameter, which this CANN build does not provide; use mhc.asc_sinkhorn instead"
         )
 
 
 @override(
     target=HcPre.Config,
     exact=True,
-    description="V4.1 single-pass mHC fused into mhc_pre_sinkhorn_premix (Ascend 950)",
+    description="V4.1 single-pass mHC fused into mhc_pre_sinkhorn (pre_mix path)",
 )
 def asc_hc_premix(cfg: HcPre.Config) -> AscV41HcPrePremix.Config:
     # Checked here rather than in forward(): the factory sees the model config

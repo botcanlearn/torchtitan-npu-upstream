@@ -164,10 +164,20 @@ class TestMHcAdapters:
         torch.testing.assert_close(mixes.grad, ref_mixes.grad, rtol=1e-5, atol=1e-7)
 
     def test_premix_override_selects_premix_adapter(self):
-        cfg = model_registry("deepseek_v4_1_debugmodel").model
-        apply_overrides(OverrideConfig(imports=[MHC_PREMIX_OVERRIDE]), cfg)
+        from torchtitan_npu.override.deepseek_v4_1 import mhc as fused
         from torchtitan_npu.override.deepseek_v4_1.mhc import AscV41HcPrePremix
 
+        cfg = model_registry("deepseek_v4_1_debugmodel").model
+        try:
+            fused._require_premix_operator()
+        except RuntimeError:
+            # A CANN build without the unified operator must reject the entry at
+            # build time instead of failing on the first mHC call.
+            with pytest.raises(RuntimeError, match="use mhc.asc_sinkhorn"):
+                apply_overrides(OverrideConfig(imports=[MHC_PREMIX_OVERRIDE]), cfg)
+            return
+
+        apply_overrides(OverrideConfig(imports=[MHC_PREMIX_OVERRIDE]), cfg)
         for layer in cfg.layers[:6]:
             assert isinstance(layer.hc_attn_pre, AscV41HcPrePremix.Config)
             assert isinstance(layer.hc_ffn_pre, AscV41HcPrePremix.Config)
@@ -190,7 +200,10 @@ class TestMHcAdapters:
         pre_mix = torch.full((batch, seq, n), 0.25, dtype=torch.float32)
         seen = {}
 
-        def premix_op(x, phi, alpha, bias, premix, hc_mult, num_iters, hc_eps, norm_eps, out_flag):
+        def premix_op(
+            x, phi, alpha, bias, hc_mult, num_iters, hc_eps, norm_eps, out_flag, premix, **hf32_kwargs
+        ):
+            seen["hf32_kwargs"] = hf32_kwargs
             seen["premix"] = premix
             seen["out_flag"] = out_flag
             pre = torch.full((batch, seq, n), 0.25, dtype=torch.float32)
@@ -200,7 +213,7 @@ class TestMHcAdapters:
             empty = torch.empty(0)
             return (hin, post, comb.reshape(batch, seq, n * n), pre, empty, empty, empty, empty)
 
-        monkeypatch.setattr(torch_mod.ops.cann_ops_transformer, "mhc_pre_sinkhorn_premix", premix_op)
+        monkeypatch.setattr(torch_mod.ops.cann_ops_transformer, "mhc_pre_sinkhorn", premix_op)
 
         with torch.no_grad():
             y, pre, post, comb = module(x, pre_mix)
@@ -227,9 +240,9 @@ class TestMHcAdapters:
         pre_mix = torch.full((batch, seq, n), 0.25, dtype=torch.float32)
         seen = {}
 
-        def premix_op(x, phi, alpha, bias, premix, hc_mult, num_iters, hc_eps, norm_eps, need_backward):
+        def premix_op(x, phi, alpha, bias, hc_mult, num_iters, hc_eps, norm_eps, out_flag, premix):
             seen["premix"] = premix
-            seen["need_backward"] = need_backward
+            seen["out_flag"] = out_flag
             pre = torch.full((batch, seq, n), 0.25, dtype=torch.float32)
             post = torch.ones(batch, seq, n, dtype=torch.float32)
             comb = torch.full((batch, seq, n, n), 1.0 / n, dtype=torch.float32)
@@ -237,53 +250,62 @@ class TestMHcAdapters:
             empty = torch.empty(0)
             return (hin, post, comb.reshape(batch, seq, n * n), pre, empty, empty, empty, empty)
 
-        monkeypatch.setattr(torch_mod.ops.cann_ops_transformer, "mhc_pre_sinkhorn_premix", premix_op)
+        monkeypatch.setattr(torch_mod.ops.cann_ops_transformer, "mhc_pre_sinkhorn", premix_op)
 
         y, pre, post, comb = module(x, pre_mix)
 
         assert seen["premix"] is pre_mix
-        assert seen["need_backward"] is True
+        assert seen["out_flag"] is True
         torch.testing.assert_close(y, module.collapse(x, pre_mix), rtol=0, atol=0)
         assert comb.shape == (batch, seq, n, n)
 
-    # --- mhc_pre_sinkhorn_premix backward ---------------------------------
-    #
     # The forward tests above replace the op with a plain Python callable, so
-    # ``register_autograd`` never runs and ``_mhc_pre_sinkhorn_premix_backward``
-    # had no coverage at all.  These call it directly with a fake ctx and a
-    # recording kernel: they pin the operand order, the gradient-slot
-    # alignment, and every "missing gradient" branch.
+    # ``register_autograd`` never runs and the backward has no coverage there.
+    # These cases call it directly with a fake ctx and a recording kernel: they
+    # pin the operand order, the gradient-slot alignment, and every "missing
+    # gradient" branch.
 
     @staticmethod
-    def _premix_backward_fixture(*, with_premix: bool):
+    def _premix_backward_fixture(*, with_premix: bool, slot: bool | None = None):
         from types import SimpleNamespace
 
         batch, seq, n, dim = 2, 3, 4, 8
         mix = (2 + n) * n
         premix = torch.randn(batch, seq, n) if with_premix else None
+        if slot is None:
+            slot = with_premix
         saved = (
             torch.randn(batch, seq, n, dim),  # x
             torch.randn(mix, n * dim),  # phi
             torch.randn(3),  # alpha
             torch.randn(mix),  # bias
-            premix,
+            # V4 keeps the original nine-tensor layout; V4.1 stores ``premix``.
+            *((premix,) if with_premix else ()),
             torch.randn(batch, seq, n),  # h_pre
             torch.randn(batch, seq, n),  # hc_before_norm
             torch.randn(batch, seq),  # inv_rms
             torch.randn(batch, seq),  # sum_out
             torch.randn(batch, seq),  # norm_out
         )
-        return SimpleNamespace(saved_tensors=saved, hc_eps=1e-6), saved
+        ctx = SimpleNamespace(
+            saved_tensors=saved,
+            hc_eps=1e-6,
+            has_premix=with_premix,
+            num_inputs=10 if slot else 9,
+        )
+        return ctx, saved
 
     @staticmethod
-    def _install_recording_backward(monkeypatch, *, empty_grad_premix: bool = False):
+    def _install_recording_premix_backward(monkeypatch, *, empty_grad_premix: bool = False):
+        """Stub ``mhc_pre_sinkhorn_backward_v2`` (the V4.1 formula)."""
         import torch as torch_mod
 
         recorded = {}
 
-        def premix_backward(*args):
+        def premix_backward(*args, **kwargs):
             recorded["args"] = args
-            premix_arg = args[12]
+            recorded["kwargs"] = kwargs
+            premix_arg = kwargs.get("pre_mix")
             if premix_arg is not None and not empty_grad_premix:
                 grad_premix = torch.full_like(premix_arg, 0.5)
             else:
@@ -296,12 +318,36 @@ class TestMHcAdapters:
                 grad_premix,
             )
 
-        # ``raising=False``: the backward op only exists once the CANN package
-        # ships the experimental kernel, and this stub replaces it either way.
+        # ``raising=False``: the op only exists once the CANN package ships it and
+        # this stub replaces it either way.
         monkeypatch.setattr(
             torch_mod.ops.cann_ops_transformer,
-            "mhc_pre_sinkhorn_premix_backward",
+            "mhc_pre_sinkhorn_backward_v2",
             premix_backward,
+            raising=False,
+        )
+        return recorded
+
+    @staticmethod
+    def _install_recording_v4_backward(monkeypatch):
+        """Stub ``mhc_pre_sinkhorn_backward`` (the untouched V4 formula)."""
+        import torch as torch_mod
+
+        recorded = {}
+
+        def v4_backward(*args):
+            recorded["args"] = args
+            return (
+                torch.zeros_like(args[3]),  # grad_x
+                torch.zeros_like(args[4]),  # grad_phi
+                torch.zeros_like(args[5]),  # grad_alpha
+                torch.zeros_like(args[6]),  # grad_bias
+            )
+
+        monkeypatch.setattr(
+            torch_mod.ops.cann_ops_transformer,
+            "mhc_pre_sinkhorn_backward",
+            v4_backward,
             raising=False,
         )
         return recorded
@@ -310,31 +356,89 @@ class TestMHcAdapters:
         from torchtitan_npu.ops.ascendc import mhc as mhc_ops
 
         ctx, saved = self._premix_backward_fixture(with_premix=True)
-        recorded = self._install_recording_backward(monkeypatch)
+        recorded = self._install_recording_premix_backward(monkeypatch)
         grad_h_pre = torch.randn(2, 3, 4)
+        # The backward must follow the same run-wide switch the forward reads.
+        monkeypatch.setattr(mhc_ops, "allow_hf32", lambda: False)
 
-        grads = mhc_ops._mhc_pre_sinkhorn_premix_backward(
+        grads = mhc_ops._mhc_pre_sinkhorn_autograd_backward(
             ctx, torch.randn(2, 3, 8), torch.randn(2, 3, 4), torch.randn(2, 3, 16), grad_h_pre, None
         )
 
         args = recorded["args"]
-        # 14 tensor operands + hc_eps, in the order the kernel documents.
-        assert len(args) == 15
-        assert args[12] is saved[4]  # premix
-        assert args[13] is grad_h_pre  # gradPre
-        assert args[14] == ctx.hc_eps  # hcEps
-        # 10 autograd slots: 4 parameter grads, premix, then 5 attribute slots.
+        kwargs = recorded["kwargs"]
+        # 12 positional tensors; the premix pair travels keyword-only.
+        assert len(args) == 12
+        assert kwargs["pre_mix"] is saved[4]
+        assert kwargs["grad_pre"] is grad_h_pre
+        assert kwargs["hc_eps"] == ctx.hc_eps
+        assert kwargs["enable_hf32"] is False
+        # 10 autograd slots: 4 parameter grads, 5 attribute slots, then pre_mix.
         assert len(grads) == 10
-        assert grads[5:] == (None,) * 5
-        torch.testing.assert_close(grads[4], torch.full_like(saved[4], 0.5))
+        assert grads[4:9] == (None,) * 5
+        torch.testing.assert_close(grads[9], torch.full_like(saved[4], 0.5))
+
+    def test_setup_context_keeps_the_premix_operand(self):
+        """The real setup path (not a hand-built ctx) stores the operand."""
+        from torchtitan_npu.ops.ascendc import mhc as mhc_ops
+
+        class _Context:
+            def save_for_backward(self, *tensors):
+                self.saved = tensors
+
+            def set_materialize_grads(self, enabled):
+                self.materialize_grads = enabled
+
+            def mark_non_differentiable(self, *tensors):
+                self.non_differentiable = tensors
+
+        ctx = _Context()
+        x = torch.randn(2, 3, 4, 8)
+        phi = torch.randn(24, 32)
+        alpha = torch.randn(3)
+        bias = torch.randn(24)
+        premix = torch.randn(2, 3, 4)
+        outputs = [torch.zeros(1) for _ in range(8)]
+
+        mhc_ops._mhc_pre_sinkhorn_setup_context(
+            ctx=ctx,
+            inputs=[x, phi, alpha, bias, 4, 20, 1e-6, 2e-6, True, premix],
+            output=outputs,
+        )
+
+        # ``x, phi, alpha, bias, premix`` then the five saved intermediates.
+        assert len(ctx.saved) == 10
+        assert ctx.saved[4] is premix
+        assert ctx.has_premix is True
+        assert ctx.num_inputs == 10
+        assert ctx.hc_eps == 1e-6
+        assert ctx.materialize_grads is False
+        assert ctx.non_differentiable == tuple(outputs[4:])
+
+    def test_premix_adapter_probes_hf32_once_at_construction(self, monkeypatch):
+        """``torch.compile`` cannot read the schema per call, so probe at build time."""
+        from torchtitan_npu.override.deepseek_v4_1 import mhc as fused
+
+        monkeypatch.setattr(fused, "schema_arguments", lambda op: frozenset({"x", "pre_mix", "enable_hf32"}))
+        assert fused.AscV41HcPrePremix.Config(dim=8).build()._accepts_hf32 is True
+
+        # The shipped schema leaves HF32 to the dispatch: stay silent.
+        monkeypatch.setattr(fused, "schema_arguments", lambda op: frozenset({"x", "pre_mix"}))
+        assert fused.AscV41HcPrePremix.Config(dim=8).build()._accepts_hf32 is False
+
+        # An unreadable schema must not turn into an unexpected keyword argument.
+        monkeypatch.setattr(fused, "schema_arguments", lambda op: None)
+        assert fused.AscV41HcPrePremix.Config(dim=8).build()._accepts_hf32 is False
 
     def test_premix_backward_zero_fills_missing_output_gradients(self, monkeypatch):
         from torchtitan_npu.ops.ascendc import mhc as mhc_ops
 
         ctx, saved = self._premix_backward_fixture(with_premix=True)
-        recorded = self._install_recording_backward(monkeypatch)
+        recorded = self._install_recording_premix_backward(monkeypatch)
 
-        mhc_ops._mhc_pre_sinkhorn_premix_backward(ctx, None, torch.randn(2, 3, 4), torch.randn(2, 3, 16), None, None)
+        mhc_ops._mhc_pre_sinkhorn_autograd_backward(
+            ctx, None, torch.randn(2, 3, 4), torch.randn(2, 3, 16), None, None
+        )
 
         args = recorded["args"]
         x = saved[0]
@@ -344,30 +448,49 @@ class TestMHcAdapters:
         assert torch.count_nonzero(args[0]).item() == 0
         # pre was unused downstream: gradPre is zero-filled so the kernel still
         # receives a tensor and the parameters keep their hIn-path gradient.
-        torch.testing.assert_close(args[13], torch.zeros_like(saved[4]))
-
-    def test_premix_backward_drops_absent_premix(self, monkeypatch):
-        from torchtitan_npu.ops.ascendc import mhc as mhc_ops
-
-        ctx, _ = self._premix_backward_fixture(with_premix=False)
-        recorded = self._install_recording_backward(monkeypatch)
-
-        grads = mhc_ops._mhc_pre_sinkhorn_premix_backward(
-            ctx, torch.randn(2, 3, 8), torch.randn(2, 3, 4), torch.randn(2, 3, 16), None, None
-        )
-
-        assert recorded["args"][12] is None
-        assert recorded["args"][13] is None
-        assert grads[4] is None
+        torch.testing.assert_close(recorded["kwargs"]["grad_pre"], torch.zeros_like(saved[4]))
 
     def test_premix_backward_drops_empty_kernel_gradient(self, monkeypatch):
         from torchtitan_npu.ops.ascendc import mhc as mhc_ops
 
         ctx, _ = self._premix_backward_fixture(with_premix=True)
-        self._install_recording_backward(monkeypatch, empty_grad_premix=True)
+        self._install_recording_premix_backward(monkeypatch, empty_grad_premix=True)
 
-        grads = mhc_ops._mhc_pre_sinkhorn_premix_backward(
+        grads = mhc_ops._mhc_pre_sinkhorn_autograd_backward(
             ctx, torch.randn(2, 3, 8), torch.randn(2, 3, 4), torch.randn(2, 3, 16), torch.randn(2, 3, 4), None
         )
 
-        assert grads[4] is None
+        assert grads[9] is None
+
+    def test_absent_premix_keeps_the_v4_formula(self, monkeypatch):
+        """A ten-slot schema without the operand still answers with v1."""
+        from torchtitan_npu.ops.ascendc import mhc as mhc_ops
+
+        ctx, _ = self._premix_backward_fixture(with_premix=False, slot=True)
+        recorded = self._install_recording_v4_backward(monkeypatch)
+
+        grads = mhc_ops._mhc_pre_sinkhorn_autograd_backward(
+            ctx, torch.randn(2, 3, 8), torch.randn(2, 3, 4), torch.randn(2, 3, 16), None, None
+        )
+
+        # v1 takes hc_eps positionally, right after norm_out.
+        assert len(recorded["args"]) == 13
+        assert recorded["args"][12] == ctx.hc_eps
+        # The schema still owns the trailing slot, so it is padded with ``None``.
+        assert len(grads) == 10
+        assert grads[9] is None
+
+    def test_backward_without_premix_keeps_the_v4_contract(self, monkeypatch):
+        from torchtitan_npu.ops.ascendc import mhc as mhc_ops
+
+        ctx, _ = self._premix_backward_fixture(with_premix=False, slot=False)
+        recorded = self._install_recording_v4_backward(monkeypatch)
+
+        grads = mhc_ops._mhc_pre_sinkhorn_autograd_backward(
+            ctx, torch.randn(2, 3, 8), torch.randn(2, 3, 4), torch.randn(2, 3, 16), None, None
+        )
+
+        # Nine slots: the V4 schema has no pre_mix operand.
+        assert len(grads) == 9
+        assert grads[4:] == (None,) * 5
+        assert recorded["args"][12] == ctx.hc_eps

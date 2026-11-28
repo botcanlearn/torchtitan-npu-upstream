@@ -96,7 +96,7 @@ def _run_registered_op(namespace, schema, backward_calls):
     _declare_op(namespace, schema)
     torch.library.register_autograd(
         f"{namespace}::mhc_pre_sinkhorn",
-        mhc_ops._mhc_pre_sinkhorn_backward,
+        mhc_ops._mhc_pre_sinkhorn_autograd_backward,
         setup_context=mhc_ops._mhc_pre_sinkhorn_setup_context,
     )
 

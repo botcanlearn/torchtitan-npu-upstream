@@ -9,10 +9,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
-import torch_npu
 
-import torchtitan_npu.ops.ascendc.mhc  # noqa: F401
 from torchtitan_npu.models.deepseek_v4.mhc import HcPost, HcPre
+from torchtitan_npu.ops.ascendc.mhc import allow_hf32, schema_arguments
 
 
 @lru_cache(maxsize=1)
@@ -23,20 +22,13 @@ def _mhc_pre_sinkhorn_accepts_hf32() -> bool:
     ``bool enable_hf32=True`` next to the legacy nine positional arguments;
     older CANN packages reject the kwarg, so probe once before passing it.
     """
-    schema = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn.default._schema
-    return any(arg.name == "enable_hf32" for arg in schema.arguments)
+    arguments = schema_arguments(torch.ops.cann_ops_transformer.mhc_pre_sinkhorn)
+    return arguments is not None and "enable_hf32" in arguments
 
 
 def _aclnn_allow_hf32() -> bool:
-    """The run-wide ACLNN HF32 switch; falls back to ``True`` when absent.
-
-    ``True`` matches the behavior of the packages that predate the switch,
-    mirroring the fallback ops-transformer itself applies.
-    """
-    try:
-        return bool(torch_npu.npu.aclnn.allow_hf32)
-    except AttributeError:
-        return True
+    """The run-wide ACLNN HF32 switch, shared with the V4.1 premix path."""
+    return allow_hf32()
 
 
 class AscHcPre(HcPre):

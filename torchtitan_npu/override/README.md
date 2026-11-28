@@ -458,7 +458,7 @@ kernel；使用它需要额外安装与当前 CANN 匹配的 `pypto` runtime，�
 | `sparse_attn.asc` | `CompressedSparseInnerAttention2.Config`（精确匹配） | `AscV41SparseAttention.Config` | AscendC attention 前后向；`topk_scores` 作为教师边。该 config 按**自己的 `compress_ratio`** 预计算 attention 与 indexer 的 metadata（每个几何每 microbatch 一次，全层共享同一份 entry），因此没有单独的 metadata 入口；kernel geometry 是该 config 自己的必需字段，由 override 参数一次写入，默认值为 V4.1-Flash 形状。本入口不声明任何量化：量化 selector 的 metadata 属于量化后的 attention backend，它替换本节点并自建 entry（见下文），本入口在那条路径上不生效 |
 | `lightning_indexer.asc` | `InnerIndexer.Config`（精确匹配） | `AscInnerIndexer.Config` | 融合 LI 选分与 SLIKG 反向；它的两条 AI_CPU metadata 由 `sparse_attn.asc` 的几何一并预计算，随同一份 map entry 下发 |
 | `mhc.asc_sinkhorn` | `HcPre.Config`（精确匹配） | `AscV41HcPre.Config` | 仅融合 Sinkhorn，保留调用方的 pre mix |
-| `mhc.asc_hc_premix` | `HcPre.Config`（精确匹配） | `AscV41HcPrePremix.Config` | 融合 Sinkhorn 与压流，算子 `mhc_pre_sinkhorn_premix`。**约束**：仅 A5（`premix` 输入）、`hc_mult=4`、`sinkhorn_iters=20`，且 950 上要求 `c ∈ {4096, 7168}`（V4.1-Flash 的 `dim=5120` 当前不适用；A2/A3 要求 `c` 128 对齐）。工厂函数在 build 前校验这些条件，不满足时直接报错。与 `asc_sinkhorn` 同 target，互斥 |
+| `mhc.asc_hc_premix` | `HcPre.Config`（精确匹配） | `AscV41HcPrePremix.Config` | 融合 Sinkhorn 与压流。（前向 `mhc_pre_sinkhorn`，反向 `mhc_pre_sinkhorn_backward_v2`）。**约束**：`hc_mult=4`、`sinkhorn_iters=20`，且 `c` 需 128 对齐、取值范围 [1, 100000]。与 `asc_sinkhorn` 同 target，互斥。 |
 | `mhc.asc_hc_post` | `HcPost.Config`（精确匹配） | `AscV41HcPost.Config` | `cann_ops_transformer.ops.mhc_post` |
 | `tilelang.tilelang_hc_pre` | `HcPre.Config`（精确匹配） | `TilelangV41HcPre.Config` | 单趟 mHC pre，由 TileKernels Split/Apply 与 `torch_npu.npu_mhc_sinkhorn` 完成 |
 | `tilelang.tilelang_hc_post` | `HcPost.Config`（精确匹配） | `TilelangV41HcPost.Config` | 由外部 TileKernels `mhc_post` 算子完成 mHC post；与 `mhc.asc_hc_post` 同 target，互斥 |
