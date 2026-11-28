@@ -3,14 +3,15 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-# Upstream-PR: https://github.com/pytorch/torchtitan/pull/5769
 
-"""Use signed 64-bit SDC replay digests for NPU transfer and comparison.
+# Pending upstream PR: https://github.com/pytorch/torchtitan/pull/5769
+# Pending upstream PR: https://github.com/pytorch/torchtitan/pull/6412
+
+"""Use signed 64-bit SDC replay digests and support sparse COO tensors.
 
 This module is the sole patch owner of ``SDCReplayer._signature``; the upstream
-constructor, capability probe and replay lifecycle remain unchanged.
-Remove this module and its import entries after the TorchTitan dependency
-includes PR #5769.
+constructor, capability probe and replay lifecycle remain unchanged. Remove this
+module after the TorchTitan dependency includes the PRs.
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ from torchtitan.observability.sdc_replayer import (
     _local_tensor,
     _ReplaySignature,
 )
+
+_FNV64_PRIME = 0x100000001B3
 
 
 def _npu_signature(self: SDCReplayer, loss: torch.Tensor) -> _ReplaySignature:
@@ -42,6 +45,24 @@ def _npu_signature(self: SDCReplayer, loss: torch.Tensor) -> _ReplaySignature:
         schema.append((name, tuple(local.shape), str(local.dtype), str(local.device)))
         if local.numel() == 0:
             digests.append(torch.zeros((), dtype=torch.int64, device=digest_device))
+            return
+        if local.layout == torch.sparse_coo:
+            coalesced = local.coalesce()
+            # Separate torch.hash_tensor calls on indices and values use order-insensitive
+            # XOR and miss value swaps between rows. Weight stored words in coalesced order
+            # by powers of the 64-bit FNV prime modulo 2**64 (upstream #6412).
+            word_dtype = {1: torch.uint8, 2: torch.int16}.get(coalesced.values().element_size(), torch.int32)
+            words = torch.cat(
+                [
+                    part.clone(memory_format=torch.contiguous_format).view(-1).view(word_dtype)
+                    for part in (coalesced.indices(), coalesced.values())
+                ]
+            )
+            weights = torch.full_like(words, _FNV64_PRIME, dtype=torch.int64).cumprod(0)
+            # Include the index count to distinguish identical words split at a
+            # different boundary between coordinates and values.
+            digest = weights.mul_(words).sum() + words.numel() + coalesced.indices().numel()
+            digests.append(digest.to(digest_device))
             return
         if local.is_complex():
             local = torch.view_as_real(local)

@@ -72,7 +72,8 @@ class HostEngramTable(EngramTable):
         self._efsdp_size = 1
         self._ep_rank = 0
         self._ep_size = 1
-        self._pending_sparse_grad: torch.Tensor | None = None
+        self._pending_sparse_grad: torch.Tensor | None
+        self.register_buffer("_pending_sparse_grad", None, persistent=False)
         self._grad_keepalive = torch.zeros((), requires_grad=True)
         self._replica_group: dist.ProcessGroup | None = None
         self._replica_size = 1
@@ -297,8 +298,9 @@ class HostEngramTable(EngramTable):
         ).coalesce()
 
     def _apply(self, fn, recurse=True):
-        """Apply device transforms to metadata while keeping weight on CPU."""
+        """Apply device transforms to metadata while keeping weight and pending sparse grad on CPU."""
         weight = self._parameters.pop("weight")
+        pending_sparse_grad = self._buffers.pop("_pending_sparse_grad", None)
         assert isinstance(weight, torch.nn.Parameter)
         try:
             result = super()._apply(fn, recurse=recurse)
@@ -312,6 +314,7 @@ class HostEngramTable(EngramTable):
                 )
                 weight = torch.nn.Parameter(materialized, requires_grad=weight.requires_grad)
             self.register_parameter("weight", weight)
+            self.register_buffer("_pending_sparse_grad", pending_sparse_grad, persistent=False)
             self._mark_host_weight()
         return result
 

@@ -7,9 +7,11 @@
 - https://github.com/pytorch/torchtitan/pull/4708
 - https://github.com/pytorch/torchtitan/pull/4763
 - https://github.com/pytorch/torchtitan/pull/5323
+- https://github.com/pytorch/torchtitan/pull/5769
 - https://github.com/pytorch/torchtitan/pull/6180
 - https://github.com/pytorch/torchtitan/pull/6290
 - https://github.com/pytorch/torchtitan/pull/6315
+- https://github.com/pytorch/torchtitan/pull/6412
 - https://github.com/pytorch/pytorch/pull/201621
 -->
 
@@ -49,6 +51,8 @@ grep -L -E "Pending upstream PR: https://github.com/pytorch/(torchtitan|pytorch)
 | [#6180](https://github.com/pytorch/torchtitan/pull/6180) | 回移 override 成功日志分组，对应 `config/override.py` |
 | [#6290](https://github.com/pytorch/torchtitan/pull/6290) | 将 `--print-config` 与 `debug.print_config` 配置输出压缩为无损扁平折叠 JSON，对应 `config/format.py`、`config/loader.py` 和 `trainer.py` |
 | [#6315](https://github.com/pytorch/torchtitan/pull/6315) | 对分组 override 日志中的索引 FQN 做 `{start..end}` 无损范围折叠，对应 `config/format.py` 和 `config/override.py` |
+| [#5769](https://github.com/pytorch/torchtitan/pull/5769) | 将 `SDCReplayer` 重放摘要按位视为 `int64` 兼容 NPU 比较，对应 `observability/sdc_replayer.py` |
+| [#6412](https://github.com/pytorch/torchtitan/pull/6412) | 支持 `SDCReplayer` 对稀疏梯度与 buffer 计算 coalesced 有序摘要，对应 `observability/sdc_replayer.py` |
 
 当前依赖固定为 `requirements.txt` 中的 commit。已由该基线提供的 AuxLoss、EMA、DistMuon NPU storage 检查和 EP ready-node 去重不再保留本地 backport；随上游 EP chunk pass 删除的旧 chunk 补丁一并退役。
 

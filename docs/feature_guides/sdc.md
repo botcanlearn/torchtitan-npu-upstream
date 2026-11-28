@@ -9,7 +9,7 @@ Eager 模式通过 torch-npu 原生环境变量启用，Compile 模式通过 `--
 本文说明通过 `config.sdc` 或 torch-npu 原生开关启用的 NPU SDC。
 上游重放一致性检查使用 `config.sdc_replayer`，通用用法与约束见[上游说明](https://github.com/pytorch/torchtitan/blob/dc3985ad4912f67f71d5a125f2fdf40144ec8354/torchtitan/observability/silent_data_corruption.md)。
 该入口与本文的 `config.sdc` 检测开关及 torch-npu 原生 SDC 开关互斥。
-本仓通过临时 patch 将重放摘要按位视为 `int64`，兼容 NPU 比较；不改哈希算法或重放流程。
+本仓通过临时 patch 将重放摘要按位视为 `int64` 兼容 NPU 比较，并对稀疏 buffer/梯度按 coalesced 顺序计算有序摘要（上游跟踪 `pytorch/torchtitan#6412`），不改其余重放流程；DeepSeek-V4.1 的 `HostEngramTable._pending_sparse_grad` 注册为 non-persistent buffer 后可自动参与重放恢复与摘要校验。
 
 ## 启动入口
 
