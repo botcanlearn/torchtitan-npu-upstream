@@ -108,8 +108,11 @@ def test_native_compressor_without_fused_pooling_traces_packed_documents(monkeyp
         ),
         config,
     )
-    compressor = config.layers[0].attention.compressor.build()
-    x = torch.randn(8, 16)
+    with torch.random.fork_rng(devices=[]):
+        torch.default_generator.manual_seed(137)
+        compressor = config.layers[0].attention.compressor.build()
+        compressor.init_states(buffer_device=torch.device("cpu"))
+        x = torch.randn(8, 16)
     positions = torch.arange(8)
     aligned = torch.tensor([0, 4, 8, 8], dtype=torch.int32)
     partial = torch.tensor([0, 3, 8, 8], dtype=torch.int32)

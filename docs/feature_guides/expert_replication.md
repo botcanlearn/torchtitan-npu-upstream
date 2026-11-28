@@ -35,7 +35,19 @@ def deepseek_v4_8p_expert_no_replica():
 MODULE=my_recipes CONFIG=deepseek_v4_8p_expert_no_replica NGPU=8 bash scripts/run_train.sh
 ```
 
-DeepSeek-V4.1 传入相同的 `ParallelismConfig` 即可（例如 `deepseek_v4_1_debugmodel_text(parallelism=parallelism)`）。
+DeepSeek-V4.1 在构建模型配置时传入相同的 `ParallelismConfig`。以纯文本调试配方为例，在上面的自定义 recipe 中导入配置工厂，并替换返回语句。
+
+```python
+from torchtitan_npu_recipes.tests.models.deepseek_v4_1 import _make_trainer_config
+```
+
+```python
+    return _make_trainer_config(
+        "deepseek_v4_1_debugmodel_text",
+        parallelism=parallelism,
+        hf_assets_path="/path/to/DeepSeekV4.1_tokenizer",
+    )
+```
 
 | 参数范围 | 存储布局（8 卡，`dp_shard=4`、`dp_replicate=2`、`EP=4`） |
 | --- | --- |

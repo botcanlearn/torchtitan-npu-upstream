@@ -61,10 +61,30 @@ torch.library.register_autograd(
 )
 
 
-def _mhc_pre_sinkhorn_setup_context(ctx, inputs, output):
+def _mhc_pre_sinkhorn_setup_context(ctx, inputs, output, keyword_only_inputs=None):
+    """Save the operands ``mhc_pre_sinkhorn_backward`` needs.
+
+    torch calls the callback with keyword arguments, spelling the extra
+    ``keyword_only_inputs`` only once the schema declares keyword-only
+    arguments; both shapes must be accepted and the names must stay exactly as
+    torch passes them.  ops-transformer added ``*, bool enable_hf32=True``
+    (next to the optional ``pre_mix``) to ``mhc_pre_sinkhorn``; those defaults
+    only select optional features, never reach the backward formula, and the
+    fused HcPre path never passes ``pre_mix``, so the backward keeps its
+    nine-gradient contract.
+    """
     x, phi, alpha, bias = inputs[:4]
     ctx.save_for_backward(x, phi, alpha, bias, *output[3:])
+    # ``hcEps`` belongs to the stable positional prefix
+    # (x, phi, alpha, bias, hcMult, numIters, hcEps, normEps, outFlag); the
+    # optional tail appended after ``outFlag`` never shifts it.
     ctx.hc_eps = inputs[6]
+    ctx.grad_output_meta = tuple((tensor.shape, tensor.dtype, tensor.device) for tensor in output[:3])
+    # Avoid materializing gradients for outputs the graph does not consume.
+    ctx.set_materialize_grads(False)
+    # Saved auxiliary outputs are not differentiable in this backward. A premix
+    # operator that needs the h_pre gradient must use its own autograd registration.
+    ctx.mark_non_differentiable(*output[3:])
 
 
 def _mhc_pre_sinkhorn_backward(ctx, grad_h_in, grad_h_post, grad_h_res, *_):
@@ -79,6 +99,12 @@ def _mhc_pre_sinkhorn_backward(ctx, grad_h_in, grad_h_post, grad_h_res, *_):
         sum_out,
         norm_out,
     ) = ctx.saved_tensors
+
+    # Match the kernel outputs even when their metadata differs from the inputs.
+    grad_h_in, grad_h_post, grad_h_res = (
+        torch.zeros(shape, dtype=dtype, device=device) if grad is None else grad
+        for grad, (shape, dtype, device) in zip((grad_h_in, grad_h_post, grad_h_res), ctx.grad_output_meta, strict=True)
+    )
 
     grad_x, grad_phi, grad_alpha, grad_bias = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn_backward(
         grad_h_in,

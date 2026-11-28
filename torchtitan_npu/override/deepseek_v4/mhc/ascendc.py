@@ -6,39 +6,56 @@
 """Override: run DeepSeek-V4 MHC pre/post with NPU operators."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 import torch_npu
 from torchtitan.models.deepseek_v4.mhc import HcPost, HcPre
 
 import torchtitan_npu.ops.ascendc.mhc  # noqa: F401
-from torchtitan_npu.override import _IS_A5
+
+
+@lru_cache(maxsize=1)
+def _mhc_pre_sinkhorn_accepts_hf32() -> bool:
+    """Whether the installed ``mhc_pre_sinkhorn`` schema carries ``enable_hf32``.
+
+    ops-transformer (2026-11) appended ``Tensor? pre_mix`` and the keyword-only
+    ``bool enable_hf32=True`` next to the legacy nine positional arguments;
+    older CANN packages reject the kwarg, so probe once before passing it.
+    """
+    schema = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn.default._schema
+    return any(arg.name == "enable_hf32" for arg in schema.arguments)
+
+
+def _aclnn_allow_hf32() -> bool:
+    """The run-wide ACLNN HF32 switch; falls back to ``True`` when absent.
+
+    ``True`` matches the behavior of the packages that predate the switch,
+    mirroring the fallback ops-transformer itself applies.
+    """
+    try:
+        return bool(torch_npu.npu.aclnn.allow_hf32)
+    except AttributeError:
+        return True
 
 
 class AscHcPre(HcPre):
-    """HcPre backed by the hardware-specific AscendC implementation.
-
-    The modern model-dir ``HcPre`` owns its mixing parameters and calls
-    ``forward(x)``. Ascend A3 uses the fused
-    ``cann_ops_transformer.mhc_pre_sinkhorn`` path; Ascend A5 uses
-    ``torch_npu.npu_mhc_pre`` followed by ``torch_npu.npu_mhc_sinkhorn``.
-    """
+    """Run the fused AscendC mHC pre operator on A3 and A5."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(HcPre.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self._use_split_backend = _IS_A5
-
-    def _forward_fused(
+    def forward(
         self,
         x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        dtype = x.dtype
+        kwargs: dict[str, bool] = {}
+        if _mhc_pre_sinkhorn_accepts_hf32():
+            # Follow the run-wide ACLNN HF32 switch instead of the schema default.
+            kwargs["enable_hf32"] = _aclnn_allow_hf32()
         h_in, h_post, h_res, *_ = torch.ops.cann_ops_transformer.mhc_pre_sinkhorn(
-            x,
+            x.unsqueeze(0),
             self.hc_fn.float(),
             self.hc_scale.float(),
             self.hc_base.float(),
@@ -47,43 +64,10 @@ class AscHcPre(HcPre):
             self.sinkhorn.eps,
             self.norm_eps,
             True,
-        )
-        return h_in.to(dtype), h_post, h_res
-
-    def _forward_split(
-        self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        dtype = x.dtype
-        h_in, h_post, h_res, _, _, _ = torch_npu.npu_mhc_pre(
-            x,
-            self.hc_fn.float(),
-            self.hc_scale.float(),
-            self.hc_base.float(),
-            norm_eps=self.norm_eps,
-            hc_eps=self.sinkhorn.eps,
-            out_flag=1,
-            inner_precise=1,
-        )
-        h_res, _, _ = torch_npu.npu_mhc_sinkhorn(
-            h_res,
-            eps=self.sinkhorn.eps,
-            num_iters=self.sinkhorn.sinkhorn_iters,
-            out_flag=1,
-        )
-        return h_in.to(dtype), h_post, h_res
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Once A5's fused mhc_pre_sinkhorn is performance-optimized, route A3/A5 through it uniformly.
-        kernel_x = x.unsqueeze(0)
-        h_in, h_post, h_res = (
-            self._forward_split(kernel_x) if self._use_split_backend else self._forward_fused(kernel_x)
+            **kwargs,
         )
         h_res = h_res.reshape(x.shape[0], self.hc_mult, self.hc_mult)
-        return h_in.squeeze(0), h_post.squeeze(0), h_res
+        return h_in.squeeze(0).to(x.dtype), h_post.squeeze(0), h_res
 
 
 class AscHcPost(HcPost):
